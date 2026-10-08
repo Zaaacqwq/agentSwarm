@@ -1,9 +1,0 @@
-node_modules/
-dist/
-.tmp/
-.env
-.env.*
-!.env.example
-*.xcresult/
-DerivedData/
-.DS_Store
