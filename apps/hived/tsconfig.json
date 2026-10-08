@@ -1,0 +1,6 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "outDir": "../../.tmp/tsc/hived", "rootDir": ".", "types": ["bun"] },
+  "include": ["src", "test", "drizzle.config.ts"],
+  "references": [{ "path": "../../packages/core" }, { "path": "../../packages/tools" }]
+}
