@@ -3,7 +3,7 @@ import { COMMUNICATION_PACK_ID, type AgentContext, type ToolpackRegistry } from 
 import type { EventBus } from "../events/event-bus.ts";
 import type { RunStore } from "../runs/run-store.ts";
 import type { AgentRow } from "./agent-service.ts";
-import type { AgentRuntime, RuntimeEvent } from "./runtime/agent-runtime.ts";
+import { TurnError, type AgentRuntime, type RuntimeEvent } from "./runtime/agent-runtime.ts";
 import type { ResolvedEndpoint } from "../endpoints/endpoint-service.ts";
 
 export interface ManagerLimits {
@@ -108,7 +108,8 @@ export class AgentManager {
   private abort(agentId: string, reason: StopReason): boolean {
     const active = this.active.get(agentId);
     if (!active) return false;
-    active.stopReason ??= reason;
+    // Deletion wins over any earlier reason: the run row is about to disappear.
+    active.stopReason = reason === "deleted" ? "deleted" : (active.stopReason ?? reason);
     active.controller.abort(new Error(reason));
     return true;
   }
@@ -120,7 +121,7 @@ export class AgentManager {
       if (!next) return;
       const active: ActiveRun = { runId: next.id, controller: new AbortController(), stopReason: null };
       this.active.set(next.agentId, active);
-      const done = this.execute(next, active).finally(() => {
+      const done = this.execute(next, active).catch((error: unknown) => this.onCrash(next, error)).finally(() => {
         this.active.delete(next.agentId);
         this.settled.delete(done);
         const orgId = this.deps.runs.orgOf(next.id);
@@ -128,6 +129,19 @@ export class AgentManager {
         this.pump();
       });
       this.settled.add(done);
+    }
+  }
+
+  /** Last line of defence: a bookkeeping failure must never become an unhandled rejection. */
+  private onCrash(run: Run, error: unknown): void {
+    this.deps.log("error", "run crashed", { runId: run.id, agentId: run.agentId, error: String(error) });
+    const current = this.deps.runs.get(run.id);
+    if (current && (current.status === "queued" || current.status === "running")) {
+      try {
+        this.deps.runs.finish(run.id, "failed", "Internal error while running this turn");
+      } catch (finishError) {
+        this.deps.log("error", "could not mark crashed run failed", { runId: run.id, error: String(finishError) });
+      }
     }
   }
 
@@ -149,6 +163,8 @@ export class AgentManager {
     let replied = false;
     const timeout = setTimeout(() => this.abort(run.agentId, "timeout"), this.limits.runTimeoutMs);
     let toolCalls = 0;
+    let secret: string | null = null;
+    const scrub = (text: string): string => (secret && secret.length >= 8 ? text.replaceAll(secret, "[redacted]") : text);
 
     const emit = (event: RuntimeEvent): void => {
       try {
@@ -170,7 +186,7 @@ export class AgentManager {
       }
       if (event.kind === "tool_call" && ++toolCalls > this.limits.maxToolCallsPerRun) this.abort(run.agentId, "tool_limit");
       if (event.kind === "tool_result" && event.name === "send_message" && !event.isError) replied = true;
-      const activity = this.deps.runs.addActivity(run, event.kind, activityPayload(event));
+      const activity = this.deps.runs.addActivity(run, event.kind, activityPayload(event, scrub));
       this.deps.bus.publish(orgId, { type: "activity.created", activity });
     };
 
@@ -178,6 +194,7 @@ export class AgentManager {
       if (!agent) throw new Error("Agent no longer exists");
       if (!agent.endpointId) throw new Error("Agent has no model endpoint; choose one in its settings");
       const endpoint = await this.deps.resolveEndpoint(orgId, agent.endpointId);
+      secret = endpoint.apiKey;
       const grants = this.deps.grantsOf(agent.id);
       const context: AgentContext = { agentId: agent.id, orgId, runId: run.id, grants, currentGrants: () => this.deps.grantsOf(agent.id) };
       const toolset = this.deps.registry.resolve(context);
@@ -195,7 +212,7 @@ export class AgentManager {
         signal: active.controller.signal,
         onEvent: emit,
       });
-      if (active.stopReason) throw new Error(active.stopReason);
+      if (active.stopReason) throw new TurnError(active.stopReason, result.sessionEntries);
       this.deps.runs.saveSession(agent.id, result.sessionEntries);
       run = this.deps.runs.finish(run.id, "succeeded", null);
       if (!replied && channels.length > 0) {
@@ -203,9 +220,11 @@ export class AgentManager {
       }
     } catch (error) {
       const reason = active.stopReason;
-      const text = describeFailure(reason, error);
+      const text = scrub(describeFailure(reason, error));
       const status = reason === "stopped" || reason === "shutdown" || reason === "deleted" ? "interrupted" : "failed";
-      if (reason !== "deleted") {
+      const gone = reason === "deleted" || !this.deps.runs.get(run.id) || !this.deps.findAgent(run.agentId);
+      if (!gone) {
+        if (agent && error instanceof TurnError && error.sessionEntries) this.deps.runs.saveSession(agent.id, error.sessionEntries);
         run = this.deps.runs.finish(run.id, status, text);
         emit({ kind: "error", text });
         for (const channelId of channels) {
@@ -216,7 +235,7 @@ export class AgentManager {
     } finally {
       clearTimeout(timeout);
     }
-    if (active.stopReason !== "deleted") this.deps.bus.publish(orgId, { type: "run.updated", run });
+    if (this.deps.runs.get(run.id)) this.deps.bus.publish(orgId, { type: "run.updated", run });
   }
 
   private formatPrompt(messages: readonly Message[]): string {
@@ -237,17 +256,17 @@ export class AgentManager {
   }
 }
 
-function activityPayload(event: Exclude<RuntimeEvent, { kind: "usage" }>): Record<string, unknown> {
+function activityPayload(event: Exclude<RuntimeEvent, { kind: "usage" }>, scrub: (t: string) => string): Record<string, unknown> {
   switch (event.kind) {
     case "assistant_text":
     case "thinking":
     case "notice":
     case "error":
-      return { text: clip(event.text) };
+      return { text: clip(scrub(event.text)) };
     case "tool_call":
       return { toolCallId: event.toolCallId, name: event.name, args: event.args };
     case "tool_result":
-      return { toolCallId: event.toolCallId, name: event.name, isError: event.isError, text: clip(event.text) };
+      return { toolCallId: event.toolCallId, name: event.name, isError: event.isError, text: clip(scrub(event.text)) };
   }
 }
 

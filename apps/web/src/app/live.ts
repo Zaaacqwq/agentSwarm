@@ -60,7 +60,12 @@ export function applyEvent(client: QueryClient, event: ServerEvent): void {
   switch (event.type) {
     case "message.created": {
       const { message } = event;
-      client.setQueryData<MessagePage>(qk.messages(message.channelId), (page) =>
+      const key = qk.messages(message.channelId);
+      if (client.getQueryState(key)?.fetchStatus === "fetching" || !client.getQueryData(key)) {
+        // A fetch in flight may predate this message; refetch rather than patch a page we do not have yet.
+        void client.invalidateQueries({ queryKey: key });
+      }
+      client.setQueryData<MessagePage>(key, (page) =>
         page && !page.messages.some((m) => m.id === message.id)
           ? { ...page, messages: [...page.messages, message] }
           : page,
@@ -87,11 +92,27 @@ export function applyEvent(client: QueryClient, event: ServerEvent): void {
       void client.invalidateQueries({ queryKey: qk.channels });
       return;
     case "run.updated":
-      void client.invalidateQueries({ queryKey: qk.agentRuns(event.run.agentId) });
-      void client.invalidateQueries({ queryKey: qk.agentUsage(event.run.agentId) });
+      refreshRunsSoon(client, event.run.agentId);
       return;
     case "activity.created":
-      void client.invalidateQueries({ queryKey: qk.agentRuns(event.activity.agentId) });
+      refreshRunsSoon(client, event.activity.agentId);
       return;
   }
+}
+
+const RUNS_REFRESH_MS = 400;
+const pendingRunRefresh = new Map<string, ReturnType<typeof setTimeout>>();
+
+/** Busy runs emit many events; coalesce them into one inspector refetch per agent. */
+function refreshRunsSoon(client: QueryClient, agentId: string): void {
+  if (pendingRunRefresh.has(agentId)) return;
+  pendingRunRefresh.set(
+    agentId,
+    setTimeout(() => {
+      pendingRunRefresh.delete(agentId);
+      void client.invalidateQueries({ queryKey: qk.agentRuns(agentId) });
+      void client.invalidateQueries({ queryKey: qk.agentUsage(agentId) });
+      void client.invalidateQueries({ queryKey: qk.usage });
+    }, RUNS_REFRESH_MS),
+  );
 }

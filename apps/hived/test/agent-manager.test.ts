@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { schema } from "../src/db/client.ts";
 import { buildWorld, callTool, channelOf, usage, waitForAbort } from "./fakes.ts";
+import { TurnError } from "../src/agents/runtime/agent-runtime.ts";
 
 describe("AgentManager", () => {
   test("a DM wakes the agent; only send_message reaches chat; usage and session are saved", async () => {
@@ -246,5 +247,49 @@ describe("AgentManager", () => {
     expect(second.chat.listMessages(second.user, dmA.id, {}).messages.at(-1)?.body).toContain("interrupted by a restart");
     expect(second.runs.listRuns(second.user.orgId, b.id)[0]).toMatchObject({ status: "succeeded" });
     expect(second.runtime.calls).toHaveLength(1);
+  });
+
+  test("stopping and then deleting an agent never crashes the manager", async () => {
+    const w = await buildWorld({ script: (input) => waitForAbort(input.signal).catch(async (e) => { await Bun.sleep(5); throw e; }) });
+    const agent = w.makeAgent("Ada");
+    w.chat.postUserMessage(w.user, w.chat.openDm(w.user, agent.id).id, "work");
+    await Bun.sleep(0);
+    w.manager.stop(agent.id);
+    w.manager.onAgentDeleted(agent.id);
+    w.agents.remove(w.user, agent.id);
+    await w.manager.idle();
+    expect(w.logs.filter((l) => l.level === "error")).toHaveLength(0);
+    expect(w.handle.db.select().from(schema.runs).all()).toHaveLength(0);
+  });
+
+  test("a turn that ends early still checkpoints what it did", async () => {
+    const w = await buildWorld({
+      script: async (input) => {
+        await callTool(input, "send_message", { channel_id: channelOf(input), body: "partial answer" });
+        throw new TurnError("provider dropped the stream", [{ kept: input.prompt }]);
+      },
+    });
+    const agent = w.makeAgent("Ada");
+    w.chat.postUserMessage(w.user, w.chat.openDm(w.user, agent.id).id, "question");
+    await w.manager.idle();
+    expect(w.runs.listRuns(w.user.orgId, agent.id)[0]?.status).toBe("failed");
+    expect(JSON.stringify(w.runs.loadSession(agent.id))).toContain("question");
+  });
+
+  test("the endpoint key is redacted from errors, activity and chat", async () => {
+    const w = await buildWorld({
+      script: async (input) => {
+        input.onEvent({ kind: "notice", text: `retrying with ${input.endpoint.apiKey}` });
+        throw new Error(`401: bad key ${input.endpoint.apiKey}`);
+      },
+    });
+    const agent = w.makeAgent("Ada");
+    const dm = w.chat.openDm(w.user, agent.id);
+    w.chat.postUserMessage(w.user, dm.id, "hi");
+    await w.manager.idle();
+    const [run] = w.runs.listRuns(w.user.orgId, agent.id);
+    const everything = JSON.stringify([run, w.runs.listActivity([run!.id]), w.chat.listMessages(w.user, dm.id, {})]);
+    expect(everything).toContain("[redacted]");
+    expect(everything).not.toContain("sk-or-test-key");
   });
 });

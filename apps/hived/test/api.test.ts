@@ -136,4 +136,15 @@ describe("HTTP API", () => {
     expect(Object.keys(doc.paths)).toContain("/api/agents/");
     expect(Object.keys(doc.paths)).toContain("/api/channels/{id}/messages");
   });
+
+  test("foreign origins and hosts are refused, including reads", async () => {
+    const { app } = await setup();
+    const cookie = await login(app);
+    const read = await app.inject({ url: "/api/channels", headers: { cookie, origin: "http://localhost:5174", host: "localhost:4318" } });
+    expect(read.statusCode).toBe(403);
+    const rebind = await app.inject({ url: "/api/auth/session", headers: { host: "evil.example:4318" } });
+    expect(rebind.statusCode).toBe(403);
+    const same = await app.inject({ url: "/api/channels", headers: { cookie, origin: "http://localhost:4318", host: "localhost:4318" } });
+    expect(same.statusCode).toBe(200);
+  });
 });

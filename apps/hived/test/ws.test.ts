@@ -10,8 +10,9 @@ afterEach(async () => {
   app = null;
 });
 
-function connect(url: string, cookie?: string): Promise<{ ws: WebSocket; events: ServerEvent[]; closed: Promise<number> }> {
-  const ws = new WebSocket(url, cookie ? { headers: { cookie } } : undefined);
+function connect(url: string, cookie?: string, origin?: string): Promise<{ ws: WebSocket; events: ServerEvent[]; closed: Promise<number> }> {
+  const headers: Record<string, string> = { ...(cookie ? { cookie } : {}), ...(origin ? { origin } : {}) };
+  const ws = new WebSocket(url, { headers });
   const events: ServerEvent[] = [];
   ws.onmessage = (m) => events.push(JSON.parse(String(m.data)));
   const closed = new Promise<number>((resolve) => (ws.onclose = (e) => resolve(e.code)));
@@ -35,6 +36,9 @@ describe("WebSocket events", () => {
 
     const anon = await connect(`ws://127.0.0.1:${port}/api/ws`);
     expect(anon.ws.readyState).not.toBe(WebSocket.OPEN);
+
+    const foreign = await connect(`ws://127.0.0.1:${port}/api/ws`, `hive_session=${w.token}`, "http://localhost:5174");
+    expect(foreign.ws.readyState).not.toBe(WebSocket.OPEN);
 
     const { ws, events } = await connect(`ws://127.0.0.1:${port}/api/ws`, `hive_session=${w.token}`);
     const agent = w.makeAgent("Ada");

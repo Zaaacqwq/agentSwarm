@@ -7,6 +7,8 @@ export interface HiveConfig {
   readonly webDistDir: string | null;
   readonly maxConcurrentRuns: number;
   readonly secureCookies: boolean;
+  /** Host names accepted besides loopback, e.g. a Tailscale name when HIVE_HOST is not loopback. */
+  readonly allowedHosts: readonly string[];
 }
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
@@ -31,5 +33,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     webDistDir: env.HIVE_WEB_DIST === "" ? null : resolve(env.HIVE_WEB_DIST ?? join(root, "apps/web/dist")),
     maxConcurrentRuns,
     secureCookies: env.HIVE_SECURE_COOKIES === "1",
+    allowedHosts: [
+      ...(LOOPBACK.has(host) ? [] : [host.toLowerCase()]),
+      ...(env.HIVE_ALLOWED_HOSTS ?? "").split(",").map((h) => h.trim().toLowerCase()).filter(Boolean),
+    ],
   };
 }

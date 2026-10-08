@@ -52,3 +52,13 @@ export interface TurnResult {
 export interface AgentRuntime {
   runTurn(input: TurnInput): Promise<TurnResult>;
 }
+
+/** A turn that ended early but still produced context worth keeping (for example a stop or timeout). */
+export class TurnError extends Error {
+  constructor(
+    message: string,
+    readonly sessionEntries: unknown[] | null,
+  ) {
+    super(message);
+  }
+}

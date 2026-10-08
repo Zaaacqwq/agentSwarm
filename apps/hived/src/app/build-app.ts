@@ -17,11 +17,10 @@ import { metaRoutes } from "../http/routes/meta-routes.ts";
 import { registerWebSocket } from "../http/routes/ws-route.ts";
 
 const PUBLIC_API = new Set(["/api/auth/session", "/api/auth/setup", "/api/auth/login", "/api/auth/logout"]);
-const MUTATING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 export interface AppOptions {
   readonly services: Services;
-  readonly config: Pick<HiveConfig, "secureCookies" | "webDistDir">;
+  readonly config: Pick<HiveConfig, "secureCookies" | "webDistDir"> & { readonly allowedHosts?: readonly string[] };
   readonly logger?: boolean;
 }
 
@@ -40,7 +39,10 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     request.authUser = opts.services.auth.resolve(request.cookies[SESSION_COOKIE]);
     const path = request.url.split("?")[0] ?? "";
     if (!path.startsWith("/api/")) return;
-    if (MUTATING.has(request.method)) assertSameOrigin(request.headers.origin, request.headers.host);
+    // Every API call, including the WebSocket upgrade: other localhost ports are "same-site",
+    // so SameSite cookies alone do not stop a local page from reading events.
+    assertAllowedHost(request.headers.host, opts.config.allowedHosts);
+    assertSameOrigin(request.headers.origin, request.headers.host);
     if (!PUBLIC_API.has(path) && !request.authUser) throw new HttpError(401, "unauthorized", "Login required");
   });
 
@@ -71,7 +73,17 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   return app;
 }
 
-/** Cookies are SameSite=Strict; this rejects cross-site writes from browsers that still send them. */
+const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+/** Rejects DNS-rebinding style requests whose Host is not this machine (or an explicitly allowed name). */
+function assertAllowedHost(host: string | undefined, extra: readonly string[] = []): void {
+  if (!host) throw new HttpError(400, "bad_request", "Missing Host header");
+  const hostname = host.replace(/:\d+$/, "").toLowerCase();
+  if (LOOPBACK_HOSTNAMES.has(hostname) || extra.includes(hostname)) return;
+  throw new HttpError(403, "forbidden", "Unexpected Host header");
+}
+
+/** Browsers send Origin on cross-origin requests and WebSocket upgrades; it must match Host. */
 function assertSameOrigin(origin: string | undefined, host: string | undefined): void {
   if (!origin) return;
   let originHost: string;

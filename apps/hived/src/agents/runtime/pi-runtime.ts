@@ -15,7 +15,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { ResolvedTool } from "@hive/tools";
 import type { ResolvedEndpoint } from "../../endpoints/endpoint-service.ts";
-import type { AgentRuntime, RuntimeAgent, RuntimeEvent, TurnInput, TurnResult } from "./agent-runtime.ts";
+import { TurnError, type AgentRuntime, type RuntimeAgent, type RuntimeEvent, type TurnInput, type TurnResult } from "./agent-runtime.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
 
 const DEFAULT_CONTEXT_WINDOW = 128_000;
@@ -83,13 +83,19 @@ export class PiRuntime implements AgentRuntime {
     const unsubscribe = session.subscribe((event) => forward(event, input.onEvent));
     const onAbort = (): void => void session.abort();
     input.signal.addEventListener("abort", onAbort, { once: true });
+    const snapshot = (): unknown[] => {
+      const header = sessionManager.getHeader();
+      return [...(header ? [header] : []), ...sessionManager.getEntries()];
+    };
     try {
       await session.prompt(input.prompt);
       if (input.signal.aborted) throw input.signal.reason;
       const failure = lastFailure(session);
       if (failure) throw new Error(failure);
-      const header = sessionManager.getHeader();
-      return { sessionEntries: [...(header ? [header] : []), ...sessionManager.getEntries()] };
+      return { sessionEntries: snapshot() };
+    } catch (error) {
+      // Keep what the turn already did (the prompt, any replies) so the next turn remembers it.
+      throw new TurnError(error instanceof Error ? error.message : String(error), snapshot());
     } finally {
       input.signal.removeEventListener("abort", onAbort);
       unsubscribe();
