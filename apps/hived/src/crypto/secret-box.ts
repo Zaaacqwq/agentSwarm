@@ -10,14 +10,12 @@ export class SecretBox {
   private constructor(private readonly key: CryptoKey) {}
 
   static async fromKeyFile(path: string): Promise<SecretBox> {
-    const raw = loadOrCreateKey(path);
-    const key = await crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["encrypt", "decrypt"]);
-    return new SecretBox(key);
+    return SecretBox.fromRawKey(loadOrCreateKey(path));
   }
 
   static async fromRawKey(raw: Uint8Array): Promise<SecretBox> {
     if (raw.byteLength !== KEY_BYTES) throw new Error("SecretBox key must be 32 bytes");
-    const key = await crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["encrypt", "decrypt"]);
+    const key = await crypto.subtle.importKey("raw", new Uint8Array(raw), "AES-GCM", false, ["encrypt", "decrypt"]);
     return new SecretBox(key);
   }
 

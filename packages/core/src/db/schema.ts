@@ -185,7 +185,8 @@ export const usageRecords = sqliteTable(
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
     orgId: text("org_id").notNull().references(() => organizations.id),
-    runId: text("run_id").notNull().references(() => runs.id, { onDelete: "cascade" }),
+    // Usage outlives deleted agents and runs so cost history stays complete.
+    runId: text("run_id").references(() => runs.id, { onDelete: "set null" }),
     agentId: text("agent_id").notNull(),
     endpointId: text("endpoint_id"),
     provider: text("provider").notNull(),

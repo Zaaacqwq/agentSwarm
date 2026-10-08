@@ -153,7 +153,7 @@ CREATE INDEX `runs_status_idx` ON `runs` (`status`);--> statement-breakpoint
 CREATE TABLE `usage_records` (
 	`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
 	`org_id` text NOT NULL,
-	`run_id` text NOT NULL,
+	`run_id` text,
 	`agent_id` text NOT NULL,
 	`endpoint_id` text,
 	`provider` text NOT NULL,
@@ -165,7 +165,7 @@ CREATE TABLE `usage_records` (
 	`cost_usd` real NOT NULL,
 	`created_at` integer NOT NULL,
 	FOREIGN KEY (`org_id`) REFERENCES `organizations`(`id`) ON UPDATE no action ON DELETE no action,
-	FOREIGN KEY (`run_id`) REFERENCES `runs`(`id`) ON UPDATE no action ON DELETE cascade
+	FOREIGN KEY (`run_id`) REFERENCES `runs`(`id`) ON UPDATE no action ON DELETE set null
 );
 --> statement-breakpoint
 CREATE INDEX `usage_agent_idx` ON `usage_records` (`agent_id`,`created_at`);--> statement-breakpoint
