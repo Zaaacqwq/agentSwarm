@@ -16,6 +16,8 @@ export function AgentEditor({ agent }: { agent: Agent | undefined }) {
   const client = useQueryClient();
   const navigate = useNavigate();
   const endpoints = useQuery({ queryKey: qk.endpoints, queryFn: api.endpoints });
+  const workstations = useQuery({ queryKey: qk.workstations, queryFn: api.workstations });
+  const [workstationId, setWorkstationId] = useState<string>(agent?.workstationId ?? "");
   const [form, setForm] = useState<CreateAgent>(() => ({
     name: agent?.name ?? "",
     role: agent?.role ?? "",
@@ -29,9 +31,14 @@ export function AgentEditor({ agent }: { agent: Agent | undefined }) {
   const set = <K extends keyof CreateAgent>(key: K, value: CreateAgent[K]) => setForm((f) => ({ ...f, [key]: value }));
 
   const save = useMutation({
-    mutationFn: () => {
+    mutationFn: async () => {
       const payload = { ...form, endpointId };
-      return agent ? api.updateAgent(agent.id, payload) : api.createAgent(payload);
+      const saved = agent ? await api.updateAgent(agent.id, payload) : await api.createAgent(payload);
+      if ((saved.workstationId ?? "") !== workstationId) {
+        await api.bindWorkstation(saved.id, workstationId || null);
+        return { ...saved, workstationId: workstationId || null };
+      }
+      return saved;
     },
     onSuccess: (saved) => {
       client.setQueryData<Agent[]>(qk.agents, (list) =>
@@ -124,6 +131,15 @@ export function AgentEditor({ agent }: { agent: Agent | undefined }) {
               ))}
             </div>
           </fieldset>
+        </Section>
+
+        <Section title="Workstation" subtitle="Where this agent's workstation tools run. Reads are shared; one agent writes at a time.">
+          <Field label="Assigned workstation">
+            <Select value={workstationId} onChange={(e) => setWorkstationId(e.target.value)}>
+              <option value="">None</option>
+              {(workstations.data ?? []).map((w) => <option key={w.id} value={w.id}>{w.name} ({w.osUser})</option>)}
+            </Select>
+          </Field>
         </Section>
 
         <Section title="Tools" subtitle="Agents start with no access. Each tool is checked again when it runs.">

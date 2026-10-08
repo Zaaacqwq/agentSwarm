@@ -1,0 +1,9 @@
+{
+  "name": "@hive/priv-helper",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "build": "bun build --compile --minify src/main.ts --outfile ../../.tmp/hive-exec"
+  }
+}

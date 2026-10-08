@@ -6,6 +6,7 @@ import { createServices } from "../src/app/services.ts";
 import { schema } from "../src/db/client.ts";
 import { ADMIN, memoryDb } from "./helpers.ts";
 import { callTool, channelOf, ScriptedRuntime } from "./fakes.ts";
+import { localBackend } from "./local-backend.ts";
 
 const OPENROUTER_KEY = "sk-or-v1-supersecretvalue";
 
@@ -14,7 +15,7 @@ async function setup() {
   const runtime = new ScriptedRuntime(async (input) => {
     await callTool(input, "send_message", { channel_id: channelOf(input), body: "hi from agent" });
   });
-  const services = createServices({ db: handle.db, secrets: await SecretBox.fromRawKey(new Uint8Array(32)), runtime, log: () => {} });
+  const services = createServices({ db: handle.db, secrets: await SecretBox.fromRawKey(new Uint8Array(32)), runtime, log: () => {}, backend: localBackend().backend });
   await services.start();
   const app = await buildApp({ services, config: { secureCookies: false, webDistDir: null } });
   return { app, services, handle };

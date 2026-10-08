@@ -1,7 +1,12 @@
 import type {
   ActivityEvent, Agent, Channel, CreateAgent, CreateEndpoint, Credentials, Endpoint, Message, MessagePage,
   Run, SessionInfo, ToolpackInfo, UpdateAgent, UpdateEndpoint, UsageSummary,
+  CreateWorkstation, GitPush, HostStatus, Repository, Terminal, Workstation, Worktree,
 } from "@hive/core";
+
+export type FileView =
+  | { kind: "dir"; entries: string[]; truncated: boolean }
+  | { kind: "file"; path: string; content: string; fromLine: number; totalLines: number; truncated: boolean };
 
 export class ApiError extends Error {
   constructor(readonly status: number, readonly code: string, message: string) {
@@ -60,6 +65,22 @@ export const api = {
   messages: (channelId: string, before?: number) =>
     request<MessagePage>("GET", `/channels/${channelId}/messages${before ? `?before=${before}` : ""}`),
   postMessage: (channelId: string, body: string) => request<Message>("POST", `/channels/${channelId}/messages`, { body }),
+
+  workstations: () => request<Workstation[]>("GET", "/workstations"),
+  createWorkstation: (w: CreateWorkstation) => request<Workstation>("POST", "/workstations", w),
+  deleteWorkstation: (id: string) => request<{ ok: true }>("DELETE", `/workstations/${id}`),
+  worktrees: (id: string) => request<Worktree[]>("GET", `/workstations/${id}/worktrees`),
+  terminals: (id: string) => request<Terminal[]>("GET", `/workstations/${id}/terminals`),
+  terminal: (id: string, name: string) => request<{ output: string }>("GET", `/workstations/${id}/terminals/${encodeURIComponent(name)}`),
+  files: (id: string, worktreeId: string, path: string) =>
+    request<FileView>("GET", `/workstations/${id}/files?worktreeId=${encodeURIComponent(worktreeId)}&path=${encodeURIComponent(path)}`),
+  bindWorkstation: (agentId: string, workstationId: string | null) => request<{ ok: true }>("PUT", `/agents/${agentId}/workstation`, { workstationId }),
+  pushes: (agentId: string) => request<GitPush[]>("GET", `/agents/${agentId}/pushes`),
+  repositories: () => request<Repository[]>("GET", "/repositories"),
+  createRepository: (githubFullName: string) => request<Repository>("POST", "/repositories", { githubFullName }),
+  refreshRepository: (id: string) => request<{ ok: true }>("POST", `/repositories/${id}/refresh`),
+  deleteRepository: (id: string) => request<{ ok: true }>("DELETE", `/repositories/${id}`),
+  host: () => request<HostStatus>("GET", "/host"),
 };
 
 export const qk = {
@@ -72,4 +93,12 @@ export const qk = {
   agentUsage: (id: string) => ["agent-usage", id] as const,
   channels: ["channels"] as const,
   messages: (channelId: string) => ["messages", channelId] as const,
+  workstations: ["workstations"] as const,
+  worktrees: (id: string) => ["worktrees", id] as const,
+  terminals: (id: string) => ["terminals", id] as const,
+  terminal: (id: string, name: string) => ["terminal", id, name] as const,
+  files: (id: string, worktreeId: string, path: string) => ["files", id, worktreeId, path] as const,
+  pushes: (agentId: string) => ["pushes", agentId] as const,
+  repositories: ["repositories"] as const,
+  host: ["host"] as const,
 };

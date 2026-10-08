@@ -4,6 +4,9 @@ import { createServices } from "../src/app/services.ts";
 import type { ManagerLimits } from "../src/agents/agent-manager.ts";
 import { COMMUNICATION_PACK_ID } from "@hive/tools";
 import { ADMIN, memoryDb } from "./helpers.ts";
+import { localBackend } from "./local-backend.ts";
+import type { WorkstationBackend } from "../src/workstations/backend.ts";
+import type { GitHubPort } from "../src/git-relay/github.ts";
 
 export type Script = (input: TurnInput) => Promise<void>;
 
@@ -57,6 +60,8 @@ export interface WorldOptions {
   readonly dbPath?: string;
   readonly runtime?: AgentRuntime;
   readonly endpoint?: { kind: "openrouter" | "openai-compatible"; baseUrl?: string; apiKey: string };
+  readonly backend?: WorkstationBackend;
+  readonly github?: GitHubPort;
 }
 
 export async function buildWorld(opts: WorldOptions = {}) {
@@ -69,6 +74,9 @@ export async function buildWorld(opts: WorldOptions = {}) {
     db: handle.db,
     secrets,
     runtime: activeRuntime,
+    backend: opts.backend ?? localBackend().backend,
+    hostProbe: { pressureLevel: () => "normal", swapUsedMb: () => 0, disk: () => ({ freeGb: 100, totalGb: 200 }) },
+    ...(opts.github ? { github: opts.github } : {}),
     log: (level, msg) => logs.push({ level, msg }),
     ...(opts.limits ? { limits: opts.limits } : {}),
   });

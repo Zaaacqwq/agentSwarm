@@ -21,6 +21,7 @@
         "@fastify/type-provider-typebox": "6.1.0",
         "@fastify/websocket": "11.3.3",
         "@hive/core": "workspace:*",
+        "@hive/priv-helper": "workspace:*",
         "@hive/tools": "workspace:*",
         "drizzle-orm": "0.45.4",
         "fastify": "5.12.5",
@@ -56,6 +57,9 @@
         "drizzle-orm": "0.45.4",
         "typebox": "1.3.27",
       },
+    },
+    "packages/priv-helper": {
+      "name": "@hive/priv-helper",
     },
     "packages/tools": {
       "name": "@hive/tools",
@@ -251,6 +255,8 @@
     "@hive/core": ["@hive/core@workspace:packages/core"],
 
     "@hive/hived": ["@hive/hived@workspace:apps/hived"],
+
+    "@hive/priv-helper": ["@hive/priv-helper@workspace:packages/priv-helper"],
 
     "@hive/tools": ["@hive/tools@workspace:packages/tools"],
 

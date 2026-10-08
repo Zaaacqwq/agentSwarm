@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQueryClient, type QueryClient } from "@tanstack/react-query";
-import type { Agent, Channel, MessagePage, ServerEvent } from "@hive/core";
+import type { Agent, Channel, MessagePage, ServerEvent, Workstation } from "@hive/core";
 import { qk } from "./api.ts";
 
 export type LiveStatus = "connecting" | "live" | "offline";
@@ -96,6 +96,23 @@ export function applyEvent(client: QueryClient, event: ServerEvent): void {
       return;
     case "activity.created":
       refreshRunsSoon(client, event.activity.agentId);
+      return;
+    case "workstation.updated":
+      client.setQueryData<Workstation[]>(qk.workstations, (list) => {
+        if (!list) return list;
+        return list.some((w) => w.id === event.workstation.id)
+          ? list.map((w) => (w.id === event.workstation.id ? event.workstation : w))
+          : [...list, event.workstation];
+      });
+      return;
+    case "worktree.updated":
+      void client.invalidateQueries({ queryKey: qk.worktrees(event.worktree.workstationId) });
+      return;
+    case "git.pushed":
+      void client.invalidateQueries({ queryKey: qk.pushes(event.push.agentId) });
+      return;
+    case "host.updated":
+      client.setQueryData(qk.host, event.host);
       return;
   }
 }

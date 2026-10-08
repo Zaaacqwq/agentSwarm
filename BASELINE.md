@@ -10,6 +10,7 @@
 | macOS 工作站 | 已创建 `ws-hive-p0` 并验证身份切换及启动盘 git；`local-dir` 不能隔离凭据；临时启用外置盘 ownership 后隔离探针失败，已恢复 `Owners: Disabled`；默认类型尚未定案，见 `docs/decisions/0002-workstation.md` |
 | 桌面控制（可选） | 截图失败，`cliclick` 未安装；见 `docs/decisions/0003-desktop-optional.md` |
 | 启动盘剩余空间 | 约 25 GiB；构建与模块缓存需留在启动盘并及时清理 |
+| 工作站专用卷 | `/Volumes/HiveWS`（disk7s2，与 Data 同容器），`Owners: Enabled`，跨用户隔离探针 7/7 通过；见 `docs/decisions/0004-workstation-macos-user.md` |
 | 外置盘剩余空间 | 约 195 GiB；代码、工作树和可保留产物放在此盘 |
 
 P0 尚未通过验收：需确定外置盘的隔离方案，完成独立用户工作站实验，并形成默认工作站类型决策。桌面控制可按计划推迟到 P5 前。P1 方案已获用户有条件确认，待 P0 通过后实施。

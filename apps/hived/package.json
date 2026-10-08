@@ -11,6 +11,7 @@
     "@fastify/type-provider-typebox": "6.1.0",
     "@fastify/websocket": "11.3.3",
     "@hive/core": "workspace:*",
+    "@hive/priv-helper": "workspace:*",
     "@hive/tools": "workspace:*",
     "drizzle-orm": "0.45.4",
     "fastify": "5.12.5",

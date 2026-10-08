@@ -9,3 +9,4 @@ coverage/
 *.xcresult/
 DerivedData/
 .DS_Store
+evals/reports/*.json

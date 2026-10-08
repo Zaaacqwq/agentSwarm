@@ -225,3 +225,106 @@ export const auditLogs = sqliteTable(
   },
   (t) => [index("audit_created_idx").on(t.createdAt)],
 );
+
+// --- P2: workstations, repositories, worktrees, leases, Git Relay -----------------
+
+export const workstations = sqliteTable(
+  "workstations",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull().references(() => organizations.id),
+    ownerUserId: text("owner_user_id").notNull().references(() => users.id),
+    name: text("name").notNull(),
+    kind: text("kind", { enum: ["macos-user", "local-fake"] }).notNull(),
+    osUser: text("os_user").notNull(),
+    networkAllowed: integer("network_allowed", { mode: "boolean" }).notNull().default(true),
+    createdAt: createdAt(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (t) => [
+    uniqueIndex("workstations_os_user_uq").on(t.osUser),
+    uniqueIndex("workstations_org_name_uq").on(t.orgId, t.name),
+    check("workstations_kind_ck", sql`${t.kind} in ('macos-user','local-fake')`),
+  ],
+);
+
+export const agentWorkstations = sqliteTable(
+  "agent_workstations",
+  {
+    agentId: text("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+    workstationId: text("workstation_id").notNull().references(() => workstations.id, { onDelete: "cascade" }),
+    createdAt: createdAt(),
+  },
+  (t) => [primaryKey({ columns: [t.agentId, t.workstationId] })],
+);
+
+export const repositories = sqliteTable(
+  "repositories",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull().references(() => organizations.id),
+    name: text("name").notNull(),
+    // owner/name on GitHub; PRs are opened here.
+    githubFullName: text("github_full_name").notNull(),
+    // Where the mirror fetches from and the Relay pushes to.
+    remoteUrl: text("remote_url").notNull(),
+    defaultBranch: text("default_branch").notNull(),
+    mirrorName: text("mirror_name").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [uniqueIndex("repositories_org_name_uq").on(t.orgId, t.name), uniqueIndex("repositories_mirror_uq").on(t.mirrorName)],
+);
+
+export const worktrees = sqliteTable(
+  "worktrees",
+  {
+    id: text("id").primaryKey(),
+    workstationId: text("workstation_id").notNull().references(() => workstations.id, { onDelete: "cascade" }),
+    repositoryId: text("repository_id").notNull().references(() => repositories.id, { onDelete: "cascade" }),
+    agentId: text("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+    // Relative to the workstation root, e.g. worktrees/<repo>/<agent>-<slug>
+    scope: text("scope").notNull(),
+    branch: text("branch").notNull(),
+    createdAt: createdAt(),
+    lastUsedAt: integer("last_used_at").notNull(),
+    removedAt: integer("removed_at"),
+  },
+  (t) => [
+    index("worktrees_agent_idx").on(t.agentId, t.lastUsedAt),
+    uniqueIndex("worktrees_live_scope_uq").on(t.workstationId, t.scope).where(sql`removed_at is null`),
+  ],
+);
+
+export const leases = sqliteTable(
+  "leases",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    kind: text("kind", { enum: ["workstation-write"] }).notNull(),
+    resourceId: text("resource_id").notNull(),
+    holderAgentId: text("holder_agent_id").notNull(),
+    runId: text("run_id"),
+    acquiredAt: integer("acquired_at").notNull(),
+    expiresAt: integer("expires_at").notNull(),
+    releasedAt: integer("released_at"),
+  },
+  (t) => [
+    uniqueIndex("leases_live_uq").on(t.kind, t.resourceId).where(sql`released_at is null`),
+    index("leases_run_idx").on(t.runId),
+  ],
+);
+
+export const gitPushes = sqliteTable(
+  "git_pushes",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    worktreeId: text("worktree_id").notNull(),
+    agentId: text("agent_id").notNull(),
+    branch: text("branch").notNull(),
+    headSha: text("head_sha"),
+    status: text("status", { enum: ["rejected", "pushed", "failed"] }).notNull(),
+    reason: text("reason"),
+    prUrl: text("pr_url"),
+    createdAt: createdAt(),
+  },
+  (t) => [index("git_pushes_agent_idx").on(t.agentId, t.createdAt)],
+);

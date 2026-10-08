@@ -33,6 +33,7 @@ export const agentRoutes = (deps: RouteDeps): FastifyPluginAsyncTypebox => async
     const user = requireUser(request);
     agents.getRow(user.orgId, request.params.id);
     manager.onAgentDeleted(request.params.id);
+    await deps.services.repos.removeAgentWorktrees(request.params.id);
     agents.remove(user, request.params.id);
     bus.publish(user.orgId, { type: "agent.deleted", agentId: request.params.id });
     return { ok: true as const };
