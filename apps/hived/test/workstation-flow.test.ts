@@ -162,6 +162,30 @@ describe("workstation coding loop", () => {
   });
 });
 
+describe("worktree cleanup", () => {
+  test("deleting an agent removes its worktrees; prune clears leftovers", async () => {
+    const { w, ws } = await setup(async (input) => {
+      await text(input, "ws_checkout", { repo: "hive-sandbox", slug: "tmp" });
+    });
+    const { existsSync } = await import("node:fs");
+    const agent = w.makeAgent("Ada", GRANTS);
+    w.workstations.bind(w.user, agent.id, ws.id);
+    w.chat.postUserMessage(w.user, w.chat.openDm(w.user, agent.id).id, "go");
+    await w.manager.idle();
+    const layout = w.workstations.backend.layout;
+    const dir = join(layout.wsRoot, "ws-1", "worktrees", "hive-sandbox", "ada-tmp");
+    expect(existsSync(dir)).toBe(true);
+    expect(await w.repos.removeAgentWorktrees(agent.id)).toBe(1);
+    expect(existsSync(dir)).toBe(false);
+
+    // A leftover clone with no database row (e.g. after a crash) is pruned.
+    const { worktree } = await w.repos.checkout({ orgId: w.user.orgId, agent: { id: agent.id, name: "Bob" }, workstation: { id: ws.id, osUser: "ws-1" }, repoName: "hive-sandbox", slug: "orphan" });
+    w.handle.sqlite.run("delete from worktrees where id = ?", [worktree.id]);
+    expect(await w.repos.pruneOrphans({ id: ws.id, osUser: "ws-1" })).toEqual(["worktrees/hive-sandbox/bob-orphan"]);
+    expect(await w.repos.pruneOrphans({ id: ws.id, osUser: "ws-1" })).toEqual([]);
+  });
+});
+
 describe("Git Relay checks", () => {
   async function pushWith(edit: (input: TurnInput) => Promise<void>) {
     const outputs: string[] = [];

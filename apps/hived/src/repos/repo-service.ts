@@ -137,6 +137,47 @@ export class RepoService {
     this.deps.db.update(schema.worktrees).set({ lastUsedAt: now }).where(eq(schema.worktrees.id, worktreeId)).run();
   }
 
+  /** Removes an agent's worktrees from disk (best effort); called before the agent row is deleted. */
+  async removeAgentWorktrees(agentId: string): Promise<number> {
+    const rows = this.deps.db.select({ wt: schema.worktrees, osUser: schema.workstations.osUser }).from(schema.worktrees)
+      .innerJoin(schema.workstations, eq(schema.workstations.id, schema.worktrees.workstationId))
+      .where(and(eq(schema.worktrees.agentId, agentId), isNull(schema.worktrees.removedAt))).all();
+    let removed = 0;
+    for (const { wt, osUser } of rows) {
+      try {
+        await this.deps.backend.call(osUser, { op: "git.remove", scope: wt.scope });
+        this.deps.db.update(schema.worktrees).set({ removedAt: Date.now() }).where(eq(schema.worktrees.id, wt.id)).run();
+        removed++;
+      } catch {
+        // Left for pruneOrphans on the next start.
+      }
+    }
+    return removed;
+  }
+
+  /** Deletes worktree directories on a workstation that no live worktree row points to (crash or delete leftovers). */
+  async pruneOrphans(workstation: { id: string; osUser: string }): Promise<string[]> {
+    let listing: { entries: string[] };
+    try {
+      listing = await this.deps.backend.call<{ entries: string[] }>(workstation.osUser, { op: "fs.list", scope: "worktrees", path: ".", depth: 2 });
+    } catch {
+      return [];
+    }
+    const live = new Set(this.worktreesFor({ workstationId: workstation.id }).map((w) => w.scope));
+    const candidates = listing.entries.filter((e) => e.split("/").filter(Boolean).length === 2 && e.endsWith("/")).map((e) => `worktrees/${e.replace(/\/$/, "")}`);
+    const pruned: string[] = [];
+    for (const scope of candidates) {
+      if (live.has(scope)) continue;
+      try {
+        await this.deps.backend.call(workstation.osUser, { op: "git.remove", scope });
+        pruned.push(scope);
+      } catch {
+        // Not a git worktree (or already gone); leave it alone.
+      }
+    }
+    return pruned;
+  }
+
   async removeWorktree(worktreeId: string, osUser: string, now = Date.now()): Promise<void> {
     const wt = this.worktree(worktreeId);
     if (!wt || wt.removedAt) throw notFound("Worktree");

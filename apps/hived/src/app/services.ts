@@ -159,6 +159,14 @@ export function createServices(deps: ServiceDeps): Services & { start(): Promise
       // Leases belong to runs; after a restart no run is active, so none can still be held.
       leases.releaseAll();
       requireManager().recover();
+      if ((await deps.backend.health()).ready) {
+        for (const org of db.select({ id: schema.organizations.id }).from(schema.organizations).all()) {
+          for (const ws of workstations!.list(org.id)) {
+            const pruned = await repos.pruneOrphans(ws);
+            if (pruned.length) log("info", "pruned orphaned worktrees", { workstation: ws.osUser, count: pruned.length });
+          }
+        }
+      }
     },
   };
 }
