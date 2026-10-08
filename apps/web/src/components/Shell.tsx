@@ -1,10 +1,12 @@
 import { NavLink, Outlet } from "react-router";
-import { Bot, MessagesSquare, Settings2 } from "lucide-react";
+import { Bot, MessagesSquare, Server, Settings2 } from "lucide-react";
+import { HostBanner } from "./HostBanner.tsx";
 import type { LiveStatus } from "../app/live.ts";
 
 const NAV = [
   { to: "/chat", label: "Chat", icon: MessagesSquare },
   { to: "/agents", label: "Agents", icon: Bot },
+  { to: "/workstations", label: "Workstations", icon: Server },
   { to: "/settings", label: "Settings", icon: Settings2 },
 ] as const;
 
@@ -31,6 +33,7 @@ export function Shell({ live }: { live: LiveStatus }) {
           {status.text}
         </span>
       </header>
+      <HostBanner />
       <main className="min-h-0 flex-1 px-2 pb-20 sm:px-6 sm:pb-6">
         <Outlet />
       </main>
@@ -55,7 +58,7 @@ function PillNav() {
             }
           >
             <Icon size={15} strokeWidth={2.2} aria-hidden />
-            {label}
+            <span className="max-sm:sr-only">{label}</span>
           </NavLink>
         </li>
       ))}

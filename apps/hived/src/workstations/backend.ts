@@ -40,6 +40,7 @@ export class MacosUserBackend implements WorkstationBackend {
   async call<T>(osUser: string, request: Request, timeoutMs = 660_000): Promise<T> {
     if (!WS_USER_PATTERN.test(osUser)) throw new WorkstationError("bad_request", `Not a workstation user: ${osUser}`);
     const proc = Bun.spawn(["/usr/bin/sudo", "-n", "-u", osUser, this.execPath], {
+      cwd: "/",
       stdin: new TextEncoder().encode(JSON.stringify(request)),
       stdout: "pipe",
       stderr: "pipe",

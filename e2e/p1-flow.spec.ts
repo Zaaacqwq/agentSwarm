@@ -39,7 +39,7 @@ test("admin sets up Hive, creates two agents, and chats with each", async ({ pag
   await expect(page.getByText("live")).toBeVisible();
 
   await page.getByRole("link", { name: "Settings" }).first().click();
-  await page.getByRole("button", { name: "Add" }).click();
+  await page.getByRole("button", { name: "Add endpoint" }).click();
   await page.getByLabel("Kind").selectOption("openai-compatible");
   await page.getByLabel("Base URL").fill(MODEL_URL);
   await page.getByLabel("API key").fill("local-fake-key");

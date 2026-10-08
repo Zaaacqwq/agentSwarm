@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, GitPullRequest } from "lucide-react";
 import type { ActivityEvent, Agent, Run } from "@hive/core";
 import { api, qk } from "../../app/api.ts";
 import { clockTime, tokens, usd } from "../../lib/format.ts";
@@ -17,6 +17,7 @@ export function ActivityInspector({ agent }: { agent: Agent }) {
   const runs = useQuery({ queryKey: qk.agentRuns(agent.id), queryFn: () => api.agentRuns(agent.id) });
   const usage = useQuery({ queryKey: qk.agentUsage(agent.id), queryFn: () => api.agentUsage(agent.id) });
   const byRun = groupByRun(runs.data?.activity ?? []);
+  const pushes = useQuery({ queryKey: qk.pushes(agent.id), queryFn: () => api.pushes(agent.id) });
 
   return (
     <aside className="flex min-w-0 flex-col rounded-card border border-line bg-surface/80 backdrop-blur xl:w-[26rem] xl:shrink-0 xl:overflow-hidden">
@@ -27,6 +28,17 @@ export function ActivityInspector({ agent }: { agent: Agent }) {
           <Stat label="Tokens in" value={tokens(usage.data?.inputTokens ?? 0)} />
           <Stat label="Tokens out" value={tokens(usage.data?.outputTokens ?? 0)} />
         </dl>
+        {pushes.data && pushes.data.length > 0 ? (
+          <ul className="mt-3 space-y-1">
+            {pushes.data.slice(0, 4).map((p) => (
+              <li key={p.id} className="flex items-center gap-2 text-xs">
+                <GitPullRequest size={12} className={p.status === "pushed" ? "text-ok" : "text-err"} aria-hidden />
+                <span className="truncate font-mono text-muted">{p.branch}</span>
+                {p.prUrl ? <a href={p.prUrl} target="_blank" rel="noreferrer noopener" className="ml-auto shrink-0 text-honey underline underline-offset-2">PR</a> : <span className="ml-auto shrink-0 text-faint" title={p.reason ?? ""}>{p.status}</span>}
+              </li>
+            ))}
+          </ul>
+        ) : null}
       </header>
       <ol className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
         {(runs.data?.runs ?? []).map((run, i) => (

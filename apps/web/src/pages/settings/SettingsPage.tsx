@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { KeyRound, LogOut, Plus, Trash2 } from "lucide-react";
+import { GitBranch, KeyRound, LogOut, Plus, RefreshCw, Trash2 } from "lucide-react";
 import type { Endpoint, EndpointKind, SessionInfo } from "@hive/core";
 import { api, qk } from "../../app/api.ts";
 import { Button } from "../../components/ui/Button.tsx";
@@ -30,7 +30,7 @@ export function SettingsPage() {
             <h2 className="text-lg font-extrabold tracking-tight">Model endpoints</h2>
             <p className="text-sm text-muted">Keys are encrypted at rest in hived and are never sent back to the browser.</p>
           </div>
-          {!adding ? <Button size="sm" variant="primary" icon={<Plus size={14} />} onClick={() => setAdding(true)}>Add</Button> : null}
+          {!adding ? <Button size="sm" variant="primary" icon={<Plus size={14} />} onClick={() => setAdding(true)}>Add endpoint</Button> : null}
         </div>
         {adding ? <EndpointForm onDone={() => setAdding(false)} /> : null}
         <ul className="space-y-2">
@@ -40,6 +40,8 @@ export function SettingsPage() {
           ) : null}
         </ul>
       </section>
+
+      <Repositories />
 
       <section className="grid gap-4 sm:grid-cols-[1.4fr_1fr]">
         <div className="rounded-card border border-line bg-surface/80 p-5 backdrop-blur">
@@ -136,5 +138,40 @@ function EndpointForm({ onDone }: { onDone: () => void }) {
         <Button type="submit" variant="primary" disabled={create.isPending}>{create.isPending ? "Saving…" : "Save endpoint"}</Button>
       </div>
     </form>
+  );
+}
+
+function Repositories() {
+  const client = useQueryClient();
+  const repos = useQuery({ queryKey: qk.repositories, queryFn: api.repositories });
+  const [name, setName] = useState("");
+  const refresh = () => void client.invalidateQueries({ queryKey: qk.repositories });
+  const add = useMutation({ mutationFn: () => api.createRepository(name.trim()), onSuccess: () => { setName(""); refresh(); } });
+  const sync = useMutation({ mutationFn: (id: string) => api.refreshRepository(id) });
+  const remove = useMutation({ mutationFn: (id: string) => api.deleteRepository(id), onSuccess: refresh });
+  return (
+    <section className="rounded-card border border-line bg-surface/80 p-5 backdrop-blur">
+      <h2 className="text-lg font-extrabold tracking-tight">Repositories</h2>
+      <p className="mb-4 text-sm text-muted">hived mirrors these with your <code className="font-mono">gh</code> login. Agents push only <code className="font-mono">hive/*</code> branches through the Git Relay and never merge.</p>
+      <form className="mb-3 flex gap-2" onSubmit={(e) => { e.preventDefault(); add.mutate(); }}>
+        <TextInput value={name} onChange={(e) => setName(e.target.value)} placeholder="owner/name" pattern="[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+" required className="font-mono" aria-label="GitHub repository" />
+        <Button type="submit" variant="primary" disabled={add.isPending}>{add.isPending ? "Mirroring…" : "Add repository"}</Button>
+      </form>
+      <ErrorNote error={add.error ?? sync.error ?? remove.error} />
+      <ul className="mt-2 space-y-2">
+        {(repos.data ?? []).map((r) => (
+          <li key={r.id} className="flex flex-wrap items-center gap-3 rounded-2xl border border-line bg-sunken/70 px-4 py-2.5">
+            <GitBranch size={14} className="text-honey" aria-hidden />
+            <span className="font-semibold">{r.name}</span>
+            <span className="font-mono text-xs text-faint">{r.githubFullName} · {r.defaultBranch}</span>
+            <span className="ml-auto flex gap-1">
+              <Button size="sm" variant="quiet" icon={<RefreshCw size={13} />} onClick={() => sync.mutate(r.id)} disabled={sync.isPending}>Sync</Button>
+              <Button size="sm" variant="quiet" icon={<Trash2 size={13} />} onClick={() => remove.mutate(r.id)} aria-label={`Remove ${r.name}`} />
+            </span>
+          </li>
+        ))}
+        {repos.isSuccess && repos.data.length === 0 ? <li className="text-sm text-muted">No repositories yet.</li> : null}
+      </ul>
+    </section>
   );
 }
