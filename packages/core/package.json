@@ -1,0 +1,13 @@
+{
+  "name": "@hive/core",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./db": "./src/db/schema.ts"
+  },
+  "dependencies": {
+    "drizzle-orm": "0.45.4",
+    "typebox": "1.3.27"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "@hive/tools",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@hive/core": "workspace:*",
+    "typebox": "1.3.27"
+  }
+}

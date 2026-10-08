@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.tmp/
+.hive-data/
+coverage/
+.env
+.env.*
+!.env.example
+*.xcresult/
+DerivedData/
+.DS_Store

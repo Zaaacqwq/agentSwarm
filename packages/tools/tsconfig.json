@@ -1,0 +1,6 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "outDir": "../../.tmp/tsc/tools", "rootDir": ".", "types": ["bun"] },
+  "include": ["src", "test"],
+  "references": [{ "path": "../core" }]
+}
