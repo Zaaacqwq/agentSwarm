@@ -7,6 +7,9 @@ export interface GitResult {
 
 export type GitRunner = (args: readonly string[], opts?: { cwd?: string; timeoutMs?: number; stdin?: string }) => Promise<GitResult>;
 
+/** Workstation inboxes are owned by ws-N users; hived must be allowed to fetch from them. */
+const SAFE_INBOXES = "/Volumes/HiveWS/inbox/*";
+
 const GH_HELPER = ["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"];
 
 export const runGit: GitRunner = async (args, opts = {}) => {
@@ -17,7 +20,7 @@ export const runGit: GitRunner = async (args, opts = {}) => {
     stdout: "pipe",
     stderr: "pipe",
     timeout: opts.timeoutMs ?? 300_000,
-    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "safe.directory", GIT_CONFIG_VALUE_0: SAFE_INBOXES },
   });
   const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
   return { code: await proc.exited, out, err };

@@ -22,6 +22,10 @@ export function childEnv(env: ExecEnv): Record<string, string> {
     TERM: "xterm-256color",
     GIT_TERMINAL_PROMPT: "0",
     GIT_CONFIG_NOSYSTEM: "1",
+    // Mirrors are owned by the hived user; trust exactly that directory (env config counts as protected).
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "safe.directory",
+    GIT_CONFIG_VALUE_0: `${env.layout.mirrors}/*`,
   };
 }
 
