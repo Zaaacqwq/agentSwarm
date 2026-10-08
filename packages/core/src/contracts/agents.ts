@@ -23,6 +23,7 @@ export const Agent = Type.Object({
   thinkingLevel: ThinkingLevel,
   avatarSeed: Type.String(),
   grants: Type.Array(ToolGrant),
+  workstationId: Type.Union([Type.String(), Type.Null()]),
   state: AgentState,
   createdAt: Type.Number(),
   updatedAt: Type.Number(),

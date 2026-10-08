@@ -29,6 +29,8 @@ export interface AgentManagerDeps {
   };
   readonly log: (level: "info" | "warn" | "error", msg: string, extra?: Record<string, unknown>) => void;
   readonly limits?: Partial<ManagerLimits>;
+  /** Called once per run after it settles, e.g. to release its leases. */
+  readonly onRunSettled?: (runId: string) => void;
 }
 
 type StopReason = "stopped" | "timeout" | "tool_limit" | "deleted" | "shutdown";
@@ -123,6 +125,11 @@ export class AgentManager {
       this.active.set(next.agentId, active);
       const done = this.execute(next, active).catch((error: unknown) => this.onCrash(next, error)).finally(() => {
         this.active.delete(next.agentId);
+        try {
+          this.deps.onRunSettled?.(next.id);
+        } catch (error) {
+          this.deps.log("error", "run settle hook failed", { runId: next.id, error: String(error) });
+        }
         this.settled.delete(done);
         const orgId = this.deps.runs.orgOf(next.id);
         if (orgId) this.publishState(orgId, next.agentId);

@@ -7,6 +7,7 @@ export interface HiveConfig {
   readonly webDistDir: string | null;
   readonly maxConcurrentRuns: number;
   readonly secureCookies: boolean;
+  readonly heavySlots: number;
   /** Host names accepted besides loopback, e.g. a Tailscale name when HIVE_HOST is not loopback. */
   readonly allowedHosts: readonly string[];
 }
@@ -29,10 +30,12 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   return {
     host,
     port,
-    dataDir: resolve(env.HIVE_DATA_DIR ?? join(root, ".hive-data")),
+    // Default lives on the ownership-enabled workstation volume (decision 0004), never on /Volumes/Data.
+    dataDir: resolve(env.HIVE_DATA_DIR ?? "/Volumes/HiveWS/hived"),
     webDistDir: env.HIVE_WEB_DIST === "" ? null : resolve(env.HIVE_WEB_DIST ?? join(root, "apps/web/dist")),
     maxConcurrentRuns,
     secureCookies: env.HIVE_SECURE_COOKIES === "1",
+    heavySlots: Number(env.HIVE_HEAVY_SLOTS ?? "2"),
     allowedHosts: [
       ...(LOOPBACK.has(host) ? [] : [host.toLowerCase()]),
       ...(env.HIVE_ALLOWED_HOSTS ?? "").split(",").map((h) => h.trim().toLowerCase()).filter(Boolean),

@@ -13,6 +13,7 @@ export interface AgentServiceDeps {
   readonly endpointExists: (orgId: string, endpointId: string) => boolean;
   readonly toolpackExists: (toolpackId: string) => boolean;
   readonly stateOf: (agentId: string) => AgentState;
+  readonly workstationOf?: (agentId: string) => string | null;
 }
 
 export class AgentService {
@@ -126,6 +127,7 @@ export class AgentService {
       thinkingLevel: row.thinkingLevel,
       avatarSeed: row.avatarSeed,
       grants: this.grantsOf(row.id),
+      workstationId: this.deps.workstationOf?.(row.id) ?? null,
       state: this.deps.stateOf(row.id),
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,

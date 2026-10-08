@@ -77,6 +77,8 @@ export async function pushInbox(env: ExecEnv, scope: string, branch: string) {
     if (!existsSync(inbox)) throw new OpError("failed", "Push inbox is missing; rerun the workstation setup script");
     ok(await git(env, inbox, ["init", "--quiet", "--bare", "--shared=0640", "."]), "init inbox");
   }
+  // --shared turns this on; the inbox is a private staging area and the Relay is the real gate.
+  ok(await git(env, inbox, ["config", "receive.denyNonFastForwards", "false"]), "config inbox");
   ok(await git(env, dir, ["push", "--quiet", "--force", "inbox", `HEAD:refs/heads/${branch}`], undefined, 300_000), "push to inbox");
   const head = ok(await git(env, dir, ["rev-parse", "HEAD"]), "rev-parse").output.trim();
   return { branch, head, inbox };
