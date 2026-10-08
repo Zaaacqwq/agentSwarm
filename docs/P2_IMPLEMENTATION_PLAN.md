@@ -1,6 +1,6 @@
 # P2 实施方案：通用工作站与编码闭环（待确认）
 
-本阶段基于 P1（PR #1），工作站决策见 `docs/decisions/0004-workstation-macos-user.md`。
+本阶段基于 P1（PR #1）。工作站放在外置盘的专用卷 `/Volumes/HiveWS` 上，决策见 `docs/decisions/0004-workstation-macos-user.md`。
 
 **交付内容：**
 - 工作站：独立的 macOS 用户。
@@ -16,6 +16,7 @@
 
 1. **一次性管理员操作。** 由你执行 `sudo zsh scripts/setup-workstations.sh 2`，它会：
    - 创建组 `hive-ws` 和用户 `ws-1`、`ws-2`：标准账户，不在登录界面显示，不能用密码登录，主组是 `hive-ws`。
+   - 建立 `/Volumes/HiveWS/ws/ws-n`（属主为该工作站用户，0700）和 `/Volumes/HiveWS/hived`（属主 zaaac，0700）。
    - 安装 `/usr/local/libexec/hive/hive-exec`，属主 root:wheel，权限 0755。
    - 写入 `/etc/sudoers.d/hive`，内容为 `zaaac ALL=(%hive-ws) NOPASSWD: /usr/local/libexec/hive/hive-exec`。写入前先用 `visudo -c` 校验。
 
@@ -23,7 +24,7 @@
 2. **清理 P0 测试用户 `ws-hive-p0`。** 用同一个脚本的 `--remove-p0` 选项。
 3. **评测仓库。** 验收要推分支、开 PR，需要一个 GitHub 仓库 `Zaaacqwq/hive-sandbox`（建议设为 private）。由我用你现在的 `gh` 登录来创建，还是你自己建？
 4. **评测费用。** 8 题 × 3 次，用 `qwen/qwen3.8-omni-flash` 粗估不到 $1；换更强的模型会贵几倍。建议整轮设上限 $5。
-5. **hived 数据目录迁移。** 默认改到 `~/Library/Application Support/Hive`。P1 的 `.hive-data/` 里还没有正式数据，直接弃用。
+5. **hived 数据目录。** 默认改到 `/Volumes/HiveWS/hived`。启动时检查该卷为 `Owners: Enabled` 且没有以 `noowners` 挂载，不满足就拒绝启动。P1 的 `.hive-data/` 里还没有正式数据，直接弃用。
 
 ## 1. 文件结构
 
@@ -31,7 +32,7 @@
 packages/priv-helper/            # hive-exec：Bun 编译成单个可执行文件，属主 root
   src/main.ts                    # 从 stdin 读 JSON 请求，按 op 分发；不接受拼接好的 shell 字符串
   src/ops/{fs,bash,tmux,git}.ts  # 所有路径先 realpath，必须落在工作站根目录内
-  src/sandbox.ts                 # 生成 sandbox-exec 配置：拒绝 /Volumes、其他家目录、hived 数据目录
+  src/sandbox.ts                 # 生成 sandbox-exec 配置：拒绝 /Volumes/Data、其他家目录、hived 数据目录、其他工作站
   test/                          # 路径越界、符号链接逃逸、超时、输出截断
 apps/hived/src/
   workstations/                  # WorkstationBackend 接口
@@ -83,7 +84,7 @@ scripts/setup-workstations.sh    # 一次性管理员脚本（见 0.1）
    - 在 `local-fake` 后端上跑通完整的编码流程。
 2. **hive-exec 测试**：`../`、绝对路径、指向根目录外的符号链接、超长输出、超时、非法 op 都要被拒绝。
 3. **本机集成测试**（在 mini 上运行，用开关控制）：
-   - 以 `ws-1` 身份执行时，读不到 `/Users/zaaac` 下的文件、`~/Library/Application Support/Hive`、`/Volumes/Data` 和 `ws-2` 的家目录。
+   - 以 `ws-1` 身份执行时，读不到 `/Users/zaaac` 下的文件、`/Volumes/HiveWS/hived`、`/Volumes/Data`、`ws-2` 的工作站目录。
    - 能联网。
    - hived 重启后 tmux 会话仍在。
 4. **E2E**：Workstations 页面能显示工作站、终端输出和租约状态。
