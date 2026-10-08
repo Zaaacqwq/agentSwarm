@@ -1,0 +1,5 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "outDir": "../../.tmp/tsc/priv-helper", "rootDir": ".", "types": ["bun"] },
+  "include": ["src", "test"]
+}
