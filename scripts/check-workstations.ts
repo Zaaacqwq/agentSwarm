@@ -101,7 +101,9 @@ async function main(): Promise<void> {
       await Bun.sleep(500);
       return (await backend.call<{ output: string }>("ws-1", { op: "tmux.read", name: "probe", lines: 20 })).output;
     });
-    record("tmux shell is sandboxed", tmuxDenied.includes("blocked") && !tmuxDenied.includes("LEAK"));
+    // Match whole output lines: the echoed command line itself contains both words.
+    const lines = tmuxDenied.split("\n").map((l) => l.trim());
+    record("tmux shell is sandboxed", lines.includes("blocked") && !lines.includes("LEAK"), tmuxDenied.split("\n").slice(-6).join(" | "));
     await backend.call("ws-1", { op: "tmux.kill", name: "probe" });
   } catch (e) {
     record("unexpected error", false, (e as Error).message.slice(0, 200));

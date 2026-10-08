@@ -154,4 +154,4 @@ if (( remove_p0 )) && dscl . -read /Users/ws-hive-p0 >/dev/null 2>&1; then
   sysadminctl -deleteUser ws-hive-p0 >/dev/null 2>&1 || die "Could not delete ws-hive-p0"
 fi
 for n in $(seq 1 "$count"); do verify "ws-${n}"; done
-say "Workstations ready: $(seq -s ' ' 1 "$count" | sed 's/[0-9]*/ws-&/g')"
+say "Workstations ready: $(for n in $(seq 1 "$count"); do print -n "ws-${n} "; done)"
