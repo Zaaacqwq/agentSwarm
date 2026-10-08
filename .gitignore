@@ -7,3 +7,5 @@ dist/
 *.xcresult/
 DerivedData/
 .DS_Store
+.hive-data/
+.playwright-cli/
