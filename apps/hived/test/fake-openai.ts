@@ -13,10 +13,10 @@ export type Reply =
   | { kind: "text"; text: string }
   | { kind: "error"; status: number };
 
-export function startFakeOpenAI(decide: (req: RecordedRequest, index: number) => Reply) {
+export function startFakeOpenAI(decide: (req: RecordedRequest, index: number) => Reply, port = 0) {
   const requests: RecordedRequest[] = [];
   const server = Bun.serve({
-    port: 0,
+    port,
     hostname: "127.0.0.1",
     async fetch(request) {
       const url = new URL(request.url);
