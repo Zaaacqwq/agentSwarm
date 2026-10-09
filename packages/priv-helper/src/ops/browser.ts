@@ -106,12 +106,16 @@ function send(socket: string, request: BrowserRequest): Promise<BrowserResponse>
     let buf = "";
     let connected = false;
     let settled = false;
+    // Callers may spawn right after this (the daemon on a failed connect). Bun 1.3.0 closes a
+    // socket's descriptor after its close event, and a spawn in between can reuse that descriptor;
+    // so settle only one macrotask after the socket is gone.
     const finish = (fn: () => void) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (conn.closed) return void setTimeout(fn, 1);
+      conn.once("close", () => setTimeout(fn, 1));
       conn.destroy();
-      fn();
     };
     const timer = setTimeout(() => finish(() => reject(new OpError("timeout", "Browser command timed out"))), CALL_TIMEOUT_MS);
     const conn = connect(socket, () => {
