@@ -34,7 +34,7 @@ export const chatRoutes = (deps: RouteDeps): FastifyPluginAsyncTypebox => async 
   );
 
   app.post("/:id/messages", { schema: { params: IdParams, body: PostMessage, response: { 200: Message } } }, async (request) =>
-    chat.postUserMessage(requireUser(request), request.params.id, request.body.body.trim() || request.body.body, request.body.replyToId),
+    chat.postUserMessage(requireUser(request), request.params.id, request.body.body.trim() || request.body.body, request.body.replyToId, request.body.attachmentIds ?? []),
   );
 };
 
