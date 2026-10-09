@@ -59,6 +59,15 @@ describe("file ops", () => {
     expect(await run({ op: "fs.read", scope, path: "nope.ts" })).toMatchObject({ ok: false, code: "not_found" });
   });
 
+  test("readBinary returns base64 and stays in scope", async () => {
+    const { run, scope } = await withWorktree();
+    okResult(await run({ op: "fs.write", scope, path: "img.bin", content: "\u0001\u0002png" }));
+    const bin = okResult(await run({ op: "fs.readBinary", scope, path: "img.bin" }));
+    expect(Buffer.from(bin.base64 as string, "base64").toString()).toBe("\u0001\u0002png");
+    expect(bin.size).toBe(5);
+    expect(await run({ op: "fs.readBinary", scope, path: "../../ws-2/theirs.txt" })).toMatchObject({ ok: false });
+  });
+
   test("grep finds matches relative to the worktree", async () => {
     const { run, scope } = await withWorktree();
     okResult(await run({ op: "fs.write", scope, path: "lib/x.ts", content: "export const needle = 1;\n" }));

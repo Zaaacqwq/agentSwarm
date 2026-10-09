@@ -114,7 +114,31 @@ async function main(): Promise<void> {
   }
 }
 
+/** P5: the agent browser runs headless Chrome as the workstation user, inside the sandbox. */
+async function browserChecks(): Promise<void> {
+  type Res = { ok: boolean; url?: string; title?: string; text?: string; image?: string; error?: string };
+  const call = (command: object) => backend.call<Res>("ws-1", { op: "browser", agent: "check_probe", request: { command, approvedHosts: [] } });
+  try {
+    const opened = await call({ cmd: "open", url: "https://example.com/" });
+    record("browser opens a public page", opened.ok && opened.title === "Example Domain", opened.error ?? opened.title ?? "");
+    const snap = await call({ cmd: "snapshot" });
+    record("browser snapshot", Boolean(snap.text?.includes("Example Domain")));
+    const shot = await call({ cmd: "screenshot" });
+    record("browser screenshot", (shot.image?.length ?? 0) > 1000);
+    const local = await call({ cmd: "open", url: "http://127.0.0.1:4319/" });
+    record("browser refuses local addresses", !local.ok, local.error ?? "");
+    const ps = await sh(tmpdir(), "ps", "-axo", "user=,command=");
+    const owners = new Set(ps.split("\n").filter((l) => l.includes("Google Chrome") && l.includes("check_probe")).map((l) => l.trim().split(/\s+/)[0]));
+    record("Chrome runs as ws-1", owners.size === 1 && owners.has("ws-1"), [...owners].join(","));
+  } catch (e) {
+    record("browser", false, (e as Error).message.slice(0, 200));
+  } finally {
+    await backend.call("ws-1", { op: "browser.reset", agent: "check_probe" }).catch(() => {});
+  }
+}
+
 await main();
+if (results.every((r) => r.ok)) await browserChecks();
 const failed = results.filter((r) => !r.ok).length;
 process.stdout.write(`\n${results.length - failed} passed, ${failed} failed\n`);
 process.exit(failed ? 1 : 0);

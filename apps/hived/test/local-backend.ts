@@ -14,6 +14,7 @@ export function localBackend(sandbox = true) {
     inbox: join(base, "inbox"),
     hivedData: join(base, "hived"),
     binDir: join(base, "bin"),
+    browserDir: join(base, "browser"),
   };
   for (const user of ["ws-1", "ws-2"]) {
     mkdirSync(join(layout.wsRoot, user), { recursive: true });

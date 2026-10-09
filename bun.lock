@@ -60,6 +60,9 @@
     },
     "packages/priv-helper": {
       "name": "@hive/priv-helper",
+      "dependencies": {
+        "playwright-core": "1.64.0",
+      },
     },
     "packages/tools": {
       "name": "@hive/tools",

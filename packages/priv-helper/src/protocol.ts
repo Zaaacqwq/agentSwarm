@@ -17,6 +17,9 @@ export type Request =
   | { op: "git.commit"; scope: string; message: string }
   | { op: "git.pushInbox"; scope: string; branch: string }
   | { op: "git.remove"; scope: string }
+  | { op: "fs.readBinary"; scope: string; path: string }
+  | { op: "browser"; agent: string; request: import("./browser/protocol.ts").BrowserRequest }
+  | { op: "browser.reset"; agent: string }
   | { op: "info" };
 
 export type Response = { ok: true; result: unknown } | { ok: false; error: string; code: ErrorCode };

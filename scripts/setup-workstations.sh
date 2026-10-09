@@ -2,7 +2,7 @@
 # One-time (re-runnable) admin setup for Hive workstations. See docs/decisions/0004.
 #
 #   sudo zsh scripts/setup-workstations.sh [N] [--remove-p0]   create/update ws-1..ws-N (default 2)
-#   sudo zsh scripts/setup-workstations.sh --update-exec       rebuild and reinstall hive-exec only
+#   sudo zsh scripts/setup-workstations.sh --update-exec       rebuild and reinstall hive-exec and the browser runtime
 #   sudo zsh scripts/setup-workstations.sh --uninstall         remove users, group, sudoers, hive-exec
 #
 # Everything is idempotent. hived itself never runs as root; this script is the only admin step.
@@ -58,6 +58,23 @@ install_exec() {
   codesign --force --sign - "${LIBEXEC}/bin/bun" >/dev/null 2>&1
   chown root:wheel "$LIBEXEC" "${LIBEXEC}/bin" && chmod 0755 "$LIBEXEC" "${LIBEXEC}/bin"
   say "Installed ${EXEC_BIN} and ${LIBEXEC}/bin/bun (root:wheel 0755)"
+  install_browser "$bun"
+}
+
+# The browser daemon runs as plain JS next to its own playwright-core: a compiled binary would
+# look for playwright-core's package.json at its build-time path, which workstations cannot read.
+install_browser() {
+  local bun="$1" pw="${ROOT}/packages/priv-helper/node_modules/playwright-core"
+  [[ -d "$pw" ]] || die "playwright-core is missing; run bun install first."
+  [[ -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]] || say "WARNING: Google Chrome is not installed; agent browsers will not start."
+  sudo -u "$OWNER" "$bun" build --target bun --external playwright-core "${ROOT}/packages/priv-helper/src/browser/daemon.ts" --outfile "${ROOT}/.tmp/browser/daemon.js" >/dev/null
+  rm -rf "${LIBEXEC}/browser"
+  mkdir -p "${LIBEXEC}/browser/node_modules"
+  install -o root -g wheel -m 0644 "${ROOT}/.tmp/browser/daemon.js" "${LIBEXEC}/browser/daemon.js"
+  cp -RL "$pw" "${LIBEXEC}/browser/node_modules/playwright-core"
+  chown -R root:wheel "${LIBEXEC}/browser"
+  chmod -R u=rwX,go=rX "${LIBEXEC}/browser"
+  say "Installed the browser runtime in ${LIBEXEC}/browser"
 }
 
 check_volume() {
@@ -123,11 +140,15 @@ verify() {
   local user="$1" out
   out="$(print -r -- '{"op":"info"}' | sudo -u "$OWNER" sudo -n -u "$user" "$EXEC_BIN" 2>&1 || true)"
   if [[ "$out" == *'"ok":true'* ]]; then say "Verified: ${OWNER} can run hive-exec as ${user}"; else die "Verification failed for ${user}: ${out}"; fi
+  out="$(print -r -- '{"op":"browser","agent":"setup_check","request":{"command":{"cmd":"ping"},"approvedHosts":[]}}' | sudo -u "$OWNER" sudo -n -u "$user" "$EXEC_BIN" 2>&1 || true)"
+  print -r -- '{"op":"browser.reset","agent":"setup_check"}' | sudo -u "$OWNER" sudo -n -u "$user" "$EXEC_BIN" >/dev/null 2>&1 || true
+  if [[ "$out" == *'"ok":true'* ]]; then say "Verified: headless Chrome starts as ${user}"; else say "WARNING: the browser did not start as ${user}: ${out}"; fi
 }
 
 case "$mode" in
   update-exec)
     install_exec
+    for user in $(dscl . -list /Users | grep -E '^ws-[0-9]+$' || true); do verify "$user"; done
     exit 0
     ;;
   uninstall)

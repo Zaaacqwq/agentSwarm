@@ -40,6 +40,16 @@ export function read(env: ExecEnv, scope: string, path: string, offset = 1, limi
   return { path, fromLine: from, totalLines: lines.length, content: slice.join("\n"), truncated: from - 1 + limit < lines.length };
 }
 
+const MAX_BINARY_BYTES = 10 * 1024 * 1024;
+
+/** Reads any file (images, PDFs) as base64 for attachments; same scope rules as text reads. */
+export function readBinary(env: ExecEnv, scope: string, path: string) {
+  const file = existingFile(env, scope, path);
+  const size = statSync(file).size;
+  if (size > MAX_BINARY_BYTES) throw new OpError("bad_request", `${path} is ${size} bytes; attachments are limited to 10 MB`);
+  return { path, size, base64: readFileSync(file).toString("base64") };
+}
+
 export function write(env: ExecEnv, scope: string, path: string, content: string) {
   if (Buffer.byteLength(content) > MAX_WRITE_BYTES) throw new OpError("bad_request", "Content too large");
   const file = resolveInScope(resolveScope(env.root, scope), path);

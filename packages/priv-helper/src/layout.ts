@@ -12,6 +12,10 @@ export interface Layout {
   readonly hivedData: string;
   /** Tools available to agents (pinned bun etc.) */
   readonly binDir: string;
+  /** The agent browser daemon (daemon.js + node_modules/playwright-core), root-owned and world-readable */
+  readonly browserDir: string;
+  /** Test-only exceptions to the browser's private-address block (never set in production). */
+  readonly browserAllowHosts?: readonly string[];
 }
 
 export const PRODUCTION_LAYOUT: Layout = {
@@ -21,6 +25,7 @@ export const PRODUCTION_LAYOUT: Layout = {
   inbox: "/Volumes/HiveWS/inbox",
   hivedData: "/Volumes/HiveWS/hived",
   binDir: "/usr/local/libexec/hive/bin",
+  browserDir: "/usr/local/libexec/hive/browser",
 };
 
 export const WS_USER_PATTERN = /^ws-[0-9]{1,3}$/;

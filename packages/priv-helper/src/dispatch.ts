@@ -4,6 +4,7 @@ import * as fs from "./ops/fs.ts";
 import { exec } from "./ops/exec.ts";
 import * as tmux from "./ops/tmux.ts";
 import * as git from "./ops/git.ts";
+import * as browser from "./ops/browser.ts";
 
 export async function dispatch(env: ExecEnv, request: Request): Promise<Response> {
   try {
@@ -33,6 +34,9 @@ async function run(env: ExecEnv, r: Request): Promise<unknown> {
     case "git.commit": return git.commit(env, r.scope, r.message);
     case "git.pushInbox": return git.pushInbox(env, r.scope, r.branch);
     case "git.remove": return git.remove(env, r.scope);
+    case "fs.readBinary": return fs.readBinary(env, r.scope, r.path);
+    case "browser": return browser.browser(env, r.agent, r.request);
+    case "browser.reset": return browser.reset(env, r.agent);
     case "info": return { user: env.user, root: env.root, sandbox: env.sandbox };
     default: throw new OpError("bad_request", `Unknown op ${(r as { op?: unknown }).op}`);
   }

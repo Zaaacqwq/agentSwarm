@@ -4,8 +4,8 @@ import { join } from "node:path";
 import type { ExecEnv, Layout } from "../src/layout.ts";
 
 /** A throwaway workstation layout under /tmp, shaped like /Volumes/HiveWS. */
-export function fixture(sandbox = true) {
-  const base = realpathSync(mkdtempSync(join(tmpdir(), "hive-exec-")));
+export function fixture(sandbox = true, parent = tmpdir()) {
+  const base = realpathSync(mkdtempSync(join(parent, "hive-exec-")));
   const layout: Layout = {
     volume: base,
     wsRoot: join(base, "ws"),
@@ -13,6 +13,7 @@ export function fixture(sandbox = true) {
     inbox: join(base, "inbox"),
     hivedData: join(base, "hived"),
     binDir: join(base, "bin"),
+    browserDir: join(base, "browser"),
   };
   for (const d of [layout.wsRoot, layout.mirrors, layout.hivedData, join(layout.inbox, "ws-1.git"), join(layout.wsRoot, "ws-1"), join(layout.wsRoot, "ws-2"), join(base, "home-ws-1")]) {
     mkdirSync(d, { recursive: true });
