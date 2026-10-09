@@ -12,7 +12,7 @@ import { SESSION_COOKIE, type RouteDeps } from "../http/context.ts";
 import { authRoutes } from "../http/routes/auth-routes.ts";
 import { endpointRoutes } from "../http/routes/endpoint-routes.ts";
 import { agentRoutes } from "../http/routes/agent-routes.ts";
-import { chatRoutes } from "../http/routes/chat-routes.ts";
+import { chatRoutes, messageRoutes } from "../http/routes/chat-routes.ts";
 import { metaRoutes } from "../http/routes/meta-routes.ts";
 import { workstationRoutes } from "../http/routes/workstation-routes.ts";
 import { registerWebSocket } from "../http/routes/ws-route.ts";
@@ -60,6 +60,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   await app.register(agentRoutes(deps), { prefix: "/api/agents" });
   await app.register(chatRoutes(deps), { prefix: "/api/channels" });
   await app.register(metaRoutes(deps), { prefix: "/api" });
+  await app.register(messageRoutes(deps), { prefix: "/api" });
   await app.register(workstationRoutes(deps), { prefix: "/api" });
   registerWebSocket(app, deps);
   app.get("/api/openapi.json", { schema: { hide: true } }, async () => app.swagger());

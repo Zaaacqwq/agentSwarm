@@ -30,7 +30,7 @@ describe("AgentManager", () => {
     const kinds = w.runs.listActivity([run!.id]).map((a) => a.kind);
     expect(kinds).toEqual(["assistant_text", "tool_call", "tool_result"]);
     expect(w.runs.loadSession(agent.id)).toHaveLength(1);
-    expect(w.runtime.calls[0]!.prompt).toContain("admin (user): ping");
+    expect(w.runtime.calls[0]!.prompt).toContain("admin (person): ping");
     expect(w.manager.stateOf(agent.id)).toBe("idle");
     expect(w.events).toContain("activity.created");
   });

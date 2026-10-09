@@ -1,5 +1,5 @@
 import type { Agent, AgentState } from "./contracts/agents.ts";
-import type { Message } from "./contracts/chat.ts";
+import type { Channel, Message, QueueInfo } from "./contracts/chat.ts";
 import type { ActivityEvent, Run } from "./contracts/runs.ts";
 import type { GitPush, HostStatus, Workstation, Worktree } from "./contracts/workstations.ts";
 
@@ -7,9 +7,12 @@ import type { GitPush, HostStatus, Workstation, Worktree } from "./contracts/wor
 // over HTTP and then applying these increments; runs never depend on a live socket.
 export type ServerEvent =
   | { type: "message.created"; message: Message }
+  | { type: "message.updated"; message: Message }
+  | { type: "channel.updated"; channel: Channel }
+  | { type: "channel.deleted"; channelId: string }
   | { type: "run.updated"; run: Run }
   | { type: "activity.created"; activity: ActivityEvent }
-  | { type: "agent.state"; agentId: string; state: AgentState }
+  | { type: "agent.state"; agentId: string; state: AgentState; queue?: QueueInfo }
   | { type: "agent.updated"; agent: Agent }
   | { type: "agent.deleted"; agentId: string }
   | { type: "workstation.updated"; workstation: Workstation }

@@ -15,7 +15,11 @@ const fake = startFakeOpenAI((req) => {
   const text = lastUserText(req);
   const channel = /channel_id=(ch_[a-z0-9]+)/.exec(text)?.[1];
   if (!channel) return { kind: "text", text: "no channel" };
-  const said = text.split(": ").slice(1).join(": ");
+  // Stay quiet when only another agent spoke, so fake agents never ping-pong.
+  if (!text.includes("(person):")) return { kind: "text", text: "Noted; nothing to add." };
+  const said = text.split("(person): ").slice(1).join("(person): ");
+  const relay = /relay to (\w+)/i.exec(said)?.[1];
+  if (relay) return { kind: "tool", name: "message_agent", args: { agent: relay, body: "relayed from the owner" } };
   return {
     kind: "tool",
     name: "send_message",

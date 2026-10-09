@@ -1,5 +1,5 @@
-import type { AgentState, Message, Run, ToolGrant } from "@hive/core";
-import { COMMUNICATION_PACK_ID, type AgentContext, type ToolpackRegistry } from "@hive/tools";
+import type { AgentState, Message, QueueInfo, Run, ToolGrant } from "@hive/core";
+import { COMMUNICATION_PACK_ID, type AgentContext, type ToolpackRegistry, type TurnTrigger } from "@hive/tools";
 import type { EventBus } from "../events/event-bus.ts";
 import type { RunStore } from "../runs/run-store.ts";
 import type { AgentRow } from "./agent-service.ts";
@@ -10,9 +10,24 @@ export interface ManagerLimits {
   readonly maxConcurrentRuns: number;
   readonly runTimeoutMs: number;
   readonly maxToolCallsPerRun: number;
+  /** Quiet period before a turn starts, so bursts of messages become one turn. */
+  readonly debounceMs: number;
+  /** Unfinished agent-originated deliveries allowed per recipient and overall. */
+  readonly maxPendingPerAgent: number;
+  readonly maxPendingGlobal: number;
+  /** Turns woken only by agents are dropped if they wait longer than this. */
+  readonly agentOnlyQueueMs: number;
 }
 
-export const DEFAULT_LIMITS: ManagerLimits = { maxConcurrentRuns: 3, runTimeoutMs: 15 * 60 * 1000, maxToolCallsPerRun: 60 };
+export const DEFAULT_LIMITS: ManagerLimits = {
+  maxConcurrentRuns: 3,
+  runTimeoutMs: 15 * 60 * 1000,
+  maxToolCallsPerRun: 60,
+  debounceMs: 1500,
+  maxPendingPerAgent: 8,
+  maxPendingGlobal: 64,
+  agentOnlyQueueMs: 5 * 60 * 1000,
+};
 
 export interface AgentManagerDeps {
   readonly runs: RunStore;
@@ -26,6 +41,8 @@ export interface AgentManagerDeps {
     getMessages(ids: readonly number[]): Message[];
     authorName(kind: Message["authorKind"], id: string): string;
     postSystemMessage(orgId: string, channelId: string, body: string, runId: string | null): Message;
+    /** Kind and display title of a channel, and whether the agent is still a member. */
+    describeChannel(channelId: string, agentId: string): { kind: "dm" | "group" | "agent_dm"; title: string; member: boolean } | null;
   };
   readonly log: (level: "info" | "warn" | "error", msg: string, extra?: Record<string, unknown>) => void;
   readonly limits?: Partial<ManagerLimits>;
@@ -42,6 +59,8 @@ interface ActiveRun {
 }
 
 const RESULT_PREVIEW = 2000;
+/** A burst can extend the quiet period to at most this many debounce intervals. */
+const MAX_DEBOUNCE_FACTOR = 3;
 
 /**
  * Owns agent turns: one active turn per agent, a global concurrency cap, and message
@@ -51,6 +70,12 @@ export class AgentManager {
   private readonly active = new Map<string, ActiveRun>();
   private readonly limits: ManagerLimits;
   private readonly settled = new Set<Promise<void>>();
+  /** Debounce: an agent's queued run may start only after this time. */
+  private readonly readyAt = new Map<string, number>();
+  /** When the current burst for an agent began, so chatter cannot postpone a turn forever. */
+  private readonly burstStart = new Map<string, number>();
+  /** Why a working agent is blocked (e.g. waiting for a workstation), for the UI. */
+  private readonly waiting = new Map<string, string>();
   private closed = false;
 
   constructor(private readonly deps: AgentManagerDeps) {
@@ -62,13 +87,47 @@ export class AgentManager {
     return this.deps.runs.findQueued(agentId) ? "queued" : "idle";
   }
 
-  /** A human message reached an agent: fold it into the agent's next turn. */
+  /** A message reached an agent: fold it into the agent's next turn after a short quiet period. */
   notify(orgId: string, agentId: string, messageId: number): void {
     const queued = this.deps.runs.findQueued(agentId);
     const run = queued ? this.deps.runs.appendTrigger(queued.id, messageId) : this.deps.runs.createQueued(orgId, agentId, [messageId]);
     this.deps.bus.publish(orgId, { type: "run.updated", run });
+    if (this.limits.debounceMs > 0) {
+      const now = Date.now();
+      const start = queued ? (this.burstStart.get(agentId) ?? now) : now;
+      this.burstStart.set(agentId, start);
+      const at = Math.min(now + this.limits.debounceMs, start + this.limits.debounceMs * MAX_DEBOUNCE_FACTOR);
+      this.readyAt.set(agentId, at);
+      setTimeout(() => this.pump(), at - now + 5);
+    }
     this.publishState(orgId, agentId);
     this.pump();
+  }
+
+  /** Queue caps for deliveries that come from other agents. People are never refused. */
+  canAcceptFromAgent(agentId: string): boolean {
+    const queued = this.deps.runs.listQueued();
+    const mine = queued.find((r) => r.agentId === agentId)?.triggerMessageIds.length ?? 0;
+    const all = queued.reduce((n, r) => n + r.triggerMessageIds.length, 0);
+    return mine < this.limits.maxPendingPerAgent && all < this.limits.maxPendingGlobal;
+  }
+
+  queueInfo(agentId: string): QueueInfo | undefined {
+    const waitingFor = this.waiting.get(agentId);
+    if (this.active.has(agentId)) return waitingFor ? { position: 0, waitingFor } : undefined;
+    const queued = this.deps.runs.listQueued();
+    const index = queued.findIndex((r) => r.agentId === agentId);
+    if (index < 0) return undefined;
+    const full = this.active.size >= this.limits.maxConcurrentRuns;
+    return { position: index + 1, waitingFor: full ? "a free run slot" : null };
+  }
+
+  /** Tools report long waits (e.g. a workstation lease) so people can see why an agent is idle. */
+  setWaiting(agentId: string, reason: string | null): void {
+    if (reason) this.waiting.set(agentId, reason);
+    else this.waiting.delete(agentId);
+    const orgId = this.deps.findAgent(agentId)?.orgId;
+    if (orgId) this.publishState(orgId, agentId);
   }
 
   /** Aborts the agent's current turn. Queued messages still run afterwards. */
@@ -104,7 +163,16 @@ export class AgentManager {
 
   /** Resolves when no turn is active and nothing startable is queued (used by tests). */
   async idle(): Promise<void> {
-    while (this.settled.size > 0) await Promise.allSettled([...this.settled]);
+    for (;;) {
+      if (this.settled.size > 0) {
+        await Promise.allSettled([...this.settled]);
+        continue;
+      }
+      const now = Date.now();
+      const pending = [...this.readyAt.entries()].filter(([agentId, at]) => at > now && this.deps.runs.findQueued(agentId));
+      if (pending.length === 0) return;
+      await Bun.sleep(Math.max(...pending.map(([, at]) => at)) - now + 10);
+    }
   }
 
   private abort(agentId: string, reason: StopReason): boolean {
@@ -125,6 +193,8 @@ export class AgentManager {
       this.active.set(next.agentId, active);
       const done = this.execute(next, active).catch((error: unknown) => this.onCrash(next, error)).finally(() => {
         this.active.delete(next.agentId);
+        this.waiting.delete(next.agentId);
+        this.burstStart.delete(next.agentId);
         try {
           this.deps.onRunSettled?.(next.id);
         } catch (error) {
@@ -153,8 +223,35 @@ export class AgentManager {
   }
 
   private nextStartable(): Run | null {
-    // Oldest queued run whose agent is free. Queued runs are few, so a scan is fine.
-    return this.deps.runs.listQueued().find((r) => !this.active.has(r.agentId)) ?? null;
+    // Oldest queued run whose agent is free and past its debounce. Queued runs are few, so a scan is fine.
+    const now = Date.now();
+    for (const run of this.deps.runs.listQueued()) {
+      if (this.active.has(run.agentId) || (this.readyAt.get(run.agentId) ?? 0) > now) continue;
+      if (now - run.createdAt > this.limits.agentOnlyQueueMs && this.agentOnly(run)) {
+        this.dropStale(run);
+        continue;
+      }
+      return run;
+    }
+    return null;
+  }
+
+  private agentOnly(run: Run): boolean {
+    return this.deps.chat.getMessages(run.triggerMessageIds).every((m) => m.authorKind !== "user");
+  }
+
+  private dropStale(run: Run): void {
+    const dropped = this.deps.runs.finish(run.id, "failed", "Dropped: messages from other agents waited too long");
+    const orgId = this.deps.runs.orgOf(run.id);
+    if (!orgId) return;
+    this.deps.bus.publish(orgId, { type: "run.updated", run: dropped });
+    this.publishState(orgId, run.agentId);
+    const name = this.deps.findAgent(run.agentId)?.name ?? "An agent";
+    // System messages wake nobody, so this tells people without restarting the loop.
+    for (const channelId of new Set(this.deps.chat.getMessages(run.triggerMessageIds).map((m) => m.channelId))) {
+      this.deps.chat.postSystemMessage(orgId, channelId, `${name} was too busy and skipped messages that waited more than 5 minutes.`, run.id);
+    }
+    this.deps.log("warn", "dropped stale agent-only run", { runId: run.id, agentId: run.agentId });
   }
 
   private async execute(queuedRun: Run, active: ActiveRun): Promise<void> {
@@ -165,8 +262,10 @@ export class AgentManager {
     this.publishState(orgId, run.agentId);
 
     const agent = this.deps.findAgent(run.agentId);
-    const messages = this.deps.chat.getMessages(run.triggerMessageIds);
+    // Membership is rechecked at delivery: messages from channels the agent has left are dropped.
+    const messages = this.deps.chat.getMessages(run.triggerMessageIds).filter((m) => this.deps.chat.describeChannel(m.channelId, run.agentId)?.member);
     const channels = [...new Set(messages.map((m) => m.channelId))];
+    const trigger = buildTrigger(messages);
     let replied = false;
     const timeout = setTimeout(() => this.abort(run.agentId, "timeout"), this.limits.runTimeoutMs);
     let toolCalls = 0;
@@ -203,7 +302,8 @@ export class AgentManager {
       const endpoint = await this.deps.resolveEndpoint(orgId, agent.endpointId);
       secret = endpoint.apiKey;
       const grants = this.deps.grantsOf(agent.id);
-      const context: AgentContext = { agentId: agent.id, orgId, runId: run.id, grants, currentGrants: () => this.deps.grantsOf(agent.id) };
+      if (messages.length === 0) throw new Error("No deliverable messages (the agent left those channels)");
+      const context: AgentContext = { agentId: agent.id, orgId, runId: run.id, grants, currentGrants: () => this.deps.grantsOf(agent.id), trigger, signal: active.controller.signal };
       const toolset = this.deps.registry.resolve(context);
       if (!toolset.tools.some((t) => t.toolpackId === COMMUNICATION_PACK_ID && t.tool.name === "send_message")) {
         emit({ kind: "notice", text: "send_message is not granted, so this agent cannot reply in chat." });
@@ -214,7 +314,7 @@ export class AgentManager {
         context,
         tools: toolset.tools,
         guidance: toolset.guidance,
-        prompt: this.formatPrompt(messages),
+        prompt: this.formatPrompt(messages, agent.id),
         sessionEntries: this.deps.runs.loadSession(agent.id),
         signal: active.controller.signal,
         onEvent: emit,
@@ -222,7 +322,7 @@ export class AgentManager {
       if (active.stopReason) throw new TurnError(active.stopReason, result.sessionEntries);
       this.deps.runs.saveSession(agent.id, result.sessionEntries);
       run = this.deps.runs.finish(run.id, "succeeded", null);
-      if (!replied && channels.length > 0) {
+      if (!replied && trigger.humanChannelIds.length > 0) {
         emit({ kind: "notice", text: "Turn ended without send_message; nothing was posted to chat." });
       }
     } catch (error) {
@@ -234,7 +334,8 @@ export class AgentManager {
         if (agent && error instanceof TurnError && error.sessionEntries) this.deps.runs.saveSession(agent.id, error.sessionEntries);
         run = this.deps.runs.finish(run.id, status, text);
         emit({ kind: "error", text });
-        for (const channelId of channels) {
+        // Only people's channels get failure notices; agents would just wake each other up.
+        for (const channelId of trigger.humanChannelIds) {
           this.deps.chat.postSystemMessage(orgId, channelId, status === "interrupted" ? `Turn stopped (${reason}).` : `Turn failed: ${text}`, run.id);
         }
       }
@@ -245,22 +346,42 @@ export class AgentManager {
     if (this.deps.runs.get(run.id)) this.deps.bus.publish(orgId, { type: "run.updated", run });
   }
 
-  private formatPrompt(messages: readonly Message[]): string {
+  /** Server-written source headers; message text cannot forge them. */
+  private formatPrompt(messages: readonly Message[], agentId: string): string {
+    const kinds = { dm: "private chat with your owner", group: "group", agent_dm: "private chat with an agent" } as const;
     return messages
       .map((m) => {
-        const who = this.deps.chat.authorName(m.authorKind, m.authorId);
-        return `[channel_id=${m.channelId} · direct message · message #${m.id}]\n${who} (${m.authorKind}): ${m.body}`;
+        const ch = this.deps.chat.describeChannel(m.channelId, agentId);
+        const where = ch ? (ch.kind === "group" ? `group "${ch.title}"` : kinds[ch.kind]) : "channel";
+        const who = m.authorName || this.deps.chat.authorName(m.authorKind, m.authorId);
+        const role = m.authorKind === "user" ? "person" : m.authorKind;
+        const reply = m.replyToId ? ` · reply to #${m.replyToId}` : "";
+        const mentioned = m.mentions.includes(agentId) ? " · you were mentioned" : "";
+        return `[channel_id=${m.channelId} · ${where} · message #${m.id}${reply}${mentioned}]\n${who} (${role}): ${m.body}`;
       })
       .join("\n\n");
   }
 
+  /** Channels where a person asked for this run; those are the ones owed a notice. */
   private channelsOf(run: Run): string[] {
-    return [...new Set(this.deps.chat.getMessages(run.triggerMessageIds).map((m) => m.channelId))];
+    return [...new Set(this.deps.chat.getMessages(run.triggerMessageIds).filter((m) => m.authorKind === "user").map((m) => m.channelId))];
   }
 
   private publishState(orgId: string, agentId: string): void {
-    this.deps.bus.publish(orgId, { type: "agent.state", agentId, state: this.stateOf(agentId) });
+    const queue = this.queueInfo(agentId);
+    this.deps.bus.publish(orgId, { type: "agent.state", agentId, state: this.stateOf(agentId), ...(queue ? { queue } : {}) });
   }
+}
+
+/** The chain and the channels where a person spoke, derived from the turn's own input. */
+function buildTrigger(messages: readonly Message[]): TurnTrigger {
+  const human = messages.filter((m) => m.authorKind === "user");
+  const lead = human.at(-1) ?? messages.at(-1);
+  return {
+    chainId: lead?.chainId ?? null,
+    humanChannelIds: [...new Set(human.map((m) => m.channelId))],
+    channelIds: [...new Set(messages.map((m) => m.channelId))],
+  };
 }
 
 function activityPayload(event: Exclude<RuntimeEvent, { kind: "usage" }>, scrub: (t: string) => string): Record<string, unknown> {

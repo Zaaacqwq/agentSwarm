@@ -1,6 +1,7 @@
 import { NavLink, Outlet } from "react-router";
 import { Bot, MessagesSquare, Server, Settings2 } from "lucide-react";
 import { HostBanner } from "./HostBanner.tsx";
+import { Portal } from "./Portal.tsx";
 import type { LiveStatus } from "../app/live.ts";
 
 const NAV = [
@@ -28,10 +29,13 @@ export function Shell({ live }: { live: LiveStatus }) {
         <nav aria-label="Main" className="absolute left-1/2 hidden -translate-x-1/2 sm:block">
           <PillNav />
         </nav>
-        <span className="flex items-center gap-2 rounded-pill border border-line bg-surface/70 px-3 py-1 text-[0.7rem] font-semibold tracking-wide text-muted" aria-live="polite">
-          <span className={`size-1.5 rounded-full ${status.color}`} />
-          {status.text}
-        </span>
+        <div className="flex items-center gap-2">
+          <Portal />
+          <span className="flex items-center gap-2 rounded-pill border border-line bg-surface/70 px-3 py-1 text-[0.7rem] font-semibold tracking-wide text-muted" aria-live="polite">
+            <span className={`size-1.5 rounded-full ${status.color}`} />
+            {status.text}
+          </span>
+        </div>
       </header>
       <HostBanner />
       <main className="min-h-0 flex-1 px-2 pb-20 sm:px-6 sm:pb-6">
