@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Eye, Hash, Pencil, SlidersHorizontal } from "lucide-react";
+import { ArrowLeft, Eye, FileText, Hash, Paperclip, Pencil, SlidersHorizontal } from "lucide-react";
 import type { Agent, Channel, Message, MessagePage } from "@hive/core";
 import { api, qk, type QueueMap } from "../../app/api.ts";
 import { AgentAvatar } from "../../components/AgentAvatar.tsx";
@@ -29,6 +29,7 @@ export function Conversation({ channelId }: { channelId: string }) {
   const members = (channel?.members ?? []).filter((m) => m.kind === "agent").map((m) => byId.get(m.id)).filter((a): a is Agent => !!a);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [editing, setEditing] = useState(false);
+  const [showFiles, setShowFiles] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(!focusId);
@@ -68,7 +69,9 @@ export function Conversation({ channelId }: { channelId: string }) {
       <header className="flex items-center gap-3 border-b border-line px-4 py-3">
         <Link to="/chat" className="rounded-full p-1 text-muted hover:text-ink md:hidden" aria-label="Back to conversations"><ArrowLeft size={18} /></Link>
         {channel ? <HeaderIdentity channel={channel} members={members} /> : null}
-        <div className="ml-auto flex items-center gap-1">
+        <div className="relative ml-auto flex items-center gap-1">
+          <Button size="sm" variant="quiet" icon={<Paperclip size={14} />} onClick={() => setShowFiles((v) => !v)} aria-expanded={showFiles}>Files</Button>
+          {showFiles ? <FilesPanel channelId={channelId} /> : null}
           {channel?.kind === "group" ? <Button size="sm" variant="quiet" icon={<Pencil size={14} />} onClick={() => setEditing(true)}>Edit</Button> : null}
           {channel?.kind === "dm" && members[0] ? (
             <Link to={`/agents/${members[0].id}`} className="rounded-pill p-2 text-muted transition-colors hover:bg-raised hover:text-ink" aria-label="Agent settings"><SlidersHorizontal size={16} /></Link>
@@ -170,5 +173,26 @@ function Dots() {
     <span className="inline-flex gap-1" aria-hidden>
       {[0, 1, 2].map((i) => <span key={i} className="size-1.5 animate-bounce rounded-full bg-honey" style={{ animationDelay: `${i * 120}ms` }} />)}
     </span>
+  );
+}
+
+function FilesPanel({ channelId }: { channelId: string }) {
+  const files = useQuery({ queryKey: qk.channelFiles(channelId), queryFn: () => api.channelFiles(channelId) });
+  return (
+    <div className="absolute top-10 right-0 z-20 w-72 rounded-2xl border border-line bg-surface p-2 shadow-lift">
+      <p className="px-2 pb-1 text-[0.65rem] font-bold uppercase tracking-[0.16em] text-faint">Files in this chat</p>
+      <ul className="max-h-72 overflow-y-auto">
+        {(files.data ?? []).map((f) => (
+          <li key={f.id}>
+            <a href={api.fileUrl(f.id)} className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-raised">
+              <FileText size={13} className="shrink-0 text-honey" aria-hidden />
+              <span className="min-w-0 flex-1 truncate">{f.filename}</span>
+              <span className="text-xs text-faint">{Math.max(1, Math.round(f.size / 1024))} KB</span>
+            </a>
+          </li>
+        ))}
+        {files.isSuccess && files.data.length === 0 ? <li className="px-2 py-3 text-sm text-muted">No files yet.</li> : null}
+      </ul>
+    </div>
   );
 }

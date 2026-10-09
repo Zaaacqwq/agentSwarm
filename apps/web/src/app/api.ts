@@ -3,6 +3,7 @@ import type {
   Run, SessionInfo, ToolpackInfo, UpdateAgent, UpdateEndpoint, UsageSummary,
   CreateWorkstation, GitPush, HostStatus, Repository, Terminal, Workstation, Worktree,
   QueueInfo, SearchHit, UpdateGroup,
+  Attachment, CreateTask, Task, TaskDetail, UpdateTask,
 } from "@hive/core";
 
 export type QueueMap = Record<string, QueueInfo | undefined>;
@@ -25,12 +26,14 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function request<T>(method: string, path: string, body?: unknown, raw?: { bytes: Blob; filename: string }): Promise<T> {
   const res = await fetch(`/api${path}`, {
     method,
     credentials: "same-origin",
-    headers: body === undefined ? {} : { "content-type": "application/json" },
-    body: body === undefined ? null : JSON.stringify(body),
+    headers: raw
+      ? { "content-type": "application/octet-stream", "x-filename": encodeURIComponent(raw.filename) }
+      : body === undefined ? {} : { "content-type": "application/json" },
+    body: raw ? raw.bytes : body === undefined ? null : JSON.stringify(body),
   });
   const text = await res.text();
   const data: unknown = text ? safeJson(text) : null;
@@ -77,8 +80,17 @@ export const api = {
     const q = opts.before ? `?before=${opts.before}` : opts.around ? `?around=${opts.around}&limit=80` : "";
     return request<MessagePage>("GET", `/channels/${channelId}/messages${q}`);
   },
-  postMessage: (channelId: string, body: string, replyToId?: number) =>
-    request<Message>("POST", `/channels/${channelId}/messages`, replyToId ? { body, replyToId } : { body }),
+  postMessage: (channelId: string, body: string, replyToId?: number, attachmentIds: string[] = []) =>
+    request<Message>("POST", `/channels/${channelId}/messages`, { body, ...(replyToId ? { replyToId } : {}), ...(attachmentIds.length ? { attachmentIds } : {}) }),
+  uploadFile: (channelId: string, file: File) => request<Attachment>("POST", `/channels/${channelId}/files`, undefined, { bytes: file, filename: file.name }),
+  channelFiles: (channelId: string) => request<Attachment[]>("GET", `/channels/${channelId}/files`),
+  fileUrl: (id: string, inline = false) => `/api/files/${id}${inline ? "?inline=1" : ""}`,
+  tasks: () => request<Task[]>("GET", "/tasks"),
+  task: (id: string) => request<TaskDetail>("GET", `/tasks/${id}`),
+  createTask: (t: CreateTask) => request<Task>("POST", "/tasks", t),
+  updateTask: (id: string, t: UpdateTask) => request<Task>("PATCH", `/tasks/${id}`, t),
+  approveTask: (id: string) => request<Task>("POST", `/tasks/${id}/approve`),
+  deleteTask: (id: string) => request<{ ok: true }>("DELETE", `/tasks/${id}`),
   createGroup: (title: string, agentIds: string[]) => request<Channel>("POST", "/channels/groups", { title, agentIds }),
   updateGroup: (id: string, input: UpdateGroup) => request<Channel>("PATCH", `/channels/${id}`, input),
   deleteGroup: (id: string) => request<{ ok: true }>("DELETE", `/channels/${id}`),
@@ -122,5 +134,8 @@ export const qk = {
   repositories: ["repositories"] as const,
   host: ["host"] as const,
   queue: ["agent-queue"] as const,
+  tasks: ["tasks"] as const,
+  task: (id: string) => ["task", id] as const,
+  channelFiles: (id: string) => ["channel-files", id] as const,
   search: (q: string) => ["search", q] as const,
 };

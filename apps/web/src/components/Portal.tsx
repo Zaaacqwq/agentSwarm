@@ -1,19 +1,19 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useNavigate } from "react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bot, Hash, MessageSquareText, Search, Server } from "lucide-react";
+import { Bot, Hash, KanbanSquare, MessageSquareText, Search, Server } from "lucide-react";
 import { api, qk } from "../app/api.ts";
 import { preview, relativeTime } from "../lib/format.ts";
 
 interface Item {
   readonly key: string;
-  readonly group: "Agents" | "Chats" | "Workstations" | "Messages";
+  readonly group: "Tasks" | "Agents" | "Chats" | "Workstations" | "Messages";
   readonly label: string;
   readonly detail: string;
   readonly go: () => void;
 }
 
-const ICONS = { Agents: Bot, Chats: Hash, Workstations: Server, Messages: MessageSquareText } as const;
+const ICONS = { Tasks: KanbanSquare, Agents: Bot, Chats: Hash, Workstations: Server, Messages: MessageSquareText } as const;
 
 /** ⌘/Ctrl+K: one search box over agents, chats, workstations and message text. */
 export function Portal() {
@@ -48,6 +48,7 @@ function PortalDialog({ onClose }: { onClose: () => void }) {
   const agents = useQuery({ queryKey: qk.agents, queryFn: api.agents });
   const channels = useQuery({ queryKey: qk.channels, queryFn: api.channels });
   const workstations = useQuery({ queryKey: qk.workstations, queryFn: api.workstations });
+  const tasks = useQuery({ queryKey: qk.tasks, queryFn: api.tasks });
   const hits = useQuery({ queryKey: qk.search(debounced), queryFn: () => api.search(debounced), enabled: debounced.length >= 2 });
 
   useEffect(() => ref.current?.showModal(), []);
@@ -65,6 +66,7 @@ function PortalDialog({ onClose }: { onClose: () => void }) {
     const n = q.trim().toLowerCase();
     const has = (s: string) => s.toLowerCase().includes(n);
     const out: Item[] = [];
+    for (const t of tasks.data ?? []) if (!n || has(t.title) || `t-${t.number}`.includes(n) || String(t.number) === n) out.push({ key: `t${t.id}`, group: "Tasks", label: `T-${t.number} ${t.title}`, detail: t.status.replace("_", " "), go: () => go(`/tasks/${t.id}`) });
     for (const a of agents.data ?? []) if (!n || has(a.name) || has(a.role)) out.push({ key: `a${a.id}`, group: "Agents", label: a.name, detail: a.role || a.modelId, go: () => go(`/agents/${a.id}`) });
     for (const c of channels.data ?? []) if (!n || has(c.title ?? "")) out.push({ key: `c${c.id}`, group: "Chats", label: c.title ?? "Chat", detail: c.kind === "group" ? "group" : c.kind === "dm" ? "direct" : "between agents", go: () => go(`/chat/${c.id}`) });
     for (const w of workstations.data ?? []) if (!n || has(w.name) || has(w.osUser)) out.push({ key: `w${w.id}`, group: "Workstations", label: w.name, detail: w.osUser, go: () => go(`/workstations/${w.id}`) });
@@ -80,7 +82,7 @@ function PortalDialog({ onClose }: { onClose: () => void }) {
       }
     }
     return out.slice(0, 40);
-  }, [q, debounced, agents.data, channels.data, workstations.data, hits.data]);
+  }, [q, debounced, agents.data, channels.data, workstations.data, tasks.data, hits.data]);
 
   const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
@@ -98,7 +100,7 @@ function PortalDialog({ onClose }: { onClose: () => void }) {
       <label className="flex items-center gap-3 border-b border-line px-5 py-4">
         <Search size={18} className="text-honey" aria-hidden />
         <input autoFocus value={q} onChange={(e) => { setQ(e.target.value); setActive(0); }} onKeyDown={onKeyDown}
-          placeholder="Search agents, chats, workstations and messages" aria-label="Search" role="combobox" aria-expanded aria-controls="portal-results"
+          placeholder="Search tasks, agents, chats, workstations and messages" aria-label="Search" role="combobox" aria-expanded aria-controls="portal-results"
           className="w-full bg-transparent text-base placeholder:text-faint focus:outline-none" />
         <kbd className="rounded border border-line px-1.5 font-mono text-[0.65rem] text-faint">esc</kbd>
       </label>

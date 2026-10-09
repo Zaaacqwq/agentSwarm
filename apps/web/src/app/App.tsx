@@ -8,6 +8,7 @@ import { ChatPage } from "../pages/chat/ChatPage.tsx";
 import { AgentsPage } from "../pages/agents/AgentsPage.tsx";
 import { SettingsPage } from "../pages/settings/SettingsPage.tsx";
 import { WorkstationsPage } from "../pages/workstations/WorkstationsPage.tsx";
+import { TasksPage } from "../pages/tasks/TasksPage.tsx";
 
 export function App() {
   const session = useQuery({ queryKey: qk.session, queryFn: api.session, staleTime: Infinity });
@@ -24,6 +25,8 @@ export function App() {
         <Route element={<Shell live={live} />}>
           <Route path="/chat" element={<ChatPage />} />
           <Route path="/chat/:channelId" element={<ChatPage />} />
+          <Route path="/tasks" element={<TasksPage />} />
+          <Route path="/tasks/:taskId" element={<TasksPage />} />
           <Route path="/agents" element={<AgentsPage />} />
           <Route path="/agents/:agentId" element={<AgentsPage />} />
           <Route path="/workstations" element={<WorkstationsPage />} />

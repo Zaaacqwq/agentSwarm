@@ -1,11 +1,12 @@
 import { NavLink, Outlet } from "react-router";
-import { Bot, MessagesSquare, Server, Settings2 } from "lucide-react";
+import { Bot, KanbanSquare, MessagesSquare, Server, Settings2 } from "lucide-react";
 import { HostBanner } from "./HostBanner.tsx";
 import { Portal } from "./Portal.tsx";
 import type { LiveStatus } from "../app/live.ts";
 
 const NAV = [
   { to: "/chat", label: "Chat", icon: MessagesSquare },
+  { to: "/tasks", label: "Tasks", icon: KanbanSquare },
   { to: "/agents", label: "Agents", icon: Bot },
   { to: "/workstations", label: "Workstations", icon: Server },
   { to: "/settings", label: "Settings", icon: Settings2 },

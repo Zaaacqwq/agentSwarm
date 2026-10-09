@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQueryClient, type QueryClient } from "@tanstack/react-query";
-import type { Agent, Channel, MessagePage, ServerEvent, Workstation } from "@hive/core";
+import type { Agent, Channel, MessagePage, ServerEvent, Task, Workstation } from "@hive/core";
 import { qk, type QueueMap } from "./api.ts";
 
 export type LiveStatus = "connecting" | "live" | "offline";
@@ -133,6 +133,13 @@ export function applyEvent(client: QueryClient, event: ServerEvent): void {
       return;
     case "host.updated":
       client.setQueryData(qk.host, event.host);
+      return;
+    case "task.updated":
+      client.setQueryData<Task[]>(qk.tasks, (list) => {
+        if (!list) return list;
+        return list.some((t) => t.id === event.task.id) ? list.map((t) => (t.id === event.task.id ? event.task : t)) : [...list, event.task];
+      });
+      void client.invalidateQueries({ queryKey: qk.task(event.task.id) });
       return;
   }
 }

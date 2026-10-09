@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowUp, CornerUpLeft, Square, X } from "lucide-react";
-import type { Agent, Channel, Message, MessagePage } from "@hive/core";
+import { ArrowUp, CornerUpLeft, Paperclip, Square, X } from "lucide-react";
+import type { Agent, Attachment, Channel, Message, MessagePage } from "@hive/core";
 import { api, qk } from "../../app/api.ts";
 import { AgentAvatar } from "../../components/AgentAvatar.tsx";
 import { ErrorNote } from "../../components/ui/Field.tsx";
@@ -29,7 +29,13 @@ export function Composer({ channel, members, replyTo, onCancelReply, onSent }: C
   const [draft, setDraft] = useState("");
   const [caret, setCaret] = useState(0);
   const [highlight, setHighlight] = useState(0);
+  const [files, setFiles] = useState<Attachment[]>([]);
   const area = useRef<HTMLTextAreaElement>(null);
+  const picker = useRef<HTMLInputElement>(null);
+  const upload = useMutation({
+    mutationFn: async (list: File[]) => Promise.all(list.map((f) => api.uploadFile(channel.id, f))),
+    onSuccess: (added) => setFiles((cur) => [...cur, ...added]),
+  });
   const isGroup = channel.kind === "group";
 
   const mention = isGroup ? mentionQuery(draft, caret) : null;
@@ -40,12 +46,13 @@ export function Composer({ channel, members, replyTo, onCancelReply, onSent }: C
   }, [mention?.query, members]);
 
   const send = useMutation({
-    mutationFn: (body: string) => api.postMessage(channel.id, body, replyTo?.id),
+    mutationFn: (body: string) => api.postMessage(channel.id, body, replyTo?.id, files.map((f) => f.id)),
     onSuccess: (message) => {
       client.setQueryData<MessagePage>(qk.messages(channel.id), (page) =>
         page && !page.messages.some((m) => m.id === message.id) ? { ...page, messages: [...page.messages, message] } : page,
       );
       setDraft("");
+      setFiles([]);
       onSent();
       area.current?.focus();
     },
@@ -65,8 +72,8 @@ export function Composer({ channel, members, replyTo, onCancelReply, onSent }: C
   };
 
   const submit = () => {
-    const body = draft.trim();
-    if (body && !send.isPending) send.mutate(body);
+    const body = draft.trim() || (files.length ? `📎 ${files.map((f) => f.filename).join(", ")}` : "");
+    if (body && !send.isPending && !upload.isPending) send.mutate(body);
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -97,7 +104,17 @@ export function Composer({ channel, members, replyTo, onCancelReply, onSent }: C
 
   return (
     <div className="relative border-t border-line p-3">
-      <ErrorNote error={send.error ?? stop.error} />
+      <ErrorNote error={send.error ?? stop.error ?? upload.error} />
+      {files.length ? (
+        <ul className="mb-2 flex flex-wrap gap-1.5" aria-label="Attachments to send">
+          {files.map((f) => (
+            <li key={f.id} className="flex items-center gap-1.5 rounded-pill border border-line bg-sunken py-0.5 pr-1 pl-2.5 text-xs">
+              {f.filename}
+              <button type="button" className="rounded-full p-0.5 text-muted hover:text-ink" aria-label={`Remove ${f.filename}`} onClick={() => setFiles((cur) => cur.filter((x) => x.id !== f.id))}><X size={11} /></button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
       {suggestions.length ? (
         <ul role="listbox" aria-label="Mention suggestions" className="absolute bottom-full left-4 z-10 mb-1 w-64 overflow-hidden rounded-2xl border border-line bg-surface shadow-lift">
           {suggestions.map((s, i) => (
@@ -118,7 +135,13 @@ export function Composer({ channel, members, replyTo, onCancelReply, onSent }: C
           <button type="button" onClick={onCancelReply} className="ml-auto rounded-full p-0.5 hover:text-ink" aria-label="Cancel reply"><X size={12} /></button>
         </div>
       ) : null}
-      <div className="flex items-end gap-2 rounded-[1.4rem] border border-line bg-sunken p-1.5 pl-4 transition-colors focus-within:border-honey/60">
+      <div className="flex items-end gap-2 rounded-[1.4rem] border border-line bg-sunken p-1.5 pl-2 transition-colors focus-within:border-honey/60">
+        <input ref={picker} type="file" multiple hidden accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,text/*,.md,.log,.json,.csv,.diff,.patch"
+          onChange={(e) => { const list = [...(e.target.files ?? [])]; e.target.value = ""; if (list.length) upload.mutate(list); }} />
+        <button type="button" onClick={() => picker.current?.click()} disabled={upload.isPending}
+          className="grid size-9 shrink-0 place-items-center rounded-full text-muted transition-colors hover:bg-raised hover:text-ink" aria-label="Attach files" title="Attach files (≤10 MB: images, PDF, text)">
+          <Paperclip size={16} />
+        </button>
         <textarea
           ref={area}
           rows={1}
