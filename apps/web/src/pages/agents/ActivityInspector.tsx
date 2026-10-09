@@ -5,6 +5,7 @@ import type { ActivityEvent, Agent, Run } from "@hive/core";
 import { Link } from "react-router";
 import { api, qk, type RunSource } from "../../app/api.ts";
 import { clockTime, tokens, usd } from "../../lib/format.ts";
+import { BrowserPanel } from "./BrowserPanel.tsx";
 
 const STATUS_STYLE: Record<Run["status"], string> = {
   queued: "text-info border-info/40",
@@ -40,6 +41,7 @@ export function ActivityInspector({ agent }: { agent: Agent }) {
             ))}
           </ul>
         ) : null}
+        <BrowserPanel agent={agent} />
       </header>
       <ol className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
         {(runs.data?.runs ?? []).map((run, i) => (
@@ -106,6 +108,7 @@ function EventRow({ event }: { event: ActivityEvent }) {
       return (
         <li className={`font-mono text-xs ${p.isError ? "text-err" : "text-muted"}`}>
           <span>← {String(p.name)}</span> <span className="break-words whitespace-pre-wrap">{String(p.text ?? "")}</span>
+          {typeof p.screenshotId === "string" ? <Shot id={p.screenshotId} /> : null}
         </li>
       );
     case "thinking":
@@ -117,6 +120,16 @@ function EventRow({ event }: { event: ActivityEvent }) {
     case "notice":
       return <li className="text-xs text-warn">{String(p.text)}</li>;
   }
+}
+
+/** A screenshot the agent took; opens full size in a new tab. */
+function Shot({ id }: { id: string }) {
+  const url = api.screenshotUrl(id);
+  return (
+    <a href={url} target="_blank" rel="noreferrer noopener" className="mt-1.5 block w-fit overflow-hidden rounded-lg border border-line transition-colors hover:border-honey/60">
+      <img src={url} alt="Screenshot taken by the agent" loading="lazy" width={320} height={180} className="h-auto max-h-44 w-80 bg-black object-contain" />
+    </a>
+  );
 }
 
 function groupByRun(events: readonly ActivityEvent[]): Map<string, ActivityEvent[]> {

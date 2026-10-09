@@ -4,6 +4,7 @@ import type {
   CreateWorkstation, GitPush, HostStatus, Repository, Terminal, Workstation, Worktree,
   QueueInfo, SearchHit, UpdateGroup,
   Attachment, CreateTask, Task, TaskDetail, UpdateTask,
+  Approval, BrowserProfile, DecideApproval, DesktopStatus, Screenshot,
 } from "@hive/core";
 
 export type QueueMap = Record<string, QueueInfo | undefined>;
@@ -113,6 +114,17 @@ export const api = {
   refreshRepository: (id: string) => request<{ ok: true }>("POST", `/repositories/${id}/refresh`),
   deleteRepository: (id: string) => request<{ ok: true }>("DELETE", `/repositories/${id}`),
   host: () => request<HostStatus>("GET", "/host"),
+
+  approvals: () => request<Approval[]>("GET", "/approvals"),
+  decideApproval: (id: string, d: DecideApproval) => request<Approval>("POST", `/approvals/${id}/decide`, d),
+  revokeApproval: (id: string) => request<Approval>("POST", `/approvals/${id}/revoke`),
+  desktop: () => request<DesktopStatus>("GET", "/desktop"),
+  desktopScreenUrl: (display: number, tick: number) => `/api/desktop/screen?display=${display}&t=${tick}`,
+  stopDesktop: () => request<{ ok: true }>("POST", "/desktop/stop"),
+  agentScreenshots: (agentId: string) => request<Screenshot[]>("GET", `/agents/${agentId}/screenshots`),
+  screenshotUrl: (id: string) => `/api/screenshots/${id}`,
+  agentBrowser: (agentId: string) => request<BrowserProfile>("GET", `/agents/${agentId}/browser`),
+  resetBrowser: (agentId: string) => request<{ ok: true }>("POST", `/agents/${agentId}/browser/reset`),
 };
 
 export const qk = {
@@ -138,4 +150,8 @@ export const qk = {
   task: (id: string) => ["task", id] as const,
   channelFiles: (id: string) => ["channel-files", id] as const,
   search: (q: string) => ["search", q] as const,
+  approvals: ["approvals"] as const,
+  desktop: ["desktop"] as const,
+  agentBrowser: (id: string) => ["agent-browser", id] as const,
+  agentScreenshots: (id: string) => ["agent-screenshots", id] as const,
 };

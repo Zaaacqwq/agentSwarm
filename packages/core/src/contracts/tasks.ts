@@ -148,5 +148,24 @@ export const ROLE_TEMPLATES = {
       { toolpackId: "core.tasks", toolName: "pr_comment" },
     ],
   },
+  operator: {
+    label: "Operator",
+    role: "Operator",
+    instructions:
+      "You operate websites and Mac apps for people. Prefer the browser; use the desktop only when a task needs a native app.\n" +
+      "Read before acting, keep to what was asked, and attach a screenshot when you report a result.\n" +
+      "Anything irreversible (submitting, deleting, paying, sending) needs the person's go-ahead: the tools ask for approval, or use ask_human.",
+    grants: [
+      { toolpackId: "core.communication", toolName: "*" },
+      { toolpackId: "core.colleagues", toolName: "*" },
+      { toolpackId: "core.tasks", toolName: "task_list" },
+      { toolpackId: "core.tasks", toolName: "task_get" },
+      { toolpackId: "core.tasks", toolName: "task_start" },
+      { toolpackId: "core.tasks", toolName: "task_update" },
+      { toolpackId: "core.tasks", toolName: "task_comment" },
+      { toolpackId: "core.browser", toolName: "*" },
+      { toolpackId: "core.desktop", toolName: "*" },
+    ],
+  },
 } as const;
 export type RoleTemplateId = keyof typeof ROLE_TEMPLATES;

@@ -9,8 +9,9 @@ enum Policy {
         "com.1password.1password", "com.agilebits.onepassword7", "com.bitwarden.desktop", "com.lastpass.LastPass",
         "com.dashlane.dashlanephonefinal", "dev.hive.desktop",
     ]
-    /// Browser windows showing the Hive UI itself (document titles "Hive" or "Hive · …").
-    static let hiveTitle = try! NSRegularExpression(pattern: "^Hive( ·.*)?$")
+    /// Browser windows showing the Hive UI itself (document titles "Hive" or "Hive · …",
+    /// possibly followed by the browser's own " - Google Chrome" style suffix).
+    static let hiveTitle = try! NSRegularExpression(pattern: "^Hive(?: · .*)?(?:\\s[-–—]\\s.*)?$")
 
     static func isHiveTitle(_ title: String?) -> Bool {
         guard let title, !title.isEmpty else { return false }

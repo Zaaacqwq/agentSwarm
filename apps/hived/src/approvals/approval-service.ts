@@ -85,8 +85,9 @@ export class ApprovalService {
   }
 
   private wait(row: Row, ctx: AgentContext): Promise<Row> {
+    // Shown as "<Agent> is waiting for …".
     const name = row.kind === "question" ? "an answer" : "approval";
-    this.deps.onWaiting?.(ctx.agentId, `Waiting for ${name}: ${row.question.slice(0, 80)}`);
+    this.deps.onWaiting?.(ctx.agentId, `${name}: ${row.question.slice(0, 80)}`);
     return new Promise<Row>((resolve) => {
       let timer: ReturnType<typeof setTimeout> | null = null;
       const finish = (final: Row): void => {

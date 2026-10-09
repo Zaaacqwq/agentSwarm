@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { Link, useParams } from "react-router";
+import { Link, useParams, useSearchParams } from "react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Lock, Plus, Server } from "lucide-react";
 import type { Agent, Workstation } from "@hive/core";
@@ -8,6 +8,7 @@ import { AgentAvatar } from "../../components/AgentAvatar.tsx";
 import { Button } from "../../components/ui/Button.tsx";
 import { ErrorNote, Field, TextInput } from "../../components/ui/Field.tsx";
 import { WorkstationDetail } from "./WorkstationDetail.tsx";
+import { DesktopPanel } from "./DesktopPanel.tsx";
 
 export function WorkstationsPage() {
   const { workstationId } = useParams();
@@ -15,10 +16,40 @@ export function WorkstationsPage() {
   const agents = useQuery({ queryKey: qk.agents, queryFn: api.agents });
   const host = useQuery({ queryKey: qk.host, queryFn: api.host });
   const [adding, setAdding] = useState(false);
+  const [params, setParams] = useSearchParams();
+  const view = params.get("view") === "desktop" ? "desktop" : "workstations";
   const byId = new Map((agents.data ?? []).map((a) => [a.id, a]));
   const selected = workstations.data?.find((w) => w.id === workstationId);
 
   if (workstationId && selected) return <WorkstationDetail workstation={selected} agents={byId} />;
+
+  const tabs = (
+    <div role="tablist" aria-label="View" className="flex rounded-pill border border-line bg-surface/80 p-1">
+      {(["workstations", "desktop"] as const).map((v) => (
+        <button
+          key={v} role="tab" aria-selected={view === v} onClick={() => setParams(v === "desktop" ? { view: "desktop" } : {})}
+          className={`rounded-pill px-3.5 py-1 text-xs font-semibold capitalize transition-colors ${view === v ? "bg-honey text-honey-ink" : "text-muted hover:text-ink"}`}
+        >
+          {v === "desktop" ? "This Mac" : "Workstations"}
+        </button>
+      ))}
+    </div>
+  );
+
+  if (view === "desktop") {
+    return (
+      <div className="mx-auto h-full max-w-7xl space-y-4 overflow-y-auto pb-6">
+        <header className="flex flex-wrap items-end justify-between gap-3 px-1">
+          <div>
+            <h1 className="text-[length:var(--text-display)] leading-tight font-extrabold tracking-tight">This Mac</h1>
+            <p className="text-sm text-muted">Your own desktop. Agents get it one at a time, only for a session you approve.</p>
+          </div>
+          {tabs}
+        </header>
+        <DesktopPanel agents={byId} />
+      </div>
+    );
+  }
 
   return (
     <div className="mx-auto h-full max-w-7xl space-y-4 overflow-y-auto pb-6">
@@ -27,7 +58,10 @@ export function WorkstationsPage() {
           <h1 className="text-[length:var(--text-display)] leading-tight font-extrabold tracking-tight">Workstations</h1>
           <p className="text-sm text-muted">Each one is its own macOS user. Anyone can read; one agent writes at a time.</p>
         </div>
-        <Button variant="primary" size="sm" icon={<Plus size={14} />} onClick={() => setAdding((a) => !a)} aria-expanded={adding}>Register</Button>
+        <div className="flex items-center gap-2">
+          {tabs}
+          <Button variant="primary" size="sm" icon={<Plus size={14} />} onClick={() => setAdding((a) => !a)} aria-expanded={adding}>Register</Button>
+        </div>
       </header>
       {adding ? <RegisterForm onDone={() => setAdding(false)} /> : null}
 

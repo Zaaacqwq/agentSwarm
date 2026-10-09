@@ -1,6 +1,7 @@
 import { NavLink, Outlet } from "react-router";
 import { Bot, KanbanSquare, MessagesSquare, Server, Settings2 } from "lucide-react";
 import { HostBanner } from "./HostBanner.tsx";
+import { ApprovalBanner } from "./approvals/ApprovalBanner.tsx";
 import { Portal } from "./Portal.tsx";
 import type { LiveStatus } from "../app/live.ts";
 
@@ -39,6 +40,7 @@ export function Shell({ live }: { live: LiveStatus }) {
         </div>
       </header>
       <HostBanner />
+      <ApprovalBanner />
       <main className="min-h-0 flex-1 px-2 pb-20 sm:px-6 sm:pb-6">
         <Outlet />
       </main>

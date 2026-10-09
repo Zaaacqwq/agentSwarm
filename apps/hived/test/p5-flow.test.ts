@@ -62,7 +62,7 @@ describe("ask_human", () => {
     const dm = w.chat.openDm(w.user, agent.id);
     let sawWaiting = false;
     w.bus.subscribe(({ event }) => {
-      if (event.type === "agent.state" && event.queue?.waitingFor?.startsWith("Waiting for an answer")) sawWaiting = true;
+      if (event.type === "agent.state" && event.queue?.waitingFor?.startsWith("an answer: Deploy")) sawWaiting = true;
       if (event.type === "approval.updated" && event.approval.status === "pending") {
         expect(() => w.approvals.decide(w.user, event.approval.id, { decision: "approve" })).toThrow("Pick an option");
         setTimeout(() => w.approvals.decide(w.user, event.approval.id, { decision: "approve", answer: "Yes" }), 5);

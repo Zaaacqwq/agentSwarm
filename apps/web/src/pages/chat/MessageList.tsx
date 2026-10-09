@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CornerUpLeft, FileText, SmilePlus } from "lucide-react";
-import type { Agent, Channel, Message, MessagePage } from "@hive/core";
+import type { Agent, Approval, Channel, Message, MessagePage } from "@hive/core";
 import { api, qk } from "../../app/api.ts";
 import { AgentAvatar } from "../../components/AgentAvatar.tsx";
+import { ApprovalCard } from "../../components/approvals/ApprovalCard.tsx";
 import { Markdown } from "../../components/Markdown.tsx";
 import { avatarTraits } from "../../lib/avatar.ts";
 import { clockTime, preview } from "../../lib/format.ts";
@@ -23,6 +24,10 @@ interface Props {
 export function MessageList({ channel, messages, agents, focusId, canAct, onReply }: Props) {
   const groups = useMemo(() => groupMessages(messages), [messages]);
   const byId = useMemo(() => new Map(messages.map((m) => [m.id, m])), [messages]);
+  const approvals = useQuery({ queryKey: qk.approvals, queryFn: api.approvals });
+  const session = useQuery({ queryKey: qk.session, queryFn: api.session, staleTime: Infinity });
+  const cards = useMemo(() => new Map((approvals.data ?? []).filter((a) => a.messageId !== null).map((a) => [a.messageId!, a])), [approvals.data]);
+  const isAdmin = session.data?.user?.role === "admin";
   useEffect(() => {
     if (focusId) document.getElementById(`msg-${focusId}`)?.scrollIntoView({ block: "center" });
   }, [focusId, messages.length > 0]);
@@ -32,24 +37,31 @@ export function MessageList({ channel, messages, agents, focusId, canAct, onRepl
   return (
     <ol className="space-y-5" aria-label="Messages">
       {groups.map((g) => (
-        <Group key={g[0]!.id} messages={g} agents={agents} byId={byId} focusId={focusId} canAct={canAct} onReply={onReply}
+        <Group key={g[0]!.id} messages={g} agents={agents} byId={byId} focusId={focusId} canAct={canAct} onReply={onReply} cards={cards} isAdmin={isAdmin}
           rightSide={g[0]!.authorKind === "user" || (leftAgent !== undefined && g[0]!.authorId !== leftAgent)} />
       ))}
     </ol>
   );
 }
 
-function Group({ messages, agents, byId, focusId, canAct, onReply, rightSide }: {
+function Group({ messages, agents, byId, focusId, canAct, onReply, rightSide, cards, isAdmin }: {
   messages: Message[]; agents: Map<string, Agent>; byId: Map<number, Message>; focusId: number | undefined;
-  canAct: boolean; onReply: Props["onReply"]; rightSide: boolean;
+  canAct: boolean; onReply: Props["onReply"]; rightSide: boolean; cards: Map<number, Approval>; isAdmin: boolean;
 }) {
   const first = messages[0]!;
   if (first.authorKind === "system") {
     return (
-      <li className="flex justify-center">
-        <div className="max-w-[85%] space-y-1 rounded-2xl border border-warn/25 bg-warn/5 px-3.5 py-2 text-center text-sm text-warn">
-          {messages.map((m) => <p key={m.id} id={`msg-${m.id}`}>{m.body}</p>)}
-        </div>
+      <li className="flex flex-col items-center gap-2">
+        {messages.map((m) => {
+          const card = cards.get(m.id);
+          return card ? (
+            <div key={m.id} id={`msg-${m.id}`} className="w-full max-w-[min(34rem,92%)]">
+              <ApprovalCard approval={card} canDecide={isAdmin || card.kind === "question"} />
+            </div>
+          ) : (
+            <p key={m.id} id={`msg-${m.id}`} className="max-w-[85%] rounded-2xl border border-warn/25 bg-warn/5 px-3.5 py-2 text-center text-sm text-warn">{m.body}</p>
+          );
+        })}
       </li>
     );
   }

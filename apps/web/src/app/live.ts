@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQueryClient, type QueryClient } from "@tanstack/react-query";
-import type { Agent, Channel, MessagePage, ServerEvent, Task, Workstation } from "@hive/core";
+import type { Agent, Approval, Channel, MessagePage, ServerEvent, Task, Workstation } from "@hive/core";
 import { qk, type QueueMap } from "./api.ts";
 
 export type LiveStatus = "connecting" | "live" | "offline";
@@ -143,6 +143,19 @@ export function applyEvent(client: QueryClient, event: ServerEvent): void {
       return;
     case "task.deleted":
       client.setQueryData<Task[]>(qk.tasks, (list) => list?.filter((t) => t.id !== event.taskId));
+      return;
+    case "approval.updated":
+      client.setQueryData<Approval[]>(qk.approvals, (list) => {
+        if (!list) return list;
+        return list.some((a) => a.id === event.approval.id) ? list.map((a) => (a.id === event.approval.id ? event.approval : a)) : [event.approval, ...list];
+      });
+      if (event.approval.kind === "browser_site") void client.invalidateQueries({ queryKey: qk.agentBrowser(event.approval.agentId) });
+      return;
+    case "desktop.updated":
+      client.setQueryData(qk.desktop, event.desktop);
+      return;
+    case "screenshot.created":
+      void client.invalidateQueries({ queryKey: qk.agentScreenshots(event.screenshot.agentId) });
       return;
   }
 }
