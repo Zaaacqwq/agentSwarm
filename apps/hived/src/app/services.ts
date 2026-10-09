@@ -1,4 +1,4 @@
-import { createBrowserPack, createColleaguesPack, createCommunicationPack, createDesktopPack, ToolpackRegistry, type AskPort } from "@hive/tools";
+import { createBrowserPack, createColleaguesPack, createCommunicationPack, createDesktopPack, ToolpackRegistry, type AskPort, type ShareScreenshot } from "@hive/tools";
 import { eq, sql } from "drizzle-orm";
 import type { ServerEvent } from "@hive/core";
 import { schema, type Db } from "../db/client.ts";
@@ -202,13 +202,18 @@ export function createServices(deps: ServiceDeps): Services & { start(): Promise
     const h = await deps.backend.health();
     return h.ready ? { available: true } : { available: false, reason: h.reason ?? "workstations unavailable" };
   }));
+  const shareScreenshot: ShareScreenshot = (ctx, screenshotId, channelId, caption) => {
+    const { row, data } = screenshots.bytes(ctx.orgId, screenshotId);
+    if (row.agentId !== ctx.agentId) throw new Error("You can only post your own screenshots.");
+    return chat.attachAsAgent(ctx, channelId, `screenshot-${new Date(row.createdAt).toISOString().slice(0, 19).replace(/[:T]/g, "-")}.jpg`, data, caption);
+  };
   const browser = new BrowserAdapter({ db, backend: deps.backend, workstations, approvals, screenshots });
   registry.register(createBrowserPack(browser, async () => {
     const h = await deps.backend.health();
     if (!h.ready) return { available: false, reason: h.reason ?? "workstations unavailable" };
     if (!existsSync(join(deps.backend.layout.browserDir, "daemon.js"))) return { available: false, reason: "The browser runtime is not installed; rerun scripts/setup-workstations.sh --update-exec" };
     return { available: true };
-  }));
+  }, shareScreenshot));
   const publishDesktop = (): void => {
     void desktop!.status().then((status) => {
       for (const org of db.select({ id: schema.organizations.id }).from(schema.organizations).all()) bus.publish(org.id, { type: "desktop.updated", desktop: status });
@@ -221,7 +226,7 @@ export function createServices(deps: ServiceDeps): Services & { start(): Promise
     onChange: publishDesktop,
     log: (msg, extra) => log("info", msg, extra),
   });
-  registry.register(createDesktopPack(desktop, () => desktop!.health()));
+  registry.register(createDesktopPack(desktop, () => desktop!.health(), shareScreenshot));
 
   host = new HostMonitor({
     probe: deps.hostProbe ?? macProbe,

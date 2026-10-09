@@ -214,7 +214,7 @@ describe("agent browser", () => {
         const snap = await call("browser_snapshot");
         expect(snap).toContain("Orders today: 42");
         await call("browser_click", { ref: ref(snap, /link "Login" \[ref=(\w+)\]/) });
-        await call("browser_screenshot");
+        expect(await call("browser_screenshot", { post_to: channelOf(input), caption: "The sign-in page" })).toContain("Posted it in");
         const form = await call("browser_snapshot");
         const blocked = await call("browser_click", { ref: ref(form, /button "Sign in" \[ref=(\w+)\]/) });
         expect(blocked).toContain("approved writes on 127.0.0.1");
@@ -225,7 +225,6 @@ describe("agent browser", () => {
         const done = await call("browser_click", { ref: ref(again, /button "Sign in" \[ref=(\w+)\]/) });
         expect(done).toContain(base);
         expect((await call("browser_open", { url: "http://10.1.2.3/" }))).toMatch(/private/i);
-        channelOf(input);
       },
     });
     const ws = await w.workstations.create(w.user, { name: "Bench", osUser: "ws-1" });
@@ -237,8 +236,11 @@ describe("agent browser", () => {
       asked.push(`${a.kind}: ${a.question}`);
       return { decision: "approve" };
     });
-    w.chat.postUserMessage(w.user, w.chat.openDm(w.user, agent.id).id, "check today's orders");
+    const dm = w.chat.openDm(w.user, agent.id);
+    w.chat.postUserMessage(w.user, dm.id, "check today's orders");
     await w.manager.idle();
+    const shared = w.chat.listMessages(w.user, dm.id, {}).messages.find((m) => m.attachments.length > 0);
+    expect(shared).toMatchObject({ body: "The sign-in page", attachments: [{ mime: "image/jpeg" }] });
     const run = w.runs.listRuns(w.user.orgId, agent.id)[0]!;
     expect(run.status, out.join("\n")).toBe("succeeded");
     expect(asked).toEqual(["browser_site: submitting a form on 127.0.0.1"]);

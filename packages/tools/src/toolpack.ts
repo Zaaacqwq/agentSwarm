@@ -41,6 +41,9 @@ export interface ToolImage {
   readonly mimeType: "image/jpeg" | "image/png";
 }
 
+/** Posts a stored screenshot into a chat as an image attachment (normal send policy applies). */
+export type ShareScreenshot = (ctx: AgentContext, screenshotId: string, channelId: string, caption: string) => { id: number };
+
 export interface ToolResult {
   /** Short text returned to the model. Keep it well under ~2k tokens. */
   readonly text: string;

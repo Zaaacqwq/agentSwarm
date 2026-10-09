@@ -1,5 +1,5 @@
 import { Type } from "typebox";
-import { defineHiveTool, type AnyHiveTool, type Toolpack, type ToolResult } from "../toolpack.ts";
+import { defineHiveTool, type AnyHiveTool, type ShareScreenshot, type Toolpack, type ToolResult } from "../toolpack.ts";
 import type { BrowserAction, BrowserOutcome, BrowserPort } from "./browser-port.ts";
 
 export const BROWSER_PACK_ID = "core.browser";
@@ -21,13 +21,24 @@ function describe(o: BrowserOutcome, lead: string): string {
   return lines.join("\n");
 }
 
-export function createBrowserPack(port: BrowserPort, health: () => Promise<{ available: boolean; reason?: string }>): Toolpack {
-  const run = async (ctx: Parameters<BrowserPort["run"]>[0], action: BrowserAction, lead: string): Promise<ToolResult> => {
+/** Shares a screenshot when asked; returns the note to append to the tool result. */
+export function posted(ctx: Parameters<ShareScreenshot>[0], share: ShareScreenshot | undefined, screenshotId: string, postTo: { channelId: string; caption: string } | undefined): string {
+  if (!postTo) return "";
+  if (!share) return "\nCould not post it: sharing is unavailable.";
+  try {
+    return `\nPosted it in ${postTo.channelId} as message ${share(ctx, screenshotId, postTo.channelId, postTo.caption).id}.`;
+  } catch (error) {
+    return `\nCould not post it: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+export function createBrowserPack(port: BrowserPort, health: () => Promise<{ available: boolean; reason?: string }>, share?: ShareScreenshot): Toolpack {
+  const run = async (ctx: Parameters<BrowserPort["run"]>[0], action: BrowserAction, lead: string, postTo?: { channelId: string; caption: string }): Promise<ToolResult> => {
     try {
       const o = await port.run(ctx, action);
       if (!o.screenshot) return { text: describe(o, lead) };
       return {
-        text: describe(o, lead) + `\n(screenshot ${o.screenshot.width}×${o.screenshot.height} attached)`,
+        text: describe(o, lead) + `\n(screenshot ${o.screenshot.width}×${o.screenshot.height} attached)` + posted(ctx, share, o.screenshot.id, postTo),
         images: [{ data: o.screenshot.data, mimeType: "image/jpeg" }],
         details: { screenshotId: o.screenshot.id },
       };
@@ -68,9 +79,13 @@ export function createBrowserPack(port: BrowserPort, health: () => Promise<{ ava
     }),
     defineHiveTool({
       name: "browser_screenshot", label: "Screenshot", access: "r",
-      description: "Screenshot of the page (1280 wide), attached as an image and kept in the activity log.",
-      parameters: Type.Object({ full: Type.Optional(Type.Boolean({ description: "Whole page instead of the viewport" })) }),
-      execute: (ctx, p) => run(ctx, { cmd: "screenshot", ...(p.full ? { full: true } : {}) }, "Screenshot of"),
+      description: "Screenshot of the page (1280 wide), attached for you and kept in the activity log. post_to also posts it in a chat.",
+      parameters: Type.Object({
+        full: Type.Optional(Type.Boolean({ description: "Whole page instead of the viewport" })),
+        post_to: Type.Optional(Type.String({ description: "Channel id to post the screenshot in, e.g. to show a person" })),
+        caption: Type.Optional(Type.String({ maxLength: 500 })),
+      }),
+      execute: (ctx, p) => run(ctx, { cmd: "screenshot", ...(p.full ? { full: true } : {}) }, "Screenshot of", p.post_to ? { channelId: p.post_to, caption: p.caption ?? "" } : undefined),
     }),
     defineHiveTool({
       name: "browser_back", label: "Back", access: "r",

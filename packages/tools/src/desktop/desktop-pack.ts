@@ -1,5 +1,6 @@
 import { Type } from "typebox";
-import { defineHiveTool, type AgentContext, type AnyHiveTool, type Toolpack, type ToolResult } from "../toolpack.ts";
+import { defineHiveTool, type AgentContext, type AnyHiveTool, type ShareScreenshot, type Toolpack, type ToolResult } from "../toolpack.ts";
+import { posted } from "../browser/browser-pack.ts";
 import type { DesktopAction, DesktopPort } from "./desktop-port.ts";
 
 export const DESKTOP_PACK_ID = "core.desktop";
@@ -23,12 +24,12 @@ async function attempt(work: () => Promise<string>): Promise<ToolResult> {
   }
 }
 
-export function createDesktopPack(port: DesktopPort, health: () => Promise<{ available: boolean; reason?: string }>): Toolpack {
-  const act = async (ctx: AgentContext, action: DesktopAction): Promise<ToolResult> => {
+export function createDesktopPack(port: DesktopPort, health: () => Promise<{ available: boolean; reason?: string }>, share?: ShareScreenshot): Toolpack {
+  const act = async (ctx: AgentContext, action: DesktopAction, postTo?: { channelId: string; caption: string }): Promise<ToolResult> => {
     try {
       const o = await port.act(ctx, action);
       if (!o.screenshot) return { text: o.text };
-      return { text: o.text, images: [{ data: o.screenshot.data, mimeType: "image/jpeg" }], details: { screenshotId: o.screenshot.id } };
+      return { text: o.text + posted(ctx, share, o.screenshot.id, postTo), images: [{ data: o.screenshot.data, mimeType: "image/jpeg" }], details: { screenshotId: o.screenshot.id } };
     } catch (error) {
       return { text: error instanceof Error ? error.message : String(error), isError: true };
     }
@@ -51,9 +52,13 @@ export function createDesktopPack(port: DesktopPort, health: () => Promise<{ ava
     }),
     defineHiveTool({
       name: "desktop_screenshot", label: "Screenshot", access: "r",
-      description: "Screenshot of a display (max 1280 wide, with a 100 px coordinate grid).",
-      parameters: Type.Object({ display: Display }),
-      execute: (ctx, p) => act(ctx, { cmd: "screenshot", ...(p.display !== undefined ? { display: p.display } : {}) }),
+      description: "Screenshot of a display (max 1280 wide, with a 100 px coordinate grid). post_to also posts it in a chat.",
+      parameters: Type.Object({
+        display: Display,
+        post_to: Type.Optional(Type.String({ description: "Channel id to post the screenshot in" })),
+        caption: Type.Optional(Type.String({ maxLength: 500 })),
+      }),
+      execute: (ctx, p) => act(ctx, { cmd: "screenshot", ...(p.display !== undefined ? { display: p.display } : {}) }, p.post_to ? { channelId: p.post_to, caption: p.caption ?? "" } : undefined),
     }),
     defineHiveTool({
       name: "desktop_click", label: "Click", access: "w",
