@@ -35,9 +35,17 @@ export interface TurnTrigger {
   readonly channelIds: readonly string[];
 }
 
+export interface ToolImage {
+  /** Base64 without a data: prefix. */
+  readonly data: string;
+  readonly mimeType: "image/jpeg" | "image/png";
+}
+
 export interface ToolResult {
   /** Short text returned to the model. Keep it well under ~2k tokens. */
   readonly text: string;
+  /** Screenshots for vision models; only the latest few stay in context. */
+  readonly images?: readonly ToolImage[];
   readonly details?: Record<string, unknown>;
   readonly isError?: boolean;
 }

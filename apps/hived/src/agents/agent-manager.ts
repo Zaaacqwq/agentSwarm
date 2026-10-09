@@ -398,7 +398,7 @@ function activityPayload(event: Exclude<RuntimeEvent, { kind: "usage" }>, scrub:
     case "tool_call":
       return { toolCallId: event.toolCallId, name: event.name, args: event.args };
     case "tool_result":
-      return { toolCallId: event.toolCallId, name: event.name, isError: event.isError, text: clip(scrub(event.text)) };
+      return { toolCallId: event.toolCallId, name: event.name, isError: event.isError, text: clip(scrub(event.text)), ...(event.screenshotId ? { screenshotId: event.screenshotId } : {}) };
   }
 }
 

@@ -12,6 +12,7 @@ const [socketPath, profileDir, allowArg] = process.argv.slice(2);
 const allowHosts = allowArg ? allowArg.split(",").filter(Boolean) : [];
 if (!socketPath || !profileDir) throw new Error("usage: daemon <socket> <profile-dir>");
 const IDLE_MS = 15 * 60 * 1000;
+const FULL_PAGE_MAX = 4000;
 const SNAPSHOT_MAX = 12_000;
 const READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
@@ -29,6 +30,8 @@ const context: BrowserContext = await chromium.launchPersistentContext(profileDi
 
 let approvedHosts: readonly string[] = [];
 let blockedWrites: string[] = [];
+/** A blocked write that belongs to the page itself (a form post or the page's own API), not a tracker. */
+let blockedFirstParty: string | null = null;
 const verdicts = new Map<string, boolean>();
 
 // Every request from every page: public http(s) only; writes need an approved host.
@@ -47,6 +50,8 @@ await context.route("**/*", async (route) => {
     const host = new URL(url).hostname;
     if (!hostApproved(host, approvedHosts)) {
       blockedWrites.push(`${req.method()} ${host}`);
+      const pageHost = (() => { try { return new URL(req.frame().url()).hostname; } catch { return ""; } })();
+      if (req.isNavigationRequest() || host === pageHost) blockedFirstParty ??= host;
       return route.abort("blockedbyclient");
     }
   }
@@ -57,8 +62,14 @@ const page = async (): Promise<Page> => context.pages().at(-1) ?? (await context
 
 async function result(p: Page, extra: Partial<Extract<BrowserResponse, { ok: true }>> = {}): Promise<BrowserResponse> {
   const writes = blockedWrites;
+  const firstParty = blockedFirstParty;
   blockedWrites = [];
-  return { ok: true, url: p.url(), title: await p.title().catch(() => ""), ...extra, ...(writes.length ? { blockedWrites: writes } : {}) };
+  blockedFirstParty = null;
+  return {
+    ok: true, url: p.url(), title: await p.title().catch(() => ""), ...extra,
+    ...(writes.length ? { blockedWrites: [...new Set(writes)] } : {}),
+    ...(firstParty ? { blockedSite: firstParty } : {}),
+  };
 }
 
 async function hostOf(p: Page): Promise<string> {
@@ -113,8 +124,14 @@ async function run(command: BrowserCommand): Promise<BrowserResponse> {
       await (await byRef(p, command.ref)).selectOption(command.value, { timeout: 10_000 });
       return result(p);
     case "screenshot": {
-      const buf = await p.screenshot({ type: "jpeg", quality: 70, fullPage: command.full ?? false, timeout: 20_000 });
-      return result(p, { image: buf.toString("base64") });
+      const viewport = p.viewportSize() ?? { width: 1280, height: 800 };
+      // Full pages are capped so one screenshot cannot become an enormous image for the model.
+      const height = command.full ? Math.min(Number(await p.evaluate("document.documentElement.scrollHeight").catch(() => viewport.height)) || viewport.height, FULL_PAGE_MAX) : viewport.height;
+      const buf = await p.screenshot({
+        type: "jpeg", quality: 70, timeout: 20_000,
+        ...(command.full ? { fullPage: true, clip: { x: 0, y: 0, width: viewport.width, height } } : {}),
+      });
+      return result(p, { image: buf.toString("base64"), width: viewport.width, height });
     }
     case "back":
       await p.goBack({ timeout: 15_000 }).catch(() => null);

@@ -20,20 +20,21 @@ export class LeaseService {
   ) {}
 
   /** Acquires or renews. A holder renewing its own lease always succeeds. */
-  acquire(input: { resourceId: string; agentId: string; runId: string | null; ttlMs?: number }, now = Date.now()): AcquireResult {
+  acquire(input: { resourceId: string; agentId: string; runId: string | null; ttlMs?: number; kind?: LeaseInfo["kind"] }, now = Date.now()): AcquireResult {
     const ttl = input.ttlMs ?? WRITE_LEASE_TTL_MS;
+    const kind = input.kind ?? "workstation-write";
     const result = this.db.transaction((tx): AcquireResult => {
       tx.update(schema.leases).set({ releasedAt: now })
         .where(and(eq(schema.leases.resourceId, input.resourceId), isNull(schema.leases.releasedAt), lte(schema.leases.expiresAt, now))).run();
       const live = tx.select().from(schema.leases)
-        .where(and(eq(schema.leases.kind, "workstation-write"), eq(schema.leases.resourceId, input.resourceId), isNull(schema.leases.releasedAt))).get();
+        .where(and(eq(schema.leases.kind, kind), eq(schema.leases.resourceId, input.resourceId), isNull(schema.leases.releasedAt))).get();
       if (live && live.holderAgentId !== input.agentId) return { ok: false, holder: toInfo(live) };
       if (live) {
         const row = tx.update(schema.leases).set({ expiresAt: now + ttl, runId: input.runId ?? live.runId }).where(eq(schema.leases.id, live.id)).returning().get();
         return { ok: true, lease: toInfo(row!) };
       }
       const row = tx.insert(schema.leases).values({
-        kind: "workstation-write", resourceId: input.resourceId, holderAgentId: input.agentId, runId: input.runId, acquiredAt: now, expiresAt: now + ttl,
+        kind, resourceId: input.resourceId, holderAgentId: input.agentId, runId: input.runId, acquiredAt: now, expiresAt: now + ttl,
       }).returning().get();
       return { ok: true, lease: toInfo(row) };
     });

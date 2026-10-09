@@ -1,6 +1,6 @@
 import { Type } from "typebox";
 import { defineHiveTool, type AnyHiveTool, type Toolpack, type ToolResult } from "../toolpack.ts";
-import type { ChannelMessageView, ChatPort } from "./chat-port.ts";
+import type { AskPort, ChannelMessageView, ChatPort } from "./chat-port.ts";
 
 export const COMMUNICATION_PACK_ID = "core.communication";
 export const COLLEAGUES_PACK_ID = "core.colleagues";
@@ -14,6 +14,7 @@ const GUIDANCE = [
   "Shared work belongs in the group; one-agent tasks belong in a direct message. Do not broadcast planning or thinking.",
   "Send one substantive message per request. No empty acknowledgements or thank-you replies; use react for a quick acknowledgement.",
   "If a conversation is paused, stop and wait for a person.",
+  "ask_human asks a person a question with a card in the chat and waits for the answer; use it only for decisions you cannot make yourself.",
 ].join("\n");
 
 const COLLEAGUE_GUIDANCE = [
@@ -36,8 +37,27 @@ function formatMessage(m: ChannelMessageView): string {
   return `#${m.id} ${m.author}${m.authorKind === "agent" ? " (agent)" : ""}${reply}: ${m.body}${reactions}${files}`;
 }
 
-export function createCommunicationPack(chat: ChatPort): Toolpack {
+export function createCommunicationPack(chat: ChatPort, asker?: AskPort): Toolpack {
+  const askTool = asker ? [defineHiveTool({
+    name: "ask_human", label: "Ask a person", access: "r",
+    description: "Ask a person a question (optionally with choices) and wait for the answer. Blocks up to 10 minutes.",
+    parameters: Type.Object({
+      question: Type.String({ minLength: 3, maxLength: 1000 }),
+      options: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 80 }), { maxItems: 6, description: "Choices to offer, e.g. [\"Yes\", \"No\"]" })),
+    }),
+    async execute(ctx, p): Promise<ToolResult> {
+      try {
+        const r = await asker.ask(ctx, p.question.trim(), p.options ?? []);
+        if (r.status === "approved") return { text: `${r.decidedBy ?? "A person"} answered: ${r.answer ?? "yes"}` };
+        if (r.status === "denied") return { text: `${r.decidedBy ?? "A person"} declined${r.answer ? `: ${r.answer}` : "."}` };
+        return { text: r.status === "expired" ? "No one answered within 10 minutes." : "The question was withdrawn.", isError: true };
+      } catch (error) {
+        return { text: error instanceof Error ? error.message : String(error), isError: true };
+      }
+    },
+  })] : [];
   const tools: AnyHiveTool[] = [
+    ...askTool,
     defineHiveTool({
       name: "list_chats", label: "List chats", access: "r",
       description: "List the channels you belong to, their members, and whether you may post there now.",

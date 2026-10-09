@@ -13,13 +13,14 @@ export type Reply =
   | { kind: "text"; text: string }
   | { kind: "error"; status: number };
 
-export function startFakeOpenAI(decide: (req: RecordedRequest, index: number) => Reply, port = 0) {
+export function startFakeOpenAI(decide: (req: RecordedRequest, index: number) => Reply, port = 0, models?: readonly object[]) {
   const requests: RecordedRequest[] = [];
   const server = Bun.serve({
     port,
     hostname: "127.0.0.1",
     async fetch(request) {
       const url = new URL(request.url);
+      if (models && url.pathname.endsWith("/models")) return Response.json({ data: models });
       if (!url.pathname.endsWith("/chat/completions")) return new Response("not found", { status: 404 });
       const recorded: RecordedRequest = { authorization: request.headers.get("authorization"), body: (await request.json()) as RecordedRequest["body"] };
       requests.push(recorded);

@@ -6,5 +6,6 @@ export * from "./contracts/chat.ts";
 export * from "./contracts/runs.ts";
 export * from "./contracts/workstations.ts";
 export * from "./contracts/tasks.ts";
+export * from "./contracts/approvals.ts";
 export * from "./events.ts";
 export * from "./ids.ts";

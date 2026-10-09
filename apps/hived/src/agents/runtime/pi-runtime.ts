@@ -17,6 +17,8 @@ import type { ResolvedTool } from "@hive/tools";
 import type { ResolvedEndpoint } from "../../endpoints/endpoint-service.ts";
 import { TurnError, type AgentRuntime, type RuntimeAgent, type RuntimeEvent, type TurnInput, type TurnResult } from "./agent-runtime.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
+import { pruneEntryImages, pruneImages } from "./images.ts";
+import { OpenRouterCatalog, type ModelFacts } from "./model-catalog.ts";
 
 const DEFAULT_CONTEXT_WINDOW = 128_000;
 const DEFAULT_MAX_TOKENS = 16_000;
@@ -40,9 +42,10 @@ export class PiRuntime implements AgentRuntime {
   private constructor(
     private readonly models: ModelRuntime,
     private readonly piDir: string,
+    private readonly catalog: OpenRouterCatalog,
   ) {}
 
-  static async create(dataDir: string): Promise<PiRuntime> {
+  static async create(dataDir: string, catalog = new OpenRouterCatalog()): Promise<PiRuntime> {
     const piDir = join(dataDir, "pi");
     mkdirSync(join(piDir, "agents"), { recursive: true, mode: 0o700 });
     const authPath = join(piDir, "auth.json");
@@ -54,12 +57,12 @@ export class PiRuntime implements AgentRuntime {
       allowModelNetwork: false,
       refreshOnCreate: false,
     });
-    return new PiRuntime(models, piDir);
+    return new PiRuntime(models, piDir, catalog);
   }
 
   async runTurn(input: TurnInput): Promise<TurnResult> {
     if (input.signal.aborted) throw input.signal.reason;
-    const model = this.modelFor(input.endpoint, input.agent.modelId);
+    const model = await this.modelFor(input.endpoint, input.agent.modelId);
     const cwd = join(this.piDir, "agents", input.agent.id);
     mkdirSync(cwd, { recursive: true, mode: 0o700 });
 
@@ -80,12 +83,17 @@ export class PiRuntime implements AgentRuntime {
       customTools,
     });
 
+    // Keep only the newest screenshots in what the model sees on each call.
+    const previousTransform = session.agent.transformContext;
+    session.agent.transformContext = async (messages, signal) =>
+      pruneImages(previousTransform ? await previousTransform(messages, signal) : messages);
+
     const unsubscribe = session.subscribe((event) => forward(event, input.onEvent));
     const onAbort = (): void => void session.abort();
     input.signal.addEventListener("abort", onAbort, { once: true });
     const snapshot = (): unknown[] => {
       const header = sessionManager.getHeader();
-      return [...(header ? [header] : []), ...sessionManager.getEntries()];
+      return pruneEntryImages([...(header ? [header] : []), ...sessionManager.getEntries()]);
     };
     try {
       await session.prompt(input.prompt);
@@ -104,7 +112,7 @@ export class PiRuntime implements AgentRuntime {
   }
 
   /** Registers (or refreshes) one Pi provider per Hive endpoint and returns the model. */
-  private modelFor(endpoint: ResolvedEndpoint, modelId: string): Model<Api> {
+  private async modelFor(endpoint: ResolvedEndpoint, modelId: string): Promise<Model<Api>> {
     const providerId = `hive-${endpoint.id}`;
     const known = this.endpoints.get(endpoint.id);
     const sameConfig = known && known.apiKey === endpoint.apiKey && known.baseUrl === endpoint.baseUrl;
@@ -112,7 +120,7 @@ export class PiRuntime implements AgentRuntime {
     if (existing) return existing;
 
     const models = new Map(sameConfig ? known.models : []);
-    models.set(modelId, this.describeModel(providerId, endpoint, modelId));
+    models.set(modelId, await this.describeModel(providerId, endpoint, modelId));
     this.models.registerProvider(providerId, {
       name: providerId,
       baseUrl: endpoint.baseUrl,
@@ -126,9 +134,14 @@ export class PiRuntime implements AgentRuntime {
     return registered;
   }
 
-  /** Borrows pricing and limits from Pi's catalog when it knows the model, so costs are metered. */
-  private describeModel(providerId: string, endpoint: ResolvedEndpoint, modelId: string): Model<Api> {
-    const catalog = endpoint.kind === "openrouter" ? this.models.getModel("openrouter", modelId) : undefined;
+  /**
+   * Borrows pricing, limits and input modalities from Pi's catalog when it knows the model,
+   * else from OpenRouter's model list, so costs are metered and vision models get screenshots.
+   */
+  private async describeModel(providerId: string, endpoint: ResolvedEndpoint, modelId: string): Promise<Model<Api>> {
+    const known = endpoint.kind === "openrouter" ? this.models.getModel("openrouter", modelId) : undefined;
+    const facts: ModelFacts | null = !known && endpoint.kind === "openrouter" ? await this.catalog.facts(endpoint.baseUrl, modelId) : null;
+    const catalog = known ?? (facts ? { ...facts, input: [...facts.input] } as Partial<Model<Api>> : undefined);
     return {
       id: modelId,
       name: catalog?.name ?? modelId,
@@ -166,7 +179,8 @@ function toPiTool(resolved: ResolvedTool, input: TurnInput): ToolDefinition {
       const result = await tool.execute(input.context, params, signal ?? input.signal);
       // Pi marks a tool result as failed when execute throws.
       if (result.isError) throw new Error(result.text);
-      return { content: [{ type: "text", text: result.text }], details: result.details ?? {} };
+      const images = (result.images ?? []).map((i) => ({ type: "image" as const, data: i.data, mimeType: i.mimeType }));
+      return { content: [{ type: "text" as const, text: result.text }, ...images], details: result.details ?? {} };
     },
   }) as ToolDefinition;
 }
@@ -216,7 +230,7 @@ function forward(event: AgentSessionEvent, emit: (e: RuntimeEvent) => void): voi
       emit({ kind: "tool_call", toolCallId: event.toolCallId, name: event.toolName, args: event.args });
       return;
     case "tool_execution_end":
-      emit({ kind: "tool_result", toolCallId: event.toolCallId, name: event.toolName, isError: event.isError, text: resultText(event.result) });
+      emit({ kind: "tool_result", toolCallId: event.toolCallId, name: event.toolName, isError: event.isError, text: resultText(event.result), ...screenshotOf(event.result) });
       return;
     case "auto_retry_start":
       emit({ kind: "notice", text: `Retrying model call (attempt ${event.attempt}/${event.maxAttempts}): ${event.errorMessage}` });
@@ -233,6 +247,12 @@ function resultText(result: unknown): string {
   const content = (result as { content?: { type: string; text?: string }[] } | undefined)?.content;
   if (!Array.isArray(content)) return "";
   return content.filter((c) => c.type === "text").map((c) => c.text ?? "").join("\n");
+}
+
+/** Tools that took a screenshot report its pool id in details, for the activity inspector. */
+function screenshotOf(result: unknown): { screenshotId?: string } {
+  const id = (result as { details?: { screenshotId?: unknown } } | undefined)?.details?.screenshotId;
+  return typeof id === "string" ? { screenshotId: id } : {};
 }
 
 function lastFailure(session: AgentSession): string | null {

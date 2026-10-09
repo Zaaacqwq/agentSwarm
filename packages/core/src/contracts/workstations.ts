@@ -3,7 +3,7 @@ import { Type, type Static } from "typebox";
 export const WorkstationKind = Type.Union([Type.Literal("macos-user"), Type.Literal("local-fake")]);
 
 export const LeaseInfo = Type.Object({
-  kind: Type.Literal("workstation-write"),
+  kind: Type.Union([Type.Literal("workstation-write"), Type.Literal("desktop")]),
   resourceId: Type.String(),
   holderAgentId: Type.String(),
   runId: Type.Union([Type.String(), Type.Null()]),

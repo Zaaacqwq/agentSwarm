@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { loadConfig } from "./config.ts";
 import { openDatabase } from "./db/client.ts";
 import { SecretBox } from "./crypto/secret-box.ts";
+import { SocketHelper } from "./desktop/desktop-helper.ts";
 import { PiRuntime } from "./agents/runtime/pi-runtime.ts";
 import { createServices, type Logger } from "./app/services.ts";
 import { buildApp } from "./app/build-app.ts";
@@ -33,6 +34,8 @@ async function main(): Promise<void> {
     db: database.db, secrets, runtime, log, backend,
     limits: { maxConcurrentRuns: config.maxConcurrentRuns }, heavySlots: config.heavySlots,
     filesDir: join(config.dataDir, "files"), prPollMs: 120_000,
+    // Hive Desktop (scripts/install-desktop-helper.sh) listens here, mode 0600.
+    desktopHelper: new SocketHelper(join(config.dataDir, "desktop.sock")),
   });
   await services.start();
   services.host.start();

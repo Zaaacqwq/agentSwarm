@@ -5,8 +5,8 @@ import type { Layout } from "@hive/priv-helper";
 import { LocalBackend } from "../src/workstations/backend.ts";
 
 /** A HiveWS-shaped layout under /tmp with ws-1 and ws-2 prepared, as the setup script would. */
-export function localBackend(sandbox = true) {
-  const base = realpathSync(mkdtempSync(join(tmpdir(), "hive-ws-")));
+export function localBackend(sandbox = true, parent = tmpdir(), extra: Partial<Layout> = {}) {
+  const base = realpathSync(mkdtempSync(join(parent, "hive-ws-")));
   const layout: Layout = {
     volume: base,
     wsRoot: join(base, "ws"),
@@ -15,6 +15,7 @@ export function localBackend(sandbox = true) {
     hivedData: join(base, "hived"),
     binDir: join(base, "bin"),
     browserDir: join(base, "browser"),
+    ...extra,
   };
   for (const user of ["ws-1", "ws-2"]) {
     mkdirSync(join(layout.wsRoot, user), { recursive: true });

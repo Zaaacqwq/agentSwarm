@@ -60,13 +60,15 @@ describe("browser daemon via hive-exec", () => {
     expect(await call({ cmd: "click", ref })).toMatchObject({ ok: true, url: `${base}/login` });
     const shot = await call({ cmd: "screenshot" });
     expect(shot.ok && shot.image!.length).toBeGreaterThan(1000);
+    expect(shot).toMatchObject({ width: 1280, height: 800 });
+    expect(await call({ cmd: "screenshot", full: true })).toMatchObject({ ok: true, width: 1280 });
 
     const form = await call({ cmd: "snapshot" });
     const pass = /textbox "Password" \[ref=(\w+)\]/.exec(form.ok ? form.text! : "")?.[1];
     const submit = /button "Sign in" \[ref=(\w+)\]/.exec(form.ok ? form.text! : "")?.[1];
     expect(await call({ cmd: "type", ref: pass, text: "secret" })).toMatchObject({ ok: false, needsApproval: { host: "127.0.0.1" } });
     const blocked = await call({ cmd: "click", ref: submit });
-    expect(blocked.ok && blocked.blockedWrites).toEqual(["POST 127.0.0.1"]);
+    expect(blocked).toMatchObject({ ok: true, blockedWrites: ["POST 127.0.0.1"], blockedSite: "127.0.0.1" });
     expect(posts).toHaveLength(0);
     // The blocked navigation leaves an error page; with approval the agent reopens the form.
     await call({ cmd: "open", url: `${base}/login` });

@@ -36,6 +36,13 @@
       "when": 1791528357983,
       "tag": "0004_counters",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1791566380128,
+      "tag": "0005_p5_desktop_browser",
+      "breakpoints": true
     }
   ]
 }

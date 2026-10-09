@@ -3,6 +3,7 @@ import type { Channel, Message, QueueInfo } from "./contracts/chat.ts";
 import type { ActivityEvent, Run } from "./contracts/runs.ts";
 import type { GitPush, HostStatus, Workstation, Worktree } from "./contracts/workstations.ts";
 import type { Task } from "./contracts/tasks.ts";
+import type { Approval, DesktopStatus, Screenshot } from "./contracts/approvals.ts";
 
 // One WebSocket carries every server event. Clients reconnect by refetching snapshots
 // over HTTP and then applying these increments; runs never depend on a live socket.
@@ -21,6 +22,9 @@ export type ServerEvent =
   | { type: "git.pushed"; push: GitPush }
   | { type: "host.updated"; host: HostStatus }
   | { type: "task.updated"; task: Task }
-  | { type: "task.deleted"; taskId: string };
+  | { type: "task.deleted"; taskId: string }
+  | { type: "approval.updated"; approval: Approval }
+  | { type: "desktop.updated"; desktop: DesktopStatus }
+  | { type: "screenshot.created"; screenshot: Screenshot };
 
 export type ServerEventType = ServerEvent["type"];

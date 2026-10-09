@@ -7,7 +7,7 @@ export type RuntimeEvent =
   | { readonly kind: "assistant_text"; readonly text: string }
   | { readonly kind: "thinking"; readonly text: string }
   | { readonly kind: "tool_call"; readonly toolCallId: string; readonly name: string; readonly args: unknown }
-  | { readonly kind: "tool_result"; readonly toolCallId: string; readonly name: string; readonly isError: boolean; readonly text: string }
+  | { readonly kind: "tool_result"; readonly toolCallId: string; readonly name: string; readonly isError: boolean; readonly text: string; readonly screenshotId?: string }
   | {
       readonly kind: "usage";
       readonly provider: string;

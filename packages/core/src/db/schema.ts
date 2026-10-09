@@ -310,7 +310,7 @@ export const leases = sqliteTable(
   "leases",
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
-    kind: text("kind", { enum: ["workstation-write"] }).notNull(),
+    kind: text("kind", { enum: ["workstation-write", "desktop"] }).notNull(),
     resourceId: text("resource_id").notNull(),
     holderAgentId: text("holder_agent_id").notNull(),
     runId: text("run_id"),
@@ -456,4 +456,69 @@ export const attachments = sqliteTable(
 export const orgCounters = sqliteTable("org_counters", {
   orgId: text("org_id").primaryKey().references(() => organizations.id),
   nextTaskNumber: integer("next_task_number").notNull(),
+});
+
+/**
+ * Human decisions an agent waited for (P5). "question" is a plain ask_human; "desktop" and
+ * "browser_site" are session approvals that stay valid until expires_at.
+ */
+export const approvals = sqliteTable(
+  "approvals",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull().references(() => organizations.id),
+    agentId: text("agent_id").notNull(),
+    runId: text("run_id"),
+    channelId: text("channel_id"),
+    messageId: integer("message_id"),
+    kind: text("kind", { enum: ["question", "desktop", "browser_site"] }).notNull(),
+    /** What a session approval covers: a host for browser_site, "console" for desktop. */
+    scope: text("scope").notNull().default(""),
+    question: text("question").notNull(),
+    options: text("options", { mode: "json" }).$type<string[]>().notNull().default(sql`'[]'`),
+    status: text("status", { enum: ["pending", "approved", "denied", "expired", "cancelled", "revoked"] }).notNull(),
+    answer: text("answer"),
+    /** Requested session length for session approvals. */
+    durationMs: integer("duration_ms"),
+    decidedBy: text("decided_by"),
+    decidedAt: integer("decided_at"),
+    /** A pending request is dropped after this. */
+    timeoutAt: integer("timeout_at").notNull(),
+    /** An approved session ends at this time. */
+    expiresAt: integer("expires_at"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("approvals_agent_idx").on(t.agentId, t.kind, t.status),
+    index("approvals_org_status_idx").on(t.orgId, t.status),
+    index("approvals_channel_idx").on(t.channelId),
+    check("approvals_kind_ck", sql`${t.kind} in ('question','desktop','browser_site')`),
+    check("approvals_status_ck", sql`${t.status} in ('pending','approved','denied','expired','cancelled','revoked')`),
+  ],
+);
+
+/** Screenshots agents took (browser or desktop). Blobs share the content-addressed files dir. */
+export const screenshots = sqliteTable(
+  "screenshots",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull().references(() => organizations.id),
+    agentId: text("agent_id").notNull(),
+    runId: text("run_id"),
+    source: text("source", { enum: ["browser", "desktop"] }).notNull(),
+    sha256: text("sha256").notNull(),
+    size: integer("size").notNull(),
+    width: integer("width").notNull(),
+    height: integer("height").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [index("screenshots_agent_idx").on(t.agentId, t.createdAt), index("screenshots_created_idx").on(t.createdAt)],
+);
+
+/** Each agent's persistent browser profile, kept in its workstation directory. */
+export const browserProfiles = sqliteTable("browser_profiles", {
+  agentId: text("agent_id").primaryKey(),
+  workstationId: text("workstation_id").notNull(),
+  createdAt: createdAt(),
+  lastUsedAt: integer("last_used_at").notNull(),
 });

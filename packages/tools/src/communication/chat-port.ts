@@ -42,3 +42,15 @@ export interface ChatPort {
   messageAgent(ctx: AgentContext, target: string, body: string): { channelId: string; id: number };
   readFile(ctx: AgentContext, fileId: string): { filename: string; text: string; truncated: boolean };
 }
+
+/** A person's answer to ask_human. */
+export interface HumanAnswer {
+  readonly status: "approved" | "denied" | "expired" | "cancelled" | "revoked" | "pending";
+  readonly answer: string | null;
+  readonly decidedBy: string | null;
+}
+
+/** Blocks until a person answers in the UI, the request lapses, or the turn is stopped. */
+export interface AskPort {
+  ask(ctx: AgentContext, question: string, options: readonly string[]): Promise<HumanAnswer>;
+}

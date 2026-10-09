@@ -1,4 +1,4 @@
-import { createColleaguesPack, createCommunicationPack, ToolpackRegistry } from "@hive/tools";
+import { createBrowserPack, createColleaguesPack, createCommunicationPack, createDesktopPack, ToolpackRegistry, type AskPort } from "@hive/tools";
 import { eq, sql } from "drizzle-orm";
 import type { ServerEvent } from "@hive/core";
 import { schema, type Db } from "../db/client.ts";
@@ -25,7 +25,12 @@ import { HostMonitor, macProbe, type HostProbe } from "../host/host-monitor.ts";
 import { createTasksPack } from "@hive/tools";
 import { TaskService } from "../tasks/task-service.ts";
 import { FileStore } from "../files/file-store.ts";
-import { mkdtempSync } from "node:fs";
+import { ApprovalService } from "../approvals/approval-service.ts";
+import { ScreenshotStore } from "../files/screenshot-store.ts";
+import { BrowserAdapter } from "../browser/browser-adapter.ts";
+import { DesktopService } from "../desktop/desktop-service.ts";
+import type { DesktopHelper } from "../desktop/desktop-helper.ts";
+import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -47,7 +52,18 @@ export interface ServiceDeps {
   readonly filesDir?: string;
   /** How often open PRs are checked; 0 disables the poller. */
   readonly prPollMs?: number;
+  /** The hive-desktop helper (P5); absent means desktop control is unavailable. */
+  readonly desktopHelper?: DesktopHelper;
+  /** Total bytes kept for agent screenshots. */
+  readonly screenshotPoolBytes?: number;
+  /** How long an approval request waits for a person (tests shorten it). */
+  readonly approvalTimeoutMs?: number;
 }
+
+const NO_DESKTOP: DesktopHelper = {
+  available: () => false,
+  call: () => Promise.reject(new Error("Desktop control is not configured")),
+};
 
 export interface Services {
   readonly db: Db;
@@ -67,6 +83,10 @@ export interface Services {
   readonly host: HostMonitor;
   readonly tasks: TaskService;
   readonly files: FileStore;
+  readonly approvals: ApprovalService;
+  readonly screenshots: ScreenshotStore;
+  readonly browser: BrowserAdapter;
+  readonly desktop: DesktopService;
 }
 
 /** Composition root. Construction has no side effects; call start() before serving. */
@@ -87,7 +107,11 @@ export function createServices(deps: ServiceDeps): Services & { start(): Promise
 
   // Workstations (P2). The manager is referenced lazily by closures below.
   let workstations: WorkstationService | null = null;
-  const leases = new LeaseService(db, (resourceId) => publishWorkstation(resourceId));
+  let desktop: DesktopService | null = null;
+  const leases = new LeaseService(db, (resourceId) => {
+    publishWorkstation(resourceId);
+    desktop?.onLeaseChange(resourceId);
+  });
   workstations = new WorkstationService(db, deps.backend, leases);
   const git = deps.git ?? runGit;
   const repos = new RepoService({ db, backend: deps.backend, git, onWorktree: (wt) => publishForWorkstation(wt.workstationId, { type: "worktree.updated", worktree: wt }) });
@@ -99,7 +123,9 @@ export function createServices(deps: ServiceDeps): Services & { start(): Promise
     taskAssignee: (taskId) => db.select({ a: schema.tasks.assigneeAgentId }).from(schema.tasks).where(eq(schema.tasks.id, taskId)).get()?.a ?? null,
     onPullRequest: (pr) => tasks?.onPullRequest(pr),
   });
-  const files = new FileStore(db, deps.filesDir ?? mkdtempSync(join(tmpdir(), "hive-files-")));
+  const filesDir = deps.filesDir ?? mkdtempSync(join(tmpdir(), "hive-files-"));
+  const files = new FileStore(db, filesDir);
+  const screenshots = new ScreenshotStore(db, filesDir, deps.screenshotPoolBytes, (orgId, screenshot) => bus.publish(orgId, { type: "screenshot.created", screenshot }));
   let host: HostMonitor | null = null;
   const heavy = new HeavySlots(deps.heavySlots ?? 2, () => host?.underPressure() ?? false);
 
@@ -138,7 +164,31 @@ export function createServices(deps: ServiceDeps): Services & { start(): Promise
     files,
   });
 
-  registry.register(createCommunicationPack(chat));
+  const approvals = new ApprovalService({
+    db, bus,
+    postCard: (orgId, channelId, body, runId) => chat.postSystemMessage(orgId, channelId, body, runId),
+    canReadChannel: (user, channelId) => {
+      try {
+        chat.channels.assertUserCanRead(user, channelId);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    agentName: (id) => agents.findRow(id)?.name ?? "an agent",
+    onWaiting: (agentId, reason) => requireManager().setWaiting(agentId, reason),
+    onSessionEnded: (row) => {
+      if (row.kind === "desktop") desktop?.onApprovalEnded(row.agentId);
+    },
+    ...(deps.approvalTimeoutMs ? { timeoutMs: deps.approvalTimeoutMs } : {}),
+  });
+  const asker: AskPort = {
+    ask: async (ctx, question, options) => {
+      const row = await approvals.request(ctx, { kind: "question", question, options });
+      return { status: row.status, answer: row.answer, decidedBy: row.decidedBy };
+    },
+  };
+  registry.register(createCommunicationPack(chat, asker));
   registry.register(createColleaguesPack(chat));
   const adapter = new WorkstationAdapter({
     workstations, repos, leases, heavy, relay,
@@ -152,6 +202,27 @@ export function createServices(deps: ServiceDeps): Services & { start(): Promise
     const h = await deps.backend.health();
     return h.ready ? { available: true } : { available: false, reason: h.reason ?? "workstations unavailable" };
   }));
+  const browser = new BrowserAdapter({ db, backend: deps.backend, workstations, approvals, screenshots });
+  registry.register(createBrowserPack(browser, async () => {
+    const h = await deps.backend.health();
+    if (!h.ready) return { available: false, reason: h.reason ?? "workstations unavailable" };
+    if (!existsSync(join(deps.backend.layout.browserDir, "daemon.js"))) return { available: false, reason: "The browser runtime is not installed; rerun scripts/setup-workstations.sh --update-exec" };
+    return { available: true };
+  }));
+  const publishDesktop = (): void => {
+    void desktop!.status().then((status) => {
+      for (const org of db.select({ id: schema.organizations.id }).from(schema.organizations).all()) bus.publish(org.id, { type: "desktop.updated", desktop: status });
+    });
+  };
+  desktop = new DesktopService({
+    helper: deps.desktopHelper ?? NO_DESKTOP,
+    leases, approvals, screenshots,
+    agentName: (id) => agents.findRow(id)?.name ?? "an agent",
+    onChange: publishDesktop,
+    log: (msg, extra) => log("info", msg, extra),
+  });
+  registry.register(createDesktopPack(desktop, () => desktop!.health()));
+
   host = new HostMonitor({
     probe: deps.hostProbe ?? macProbe,
     mounts: ["/", deps.backend.layout.volume],
@@ -203,7 +274,7 @@ export function createServices(deps: ServiceDeps): Services & { start(): Promise
     },
   });
 
-  const services = { db, bus, auth, endpoints, agents, chat, runs, registry, manager, workstations, repos, leases, heavy, relay, host, tasks, files };
+  const services = { db, bus, auth, endpoints, agents, chat, runs, registry, manager, workstations, repos, leases, heavy, relay, host, tasks, files, approvals, screenshots, browser, desktop };
   return {
     ...services,
     async start() {
@@ -211,8 +282,15 @@ export function createServices(deps: ServiceDeps): Services & { start(): Promise
         setInterval(() => void tasks!.syncPullRequests().catch((error) => log("warn", "PR sync failed", { error: String(error) })), deps.prPollMs).unref?.();
       }
       await registry.refreshHealth();
+      // Helpers can be installed or granted permissions while hived runs.
+      setInterval(() => void registry.refreshHealth(), 60_000).unref?.();
       // Leases belong to runs; after a restart no run is active, so none can still be held.
       leases.releaseAll();
+      await desktop!.end();
+      // Nobody waits on requests from before the restart.
+      approvals.expireStale();
+      setInterval(() => approvals.sweep(), 60_000).unref?.();
+      screenshots.enforceCap();
       files.purgeUnbound();
       requireManager().recover();
       if ((await deps.backend.health()).ready) {

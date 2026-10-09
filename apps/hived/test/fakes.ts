@@ -31,7 +31,8 @@ export async function callTool(input: TurnInput, name: string, args: Record<stri
     return { text: "Tool not found", isError: true };
   }
   const result = await resolved.tool.execute(input.context, args, input.signal);
-  input.onEvent({ kind: "tool_result", toolCallId, name, isError: !!result.isError, text: result.text });
+  const shot = result.details?.screenshotId;
+  input.onEvent({ kind: "tool_result", toolCallId, name, isError: !!result.isError, text: result.text, ...(typeof shot === "string" ? { screenshotId: shot } : {}) });
   return { text: result.text, isError: !!result.isError };
 }
 
@@ -63,6 +64,9 @@ export interface WorldOptions {
   readonly backend?: WorkstationBackend;
   readonly github?: GitHubPort;
   readonly leaseWaitMs?: number;
+  readonly desktopHelper?: import("../src/desktop/desktop-helper.ts").DesktopHelper;
+  readonly approvalTimeoutMs?: number;
+  readonly screenshotPoolBytes?: number;
 }
 
 export async function buildWorld(opts: WorldOptions = {}) {
@@ -82,6 +86,9 @@ export async function buildWorld(opts: WorldOptions = {}) {
     // Tests drive timing explicitly: no debounce unless a test asks for it.
     limits: { debounceMs: 0, ...opts.limits },
     leaseWaitMs: opts.leaseWaitMs ?? 50,
+    ...(opts.desktopHelper ? { desktopHelper: opts.desktopHelper } : {}),
+    ...(opts.approvalTimeoutMs ? { approvalTimeoutMs: opts.approvalTimeoutMs } : {}),
+    ...(opts.screenshotPoolBytes ? { screenshotPoolBytes: opts.screenshotPoolBytes } : {}),
   });
   await services.start();
   const setupRequired = services.auth.isSetupRequired();
