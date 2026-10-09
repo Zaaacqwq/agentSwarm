@@ -177,6 +177,21 @@ describe("membership, reactions and search", () => {
     expect(() => w.chat.updateGroup(w.user, groupId, { agentIds: [] })).toThrow();
   });
 
+  test("deleting an agent keeps the group and its history but removes its DMs", async () => {
+    const { w, ada, bob } = await crew(async (input) => {
+      await say(input, channelOf(input), `${input.agent.name} here`);
+    });
+    const group = w.chat.createGroup(w.user, "Crew", [ada.id, bob.id]);
+    const dm = w.chat.openDm(w.user, ada.id);
+    w.chat.postUserMessage(w.user, group.id, "@all roll call");
+    await w.manager.idle();
+    w.agents.remove(w.user, ada.id);
+    const kept = w.chat.listMessages(w.user, group.id, {}).messages.map((m) => `${m.authorName}: ${m.body}`);
+    expect(kept).toContain("Ada: Ada here");
+    expect(w.chat.channel(w.user, group.id).members.filter((m) => m.kind === "agent").map((m) => m.id)).toEqual([bob.id]);
+    expect(() => w.chat.channel(w.user, dm.id)).toThrow();
+  });
+
   test("reactions are idempotent and agents react through the tool", async () => {
     const { w, ada } = await crew(async (input) => {
       const id = Number(/message #(\d+)/.exec(input.prompt)![1]);

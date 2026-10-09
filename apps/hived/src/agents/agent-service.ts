@@ -107,10 +107,18 @@ export class AgentService {
   remove(user: AuthUser, id: string, now = Date.now()): void {
     this.getRow(user.orgId, id);
     this.deps.db.transaction((tx) => {
-      // DM channels with a deleted agent have no counterpart left.
-      const dmIds = tx.select({ id: schema.channelMembers.channelId }).from(schema.channelMembers)
+      const memberships = tx.select({ channelId: schema.channelMembers.channelId, kind: schema.channels.kind })
+        .from(schema.channelMembers)
+        .innerJoin(schema.channels, eq(schema.channels.id, schema.channelMembers.channelId))
         .where(and(eq(schema.channelMembers.memberKind, "agent"), eq(schema.channelMembers.memberId, id))).all();
-      for (const { id: channelId } of dmIds) tx.delete(schema.channels).where(eq(schema.channels.id, channelId)).run();
+      for (const m of memberships) {
+        // Private chats lose their counterpart and go; groups keep their history (author names are snapshots).
+        if (m.kind === "group") {
+          tx.delete(schema.channelMembers).where(and(eq(schema.channelMembers.channelId, m.channelId), eq(schema.channelMembers.memberKind, "agent"), eq(schema.channelMembers.memberId, id))).run();
+        } else {
+          tx.delete(schema.channels).where(eq(schema.channels.id, m.channelId)).run();
+        }
+      }
       tx.delete(schema.agents).where(eq(schema.agents.id, id)).run();
     });
     writeAudit(this.deps.db, { orgId: user.orgId, actorKind: "user", actorId: user.id, action: "agent.delete", targetId: id }, now);
