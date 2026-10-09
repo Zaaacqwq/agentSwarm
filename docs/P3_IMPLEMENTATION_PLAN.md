@@ -1,26 +1,24 @@
-# P3 实施方案：多 Agent 与群聊（待确认）
+# P3 实施方案：多 Agent 与群聊（已确认，2026-10-09）
 
 基于 P2（PR #2）。对应 `HIVE_PLAN.md` 第 12 节 P3：
 
-- 群聊、Agent 之间私聊、@ 提及唤醒、防刷屏规则、回复与反应、成员管理、频道文件；
+- 群聊、Agent 之间私聊、@ 提及唤醒、防刷屏规则、回复与反应、成员管理；频道文件推到 P4；
 - 调度器：多 Agent 并发回合、资源排队、在界面上能看到排队和等待状态；
 - 前端：群聊界面、Agent 间会话（人只能读）、完善活动检查器、Portal 搜索。
 
-不做：任务看板与交接（P4）、打断当前回合的判断（plan 4.2 定为后期）、Agent 自建群（需要审批流程，放到后面）。
+不做：任务看板与交接（P4）、频道文件（P4）、打断当前回合的判断（plan 4.2 定为后期）、Agent 自建群（需要审批流程，放到后面）。
 
 参考了 ASNG 的 `chat-and-groups.md`、`agent-communication.md`、`message-interruption.md`，下面注明哪些照搬、哪些按我们的计划调整。
 
-## 0. 需要你确认的设计决定
+## 0. 已确认的设计决定
 
-1. **Agent 之间能不能互相私聊**（见第 2 节，下面二选一）：
-   - (A) 同组织内，被授予 `core.colleagues` 工具包的 Agent 可以私聊任何同事。
-   - (B) 像 ASNG 一样，必须由人为每一对 Agent 打开「互相连接」。
-2. **频道文件**：在 P3 一起做，还是推到 P4？
-3. **其余按下面的默认值**（数值可调）：
-   - **群里只有被 @ 的 Agent 会被唤醒**。这是 plan 4.2 的规定；ASNG 是全员唤醒。
-   - **会话链预算**：人发起的链 32 条，Agent 发起的链 8 条。
-   - **频率上限**：每个 Agent 每小时最多发 60 条消息。
-   - **防抖**：新消息到达后静默 1.5 秒再开回合。
+1. **Agent 之间私聊**：被授予 `core.colleagues` 的 Agent 可以私聊同组织内的任何 Agent，不需要人逐对建立连接。等 P6 支持多用户后再收紧。
+2. **频道文件推到 P4**：人上传附件、Agent 的 `attach_file`、文件抽屉，都在 P4 做任务交接时一起实现。
+3. **默认数值**：
+   - 群里只唤醒被 @ 的 Agent，`@all` 唤醒全部成员；
+   - 会话链预算：人发起的 32 条，Agent 发起的 8 条；
+   - 每个 Agent 每小时最多 60 条消息；
+   - 收到消息后静默 1.5 秒再开回合。
 
 ## 1. 会话与上下文
 
@@ -73,8 +71,7 @@
 | | `read_channel` | 群里显示作者名和回复引用 |
 | | `search_messages(query, channel_id?)` | 只搜自己是成员的频道；用 SQLite FTS5 trigram 索引 |
 | | `react(message_id, emoji)` | 幂等 |
-| | `attach_file(channel_id, path)` | 把 worktree 里的文件附加到消息（取决于决定 0.2） |
-| `core.colleagues`（新） | `agent_directory` | 同事列表，包含名字、角色和你是否能私聊对方 |
+| `core.colleagues`（新） | `agent_directory` | 同组织同事的名字和角色 |
 | | `message_agent(agent, body)` | 建立或复用 `agent_dm` 频道并发送 |
 
 ## 6. 数据库变更（迁移 0002）
@@ -86,10 +83,6 @@
 - `messages`：新增 `reply_to_id`、`chain_id`、`mentions`（JSON）、`author_name`（快照）。
 - 新增 `chains`：`id, org_id, origin_kind, origin_message_id, budget, used, paused_at, created_at`。
 - 新增 `reactions`：`message_id, actor_kind, actor_id, emoji, created_at`，主键是前四列。
-- 新增 `attachments`：`id, channel_id, message_id, uploader_kind, uploader_id, filename, mime, size, sha256, path, created_at`。
-  - 文件存在 `/Volumes/HiveWS/hived/files/`。
-  - 单个文件上限 10 MB，只接受白名单里的 MIME 类型。
-- 新增 `agent_connections`：`agent_a, agent_b, created_at`。只有决定 0.1 选 B 时才建。
 - 新增 `messages_fts`：FTS5 trigram 索引，由触发器维护。
 
 ## 7. 前端
@@ -103,15 +96,13 @@
 - **Agent 间会话**：只读，显示两个 Agent 的头像和各自的配色。
 - **Portal 搜索（⌘/Ctrl+K）**：搜 Agent、频道、消息、工作站，点结果直接跳到消息位置。
 - **活动检查器**：显示每个回合的触发来源（谁在哪个频道发的消息）和所属会话链。
-- **频道文件抽屉**（取决于决定 0.2）。
 
 ## 8. 测试计划
 
 1. **单元测试**：
    - 提及解析（`@名字`、`@all`、名字里带空格、中文名）；
    - 唤醒规则；会话链预算与暂停；频率上限；防抖合并；
-   - 反应的幂等性；FTS 搜索（含中文和不足 3 个字符的词）；
-   - 附件的路径、大小和类型校验。
+   - 反应的幂等性；FTS 搜索（含中文和不足 3 个字符的词）。
 2. **权限测试**：
    - 非成员不能读、写、搜索、反应；
    - 被移出群后立即失效；
