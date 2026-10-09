@@ -62,6 +62,7 @@ export interface WorldOptions {
   readonly endpoint?: { kind: "openrouter" | "openai-compatible"; baseUrl?: string; apiKey: string };
   readonly backend?: WorkstationBackend;
   readonly github?: GitHubPort;
+  readonly leaseWaitMs?: number;
 }
 
 export async function buildWorld(opts: WorldOptions = {}) {
@@ -78,7 +79,9 @@ export async function buildWorld(opts: WorldOptions = {}) {
     hostProbe: { pressureLevel: () => "normal", swapUsedMb: () => 0, disk: () => ({ freeGb: 100, totalGb: 200 }) },
     ...(opts.github ? { github: opts.github } : {}),
     log: (level, msg) => logs.push({ level, msg }),
-    ...(opts.limits ? { limits: opts.limits } : {}),
+    // Tests drive timing explicitly: no debounce unless a test asks for it.
+    limits: { debounceMs: 0, ...opts.limits },
+    leaseWaitMs: opts.leaseWaitMs ?? 50,
   });
   await services.start();
   const setupRequired = services.auth.isSetupRequired();

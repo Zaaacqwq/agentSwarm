@@ -1,14 +1,41 @@
+import type { AgentContext } from "../toolpack.ts";
+
 export interface ChannelMessageView {
   readonly id: number;
   readonly author: string;
   readonly authorKind: "user" | "agent" | "system";
   readonly body: string;
+  readonly replyToId: number | null;
+  /** e.g. ["👍×2"] */
+  readonly reactions: readonly string[];
   readonly createdAt: number;
 }
 
-/** What the communication pack needs from the chat service; hived implements it. */
+export interface ChatView {
+  readonly channelId: string;
+  readonly kind: "dm" | "group" | "agent_dm";
+  readonly title: string;
+  readonly members: readonly string[];
+  /** False for a person's private chat when they did not message you in this turn. */
+  readonly canSend: boolean;
+}
+
+export interface ColleagueView {
+  readonly id: string;
+  readonly name: string;
+  readonly role: string;
+}
+
+/**
+ * What the communication and colleague packs need from hived. Every method checks
+ * membership and publication policy itself and throws Error with a model-readable message.
+ */
 export interface ChatPort {
-  isMember(channelId: string, agentId: string): boolean;
-  postAgentMessage(input: { channelId: string; agentId: string; runId: string; body: string }): { id: number };
-  readChannel(channelId: string, opts: { before?: number; limit: number }): { messages: ChannelMessageView[]; hasMore: boolean };
+  listChats(ctx: AgentContext): ChatView[];
+  send(ctx: AgentContext, input: { channelId: string; body: string; replyToId?: number }): { id: number };
+  read(ctx: AgentContext, channelId: string, opts: { before?: number; limit: number }): { messages: ChannelMessageView[]; hasMore: boolean };
+  searchFor(ctx: AgentContext, query: string, channelId?: string): (ChannelMessageView & { channel: string })[];
+  reactAsAgent(ctx: AgentContext, messageId: number, emoji: string): void;
+  directory(ctx: AgentContext): ColleagueView[];
+  messageAgent(ctx: AgentContext, target: string, body: string): { channelId: string; id: number };
 }

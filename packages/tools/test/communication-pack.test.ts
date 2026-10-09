@@ -1,75 +1,90 @@
 import { describe, expect, test } from "bun:test";
-import { createCommunicationPack, type ChatPort, type ChannelMessageView } from "../src/index.ts";
+import { createColleaguesPack, createCommunicationPack, type ChannelMessageView, type ChatPort } from "../src/index.ts";
 import type { AgentContext } from "../src/toolpack.ts";
 
-function fakeChat(members: Record<string, string[]>, history: ChannelMessageView[] = []) {
-  const posted: { channelId: string; agentId: string; runId: string; body: string }[] = [];
+const ctx: AgentContext = { agentId: "agt_a", orgId: "org", runId: "run_1", grants: [], currentGrants: () => [] };
+
+function fakeChat(overrides: Partial<ChatPort> = {}) {
+  const sent: { channelId: string; body: string; replyToId?: number }[] = [];
+  const history: ChannelMessageView[] = Array.from({ length: 30 }, (_, i) => ({
+    id: i + 1, author: i % 2 ? "admin" : "Bob", authorKind: i % 2 ? "user" : "agent", body: `m${i + 1}`,
+    replyToId: i === 29 ? 28 : null, reactions: i === 29 ? ["👍×2"] : [], createdAt: i,
+  }));
   const port: ChatPort = {
-    isMember: (channelId, agentId) => members[channelId]?.includes(agentId) ?? false,
-    postAgentMessage: (input) => {
-      posted.push(input);
-      return { id: 100 + posted.length };
+    listChats: () => [
+      { channelId: "ch_g", kind: "group", title: "Crew", members: ["admin", "Ada", "Bob"], canSend: true },
+      { channelId: "ch_d", kind: "dm", title: "Ada", members: ["admin", "Ada"], canSend: false },
+    ],
+    send: (_c, input) => {
+      sent.push(input);
+      return { id: 100 + sent.length };
     },
-    readChannel: (_channelId, { before, limit }) => {
+    read: (_c, _ch, { before, limit }) => {
       const older = history.filter((m) => before === undefined || m.id < before);
       const page = older.slice(-limit);
       return { messages: page, hasMore: older.length > page.length };
     },
+    searchFor: () => [{ ...history[0]!, channel: "Crew (ch_g)" }],
+    reactAsAgent: () => {},
+    directory: () => [{ id: "agt_b", name: "Bob", role: "builder" }],
+    messageAgent: (_c, target) => ({ channelId: `ch_${target}`, id: 7 }),
+    ...overrides,
   };
-  return { port, posted };
+  return { port, sent };
 }
 
-const ctx: AgentContext = { agentId: "agt_a", orgId: "org", runId: "run_1", grants: [], currentGrants: () => [] };
-
 function tool(port: ChatPort, name: string) {
-  const t = createCommunicationPack(port).tools(ctx).find((x) => x.name === name);
+  const all = [...createCommunicationPack(port).tools(ctx), ...createColleaguesPack(port).tools(ctx)];
+  const t = all.find((x) => x.name === name);
   if (!t) throw new Error(`missing ${name}`);
   return t;
 }
 
 describe("core.communication", () => {
-  test("send_message posts only to channels the agent belongs to", async () => {
-    const { port, posted } = fakeChat({ ch_mine: ["agt_a"], ch_other: ["agt_b"] });
-    const send = tool(port, "send_message");
-    const ok = await send.execute(ctx, { channel_id: "ch_mine", body: "  hello  " });
-    expect(ok.isError).toBeUndefined();
-    expect(posted).toEqual([{ channelId: "ch_mine", agentId: "agt_a", runId: "run_1", body: "hello" }]);
-    const denied = await send.execute(ctx, { channel_id: "ch_other", body: "sneaky" });
-    expect(denied.isError).toBe(true);
-    expect(posted).toHaveLength(1);
+  test("send_message trims, passes reply_to, and surfaces policy errors", async () => {
+    const { port, sent } = fakeChat();
+    expect((await tool(port, "send_message").execute(ctx, { channel_id: "ch_g", body: "  hi  ", reply_to: 3 })).text).toBe("Sent message 101.");
+    expect(sent).toEqual([{ channelId: "ch_g", body: "hi", replyToId: 3 }]);
+    expect((await tool(port, "send_message").execute(ctx, { channel_id: "ch_g", body: "   " })).isError).toBe(true);
+    const refusing = fakeChat({ send: () => { throw new Error("This conversation is paused"); } }).port;
+    expect(await tool(refusing, "send_message").execute(ctx, { channel_id: "ch_g", body: "x" })).toEqual({ text: "This conversation is paused", isError: true });
   });
 
-  test("send_message rejects whitespace-only bodies", async () => {
-    const { port, posted } = fakeChat({ ch: ["agt_a"] });
-    const res = await tool(port, "send_message").execute(ctx, { channel_id: "ch", body: "   " });
-    expect(res.isError).toBe(true);
-    expect(posted).toHaveLength(0);
-  });
-
-  test("read_channel pages and truncates long bodies", async () => {
-    const history = Array.from({ length: 30 }, (_, i) => ({
-      id: i + 1,
-      author: i % 2 ? "Admin" : "agent",
-      authorKind: "user" as const,
-      body: i === 29 ? "x".repeat(1500) : `m${i + 1}`,
-      createdAt: i,
-    }));
-    const { port } = fakeChat({ ch: ["agt_a"] }, history);
-    const read = tool(port, "read_channel");
-    const res = await read.execute(ctx, { channel_id: "ch", limit: 5 });
-    expect(res.text).toContain("#26");
-    expect(res.text).not.toContain("#25 ");
+  test("read_channel shows authors, replies, reactions and paging", async () => {
+    const { port } = fakeChat();
+    const res = await tool(port, "read_channel").execute(ctx, { channel_id: "ch_g", limit: 5 });
+    expect(res.text).toContain("#26 admin: m26");
+    expect(res.text).toContain("#27 Bob (agent): m27");
+    expect(res.text).toContain("#30 admin (reply to #28): m30  [👍×2]");
     expect(res.text).toContain("use before=26");
-    expect(res.text).toContain("[500 more chars]");
-    const denied = await read.execute(ctx, { channel_id: "nope" });
-    expect(denied.isError).toBe(true);
-    const empty = await read.execute(ctx, { channel_id: "ch", before: 1 });
-    expect(empty.text).toBe("No messages.");
+    expect((await tool(port, "read_channel").execute(ctx, { channel_id: "ch_g", before: 1 })).text).toBe("No messages.");
   });
 
-  test("pack declares guidance and is healthy", async () => {
-    const pack = createCommunicationPack(fakeChat({}).port);
-    expect(pack.guidance).toContain("send_message");
-    expect(await pack.healthcheck()).toEqual({ available: true });
+  test("list_chats, search, react", async () => {
+    const { port } = fakeChat();
+    const chats = (await tool(port, "list_chats").execute(ctx, {})).text;
+    expect(chats).toContain("ch_g · group · Crew");
+    expect(chats).toContain("read-only this turn");
+    expect((await tool(port, "search_messages").execute(ctx, { query: "m1" })).text).toContain("[Crew (ch_g)] #1 Bob (agent): m1");
+    expect((await tool(port, "react").execute(ctx, { message_id: 3, emoji: "👍" })).text).toBe("Reacted 👍 to #3.");
+    const empty = fakeChat({ listChats: () => [], searchFor: () => [] }).port;
+    expect((await tool(empty, "list_chats").execute(ctx, {})).text).toBe("You are not in any channels.");
+    expect((await tool(empty, "search_messages").execute(ctx, { query: "x" })).text).toBe("No matches.");
+  });
+});
+
+describe("core.colleagues", () => {
+  test("directory and message_agent", async () => {
+    const { port } = fakeChat();
+    expect((await tool(port, "agent_directory").execute(ctx, {})).text).toBe("Bob — builder (agt_b)");
+    expect((await tool(port, "message_agent").execute(ctx, { agent: "Bob", body: "hi" })).text).toBe("Sent message 7 in ch_Bob.");
+    const nobody = fakeChat({ directory: () => [] }).port;
+    expect((await tool(nobody, "agent_directory").execute(ctx, {})).text).toBe("You have no colleagues yet.");
+  });
+
+  test("packs declare guidance and are healthy", async () => {
+    const { port } = fakeChat();
+    expect(createCommunicationPack(port).guidance).toContain("@mentioned");
+    expect(await createColleaguesPack(port).healthcheck()).toEqual({ available: true });
   });
 });

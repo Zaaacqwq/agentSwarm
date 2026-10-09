@@ -18,6 +18,9 @@ export interface AdapterDeps {
   readonly findAgent: (agentId: string) => AgentRow | null;
   readonly agentName: (agentId: string) => string;
   readonly heavyWaitMs?: number;
+  /** How long a write waits for another agent's lease before giving up. */
+  readonly leaseWaitMs?: number;
+  readonly onWaiting?: (agentId: string, reason: string | null) => void;
 }
 
 type WorktreeRow = NonNullable<ReturnType<RepoService["activeWorktree"]>>;
@@ -38,7 +41,7 @@ export class WorkstationAdapter implements WorkstationPort {
 
   async checkout(ctx: AgentContext, repo: string, slug: string) {
     const ws = this.workstation(ctx);
-    this.claimWrite(ctx, ws);
+    await this.claimWrite(ctx, ws);
     const agent = this.deps.findAgent(ctx.agentId);
     if (!agent) throw new Error("Agent not found");
     const res = await this.call(() =>
@@ -78,7 +81,7 @@ export class WorkstationAdapter implements WorkstationPort {
 
   async termSend(ctx: AgentContext, name: string, keys: string, enter: boolean) {
     const ws = this.workstation(ctx);
-    this.claimWrite(ctx, ws);
+    await this.claimWrite(ctx, ws);
     await this.call(() => this.deps.workstations.backend.call(ws.osUser, { op: "tmux.send", name: this.termName(ctx, name), keys, enter }));
   }
 
@@ -90,7 +93,7 @@ export class WorkstationAdapter implements WorkstationPort {
 
   async termKill(ctx: AgentContext, name: string) {
     const ws = this.workstation(ctx);
-    this.claimWrite(ctx, ws);
+    await this.claimWrite(ctx, ws);
     await this.call(() => this.deps.workstations.backend.call(ws.osUser, { op: "tmux.kill", name: this.termName(ctx, name) }));
   }
 
@@ -105,7 +108,7 @@ export class WorkstationAdapter implements WorkstationPort {
   async gitPush(ctx: AgentContext) {
     const ws = this.workstation(ctx);
     const wt = this.worktree(ctx, ws);
-    this.claimWrite(ctx, ws);
+    await this.claimWrite(ctx, ws);
     const outcome = await this.call(() => this.deps.relay.push({ agentId: ctx.agentId, worktreeId: wt.id, osUser: ws.osUser }));
     if (outcome.push.status !== "pushed") throw new Error(outcome.message);
     return outcome.message;
@@ -122,7 +125,7 @@ export class WorkstationAdapter implements WorkstationPort {
   private async op<T>(ctx: AgentContext, build: (scope: string) => Request, opts: { write?: boolean; heavy?: boolean; signal?: AbortSignal } = {}): Promise<T> {
     const ws = this.workstation(ctx);
     const wt = this.worktree(ctx, ws);
-    if (opts.write) this.claimWrite(ctx, ws);
+    if (opts.write) await this.claimWrite(ctx, ws);
     this.deps.repos.touch(wt.id);
     const run = () => this.call(() => this.deps.workstations.backend.call<T>(ws.osUser, build(wt.scope)));
     if (!opts.heavy) return run();
@@ -141,11 +144,26 @@ export class WorkstationAdapter implements WorkstationPort {
     return wt;
   }
 
-  private claimWrite(ctx: AgentContext, ws: WorkstationRow): void {
-    const res = this.deps.leases.acquire({ resourceId: ws.id, agentId: ctx.agentId, runId: ctx.runId });
-    if (!res.ok) {
-      const holder = this.deps.agentName(res.holder.holderAgentId);
-      throw new Error(`Workstation ${ws.name} is being written by ${holder} until their turn ends. Read-only tools still work; try writing later.`);
+  /** Waits (briefly, visibly) for the workstation's write lease instead of failing at once. */
+  private async claimWrite(ctx: AgentContext, ws: WorkstationRow): Promise<void> {
+    const deadline = Date.now() + (this.deps.leaseWaitMs ?? 60_000);
+    let announced = false;
+    try {
+      for (;;) {
+        const res = this.deps.leases.acquire({ resourceId: ws.id, agentId: ctx.agentId, runId: ctx.runId });
+        if (res.ok) return;
+        const holder = this.deps.agentName(res.holder.holderAgentId);
+        if (Date.now() >= deadline) {
+          throw new Error(`Workstation ${ws.name} is being written by ${holder} until their turn ends. Read-only tools still work; try writing later.`);
+        }
+        if (!announced) {
+          this.deps.onWaiting?.(ctx.agentId, `${ws.name} (held by ${holder})`);
+          announced = true;
+        }
+        await Bun.sleep(Math.min(1000, Math.max(10, deadline - Date.now())));
+      }
+    } finally {
+      if (announced) this.deps.onWaiting?.(ctx.agentId, null);
     }
   }
 

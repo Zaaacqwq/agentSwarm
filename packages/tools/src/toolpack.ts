@@ -20,6 +20,17 @@ export interface AgentContext {
   readonly grants: readonly ToolGrant[];
   /** Reads current grants at execution time so a revoke takes effect mid-run. */
   readonly currentGrants: () => readonly ToolGrant[];
+  /** What started this turn; server-owned, used for publication policy. */
+  readonly trigger?: TurnTrigger;
+}
+
+export interface TurnTrigger {
+  /** Conversation chain the turn's publications are charged to. */
+  readonly chainId: string | null;
+  /** Channels where a person (not an agent) messaged the agent in this turn. */
+  readonly humanChannelIds: readonly string[];
+  /** All channels the turn's input came from. */
+  readonly channelIds: readonly string[];
 }
 
 export interface ToolResult {

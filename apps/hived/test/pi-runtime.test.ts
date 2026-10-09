@@ -46,10 +46,10 @@ describe("PiRuntime against a fake OpenAI-compatible endpoint", () => {
     const first = w.fake.requests[0]!;
     expect(first.authorization).toBe(`Bearer ${API_KEY}`);
     expect(first.body.model).toBe("fake-model");
-    expect(first.body.tools?.map((t) => t.function.name).sort()).toEqual(["read_channel", "send_message"]);
+    expect(first.body.tools?.map((t) => t.function.name).sort()).toEqual(["list_chats", "react", "read_channel", "search_messages", "send_message"]);
     const system = JSON.stringify(first.body.messages.filter((m) => m.role === "system" || m.role === "developer"));
     expect(system).toContain("You are Ada");
-    expect(system).toContain("only send_message publishes");
+    expect(system).toContain("nothing you write is seen until you call send_message");
 
     const [run] = w.runs.listRuns(w.user.orgId, agent.id);
     expect(run).toMatchObject({ status: "succeeded", inputTokens: 260, outputTokens: 20 });

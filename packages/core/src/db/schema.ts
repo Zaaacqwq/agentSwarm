@@ -96,13 +96,14 @@ export const channels = sqliteTable(
     id: text("id").primaryKey(),
     orgId: text("org_id").notNull().references(() => organizations.id),
     ownerUserId: text("owner_user_id").notNull().references(() => users.id),
-    // P1 only allows "dm"; P3 widens this check to agent_dm and group.
-    kind: text("kind", { enum: ["dm"] }).notNull(),
-    // For dm channels this keeps one channel per (user, agent) pair.
+    // dm: human <-> agent; group: human-managed room; agent_dm: two agents, humans read only.
+    kind: text("kind", { enum: ["dm", "group", "agent_dm"] }).notNull(),
+    title: text("title"),
+    // dm: "<userId>:<agentId>"; agent_dm: the two agent ids sorted and joined. Null for groups.
     dmKey: text("dm_key"),
     createdAt: createdAt(),
   },
-  (t) => [uniqueIndex("channels_dm_key_uq").on(t.dmKey), check("channels_kind_ck", sql`${t.kind} in ('dm')`)],
+  (t) => [uniqueIndex("channels_dm_key_uq").on(t.dmKey), check("channels_kind_ck", sql`${t.kind} in ('dm','group','agent_dm')`)],
 );
 
 export const channelMembers = sqliteTable(
@@ -129,10 +130,17 @@ export const messages = sqliteTable(
     authorId: text("author_id").notNull(),
     body: text("body").notNull(),
     runId: text("run_id"),
+    // Snapshot so history stays readable after an agent is renamed or deleted.
+    authorName: text("author_name").notNull().default(""),
+    replyToId: integer("reply_to_id"),
+    chainId: text("chain_id"),
+    mentions: text("mentions", { mode: "json" }).$type<string[]>().notNull().default(sql`'[]'`),
     createdAt: createdAt(),
   },
   (t) => [
     index("messages_channel_idx").on(t.channelId, t.id),
+    index("messages_chain_idx").on(t.chainId),
+    index("messages_author_idx").on(t.authorKind, t.authorId, t.createdAt),
     check("messages_author_ck", sql`${t.authorKind} in ('user','agent','system')`),
   ],
 );
@@ -327,4 +335,37 @@ export const gitPushes = sqliteTable(
     createdAt: createdAt(),
   },
   (t) => [index("git_pushes_agent_idx").on(t.agentId, t.createdAt)],
+);
+
+// --- P3: conversation chains and reactions -------------------------------------
+
+/**
+ * Every agent publication belongs to a chain started by a human message (budget 32) or by
+ * an agent branching out of private human work (budget 8). Exhausted chains pause.
+ */
+export const chains = sqliteTable(
+  "chains",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull().references(() => organizations.id),
+    originKind: text("origin_kind", { enum: ["user", "agent"] }).notNull(),
+    originMessageId: integer("origin_message_id"),
+    budget: integer("budget").notNull(),
+    used: integer("used").notNull().default(0),
+    pausedAt: integer("paused_at"),
+    createdAt: createdAt(),
+  },
+  (t) => [check("chains_origin_ck", sql`${t.originKind} in ('user','agent')`)],
+);
+
+export const reactions = sqliteTable(
+  "reactions",
+  {
+    messageId: integer("message_id").notNull().references(() => messages.id, { onDelete: "cascade" }),
+    actorKind: text("actor_kind", { enum: ["user", "agent"] }).notNull(),
+    actorId: text("actor_id").notNull(),
+    emoji: text("emoji").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [primaryKey({ columns: [t.messageId, t.actorKind, t.actorId, t.emoji] }), index("reactions_message_idx").on(t.messageId)],
 );

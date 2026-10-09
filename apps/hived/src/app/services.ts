@@ -1,4 +1,4 @@
-import { createCommunicationPack, ToolpackRegistry } from "@hive/tools";
+import { createColleaguesPack, createCommunicationPack, ToolpackRegistry } from "@hive/tools";
 import { eq } from "drizzle-orm";
 import type { ServerEvent } from "@hive/core";
 import { schema, type Db } from "../db/client.ts";
@@ -36,6 +36,7 @@ export interface ServiceDeps {
   readonly github?: GitHubPort;
   readonly hostProbe?: HostProbe;
   readonly heavySlots?: number;
+  readonly leaseWaitMs?: number;
 }
 
 export interface Services {
@@ -111,16 +112,19 @@ export function createServices(deps: ServiceDeps): Services & { start(): Promise
     bus,
     agentInOrg: (orgId, agentId) => agents.exists(orgId, agentId),
     agentStateOf: (id) => requireManager().stateOf(id),
-    onHumanMessage: ({ orgId, messageId, agentIds }) => {
-      for (const agentId of agentIds) requireManager().notify(orgId, agentId, messageId);
-    },
+    agents: (orgId) => agents.list({ id: "", orgId, username: "", role: "admin" }).map((a) => ({ id: a.id, name: a.name, role: a.role })),
+    deliver: ({ orgId, agentId, messageId }) => requireManager().notify(orgId, agentId, messageId),
+    canAcceptFromAgent: (agentId) => requireManager().canAcceptFromAgent(agentId),
   });
 
   registry.register(createCommunicationPack(chat));
+  registry.register(createColleaguesPack(chat));
   const adapter = new WorkstationAdapter({
     workstations, repos, leases, heavy, relay,
     findAgent: (id) => agents.findRow(id),
     agentName: (id) => agents.findRow(id)?.name ?? "another agent",
+    onWaiting: (agentId, reason) => requireManager().setWaiting(agentId, reason),
+    ...(deps.leaseWaitMs !== undefined ? { leaseWaitMs: deps.leaseWaitMs } : {}),
   });
   registry.register(createWorkstationPack(adapter, async () => {
     const h = await deps.backend.health();
@@ -145,7 +149,15 @@ export function createServices(deps: ServiceDeps): Services & { start(): Promise
     findAgent: (id) => agents.findRow(id),
     grantsOf: (id) => agents.grantsOf(id),
     resolveEndpoint: (orgId, id) => endpoints.resolveForRun(orgId, id),
-    chat,
+    chat: {
+      getMessages: (ids) => chat.getMessages(ids),
+      authorName: (kind, id) => chat.authorName(kind, id),
+      postSystemMessage: (orgId, channelId, body, runId) => chat.postSystemMessage(orgId, channelId, body, runId),
+      describeChannel: (channelId, agentId) => {
+        const row = chat.channelRow(channelId);
+        return row ? { kind: row.kind, title: chat.channels.title(row), member: chat.channels.isAgentMember(channelId, agentId) } : null;
+      },
+    },
     log,
     ...(deps.limits ? { limits: deps.limits } : {}),
     onRunSettled: (runId) => leases.releaseForRun(runId),

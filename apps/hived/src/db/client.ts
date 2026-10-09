@@ -18,10 +18,15 @@ const MIGRATIONS_DIR = join(import.meta.dir, "../../drizzle");
 export function openDatabase(path: string): DbHandle {
   const sqlite = new Database(path, { create: true, strict: true });
   sqlite.exec("PRAGMA journal_mode = WAL;");
-  sqlite.exec("PRAGMA foreign_keys = ON;");
   sqlite.exec("PRAGMA busy_timeout = 5000;");
   const db = drizzle(sqlite, { schema });
+  // Table rebuilds (SQLite's only way to change a CHECK) must not cascade-delete children,
+  // and PRAGMA foreign_keys is ignored inside the migrator's transaction, so toggle it here.
+  sqlite.exec("PRAGMA foreign_keys = OFF;");
   migrate(db, { migrationsFolder: MIGRATIONS_DIR });
+  const violations = sqlite.query("PRAGMA foreign_key_check").all();
+  if (violations.length > 0) throw new Error(`Migration left ${violations.length} foreign key violations`);
+  sqlite.exec("PRAGMA foreign_keys = ON;");
   return { db, sqlite, close: () => sqlite.close() };
 }
 
