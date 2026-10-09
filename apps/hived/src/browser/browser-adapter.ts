@@ -23,9 +23,23 @@ type Ok = Extract<BrowserResponse, { ok: true }>;
  * hive-exec. Writes are read-only by default: the approved hosts come from live approvals only.
  */
 export class BrowserAdapter implements BrowserPort {
+  /** One browser command at a time per agent (the daemon serves one page anyway). */
+  private readonly queues = new Map<string, Promise<unknown>>();
+
   constructor(private readonly deps: BrowserAdapterDeps) {}
 
-  async run(ctx: AgentContext, action: BrowserAction): Promise<BrowserOutcome> {
+  run(ctx: AgentContext, action: BrowserAction): Promise<BrowserOutcome> {
+    const previous = this.queues.get(ctx.agentId) ?? Promise.resolve();
+    const next = previous.then(() => this.runNow(ctx, action), () => this.runNow(ctx, action));
+    const settled = next.catch(() => undefined);
+    this.queues.set(ctx.agentId, settled);
+    void settled.then(() => {
+      if (this.queues.get(ctx.agentId) === settled) this.queues.delete(ctx.agentId);
+    });
+    return next;
+  }
+
+  private async runNow(ctx: AgentContext, action: BrowserAction): Promise<BrowserOutcome> {
     const first = await this.call(ctx, action);
     if (!first.ok) {
       if (!first.needsApproval) throw new Error(first.error);
@@ -57,7 +71,7 @@ export class BrowserAdapter implements BrowserPort {
   private async call(ctx: AgentContext, command: BrowserAction): Promise<BrowserResponse> {
     const ws = this.deps.workstations.forAgent(ctx.agentId);
     if (!ws) throw new Error("You have no workstation, so you have no browser. Ask a person to bind one to you.");
-    const request: BrowserRequest = { command, approvedHosts: this.deps.approvals.approvedHosts(ctx.agentId) };
+    const request: BrowserRequest = { command, approvals: this.deps.approvals.approvedHosts(ctx.agentId) };
     const res = await this.deps.backend.call<BrowserResponse>(ws.osUser, { op: "browser", agent: ctx.agentId, request });
     const now = Date.now();
     this.deps.db.insert(schema.browserProfiles).values({ agentId: ctx.agentId, workstationId: ws.id, createdAt: now, lastUsedAt: now })

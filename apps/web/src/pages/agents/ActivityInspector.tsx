@@ -124,6 +124,9 @@ function EventRow({ event }: { event: ActivityEvent }) {
 
 /** A screenshot the agent took; opens full size in a new tab. */
 function Shot({ id }: { id: string }) {
+  const session = useQuery({ queryKey: qk.session, queryFn: api.session, staleTime: Infinity });
+  // Screenshots can show a logged-in page or this Mac's screen: admins only.
+  if (session.data?.user?.role !== "admin") return <span className="ml-1 text-faint">[screenshot]</span>;
   const url = api.screenshotUrl(id);
   return (
     <a href={url} target="_blank" rel="noreferrer noopener" className="mt-1.5 block w-fit overflow-hidden rounded-lg border border-line transition-colors hover:border-honey/60">

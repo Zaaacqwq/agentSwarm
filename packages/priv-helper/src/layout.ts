@@ -14,6 +14,12 @@ export interface Layout {
   readonly binDir: string;
   /** The agent browser daemon (daemon.js + node_modules/playwright-core), root-owned and world-readable */
   readonly browserDir: string;
+  /**
+   * Per-user browser state (<browserState>/<os-user>: control sockets, Chrome profiles), owned by the
+   * workstation user but outside everything the agent sandbox allows, so an agent's shell can neither
+   * talk to its browser directly nor read its cookies.
+   */
+  readonly browserState: string;
   /** Test-only exceptions to the browser's private-address block (never set in production). */
   readonly browserAllowHosts?: readonly string[];
 }
@@ -26,6 +32,7 @@ export const PRODUCTION_LAYOUT: Layout = {
   hivedData: "/Volumes/HiveWS/hived",
   binDir: "/usr/local/libexec/hive/bin",
   browserDir: "/usr/local/libexec/hive/browser",
+  browserState: "/Volumes/HiveWS/browser",
 };
 
 export const WS_USER_PATTERN = /^ws-[0-9]{1,3}$/;

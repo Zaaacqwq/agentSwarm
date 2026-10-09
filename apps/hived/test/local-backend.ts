@@ -15,6 +15,7 @@ export function localBackend(sandbox = true, parent = tmpdir(), extra: Partial<L
     hivedData: join(base, "hived"),
     binDir: join(base, "bin"),
     browserDir: join(base, "browser"),
+    browserState: join(base, "browser-state"),
     ...extra,
   };
   for (const user of ["ws-1", "ws-2"]) {

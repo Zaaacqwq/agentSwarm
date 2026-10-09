@@ -4,6 +4,7 @@ import Foundation
 final class Server {
     private let path: String
     private let handler: ([String: Any]) -> [String: Any]
+    private let queue = DispatchQueue(label: "dev.hive.desktop.connections", attributes: .concurrent)
 
     init(path: String, handler: @escaping ([String: Any]) -> [String: Any]) {
         self.path = path
@@ -56,8 +57,11 @@ final class Server {
                 if errno == EINTR { continue }
                 return
             }
-            serve(c)
-            close(c)
+            // Each connection on its own thread: a stuck client never blocks the next request.
+            queue.async { [self] in
+                serve(c)
+                close(c)
+            }
             if !FileManager.default.fileExists(atPath: path) { return }
         }
     }

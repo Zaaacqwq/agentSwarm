@@ -11,10 +11,15 @@ export type BrowserCommand =
   | { cmd: "ping" }
   | { cmd: "shutdown" };
 
+/** A host where the agent may write until `until` (ms since epoch); decided by hived from live approvals. */
+export interface SiteApproval {
+  readonly host: string;
+  readonly until: number;
+}
+
 export interface BrowserRequest {
   readonly command: BrowserCommand;
-  /** Hosts where this agent currently has an approved write session; decided by hived. */
-  readonly approvedHosts: readonly string[];
+  readonly approvals: readonly SiteApproval[];
 }
 
 export type BrowserResponse =

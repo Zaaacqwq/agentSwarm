@@ -14,6 +14,7 @@ export function fixture(sandbox = true, parent = tmpdir()) {
     hivedData: join(base, "hived"),
     binDir: join(base, "bin"),
     browserDir: join(base, "browser"),
+    browserState: join(base, "browser-state"),
   };
   for (const d of [layout.wsRoot, layout.mirrors, layout.hivedData, join(layout.inbox, "ws-1.git"), join(layout.wsRoot, "ws-1"), join(layout.wsRoot, "ws-2"), join(base, "home-ws-1")]) {
     mkdirSync(d, { recursive: true });

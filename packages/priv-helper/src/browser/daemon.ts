@@ -4,8 +4,8 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { chromium, type BrowserContext, type Page, type Request } from "playwright-core";
-import { checkUrl, hostApproved } from "./url-guard.ts";
-import type { BrowserCommand, BrowserRequest, BrowserResponse } from "./protocol.ts";
+import { checkUrl, hostApproved, isBlockedAddress } from "./url-guard.ts";
+import type { BrowserCommand, BrowserRequest, BrowserResponse, SiteApproval } from "./protocol.ts";
 
 const [socketPath, profileDir, allowArg] = process.argv.slice(2);
 // Test-only: hosts exempt from the private-address block (hive-exec passes them from its fixed layout).
@@ -15,6 +15,8 @@ const IDLE_MS = 15 * 60 * 1000;
 const FULL_PAGE_MAX = 4000;
 const SNAPSHOT_MAX = 12_000;
 const READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+/** Address verdicts are re-checked this often, so a name that changes address is looked at again. */
+const VERDICT_TTL_MS = 30_000;
 
 mkdirSync(profileDir, { recursive: true, mode: 0o700 });
 const context: BrowserContext = await chromium.launchPersistentContext(profileDir, {
@@ -22,35 +24,51 @@ const context: BrowserContext = await chromium.launchPersistentContext(profileDi
   headless: true,
   viewport: { width: 1280, height: 800 },
   acceptDownloads: false,
+  // Service-worker fetches would bypass the request guard below.
+  serviceWorkers: "block",
   // Chrome cannot apply its own seatbelt inside sandbox-exec (it hangs), so isolation comes from
   // hive-exec: the workstation user plus the outer sandbox profile.
   chromiumSandbox: false,
   args: ["--disable-features=Translate,AutofillServerCommunication", "--no-first-run", "--disable-sync", "--disable-crash-reporter"],
 });
 
-let approvedHosts: readonly string[] = [];
+let approvals: readonly SiteApproval[] = [];
 let blockedWrites: string[] = [];
 /** A blocked write that belongs to the page itself (a form post or the page's own API), not a tracker. */
 let blockedFirstParty: string | null = null;
-const verdicts = new Map<string, boolean>();
+let blockedAddress: string | null = null;
+const verdicts = new Map<string, { ok: boolean; at: number }>();
 
-// Every request from every page: public http(s) only; writes need an approved host.
+/** Hosts with a live approval right now (approvals carry their own expiry). */
+function approvedNow(): string[] {
+  const now = Date.now();
+  return approvals.filter((a) => a.until > now).map((a) => a.host);
+}
+
+async function allowedUrl(url: string): Promise<boolean> {
+  const origin = (() => { try { return new URL(url).origin; } catch { return url; } })();
+  const cached = verdicts.get(origin);
+  if (cached && Date.now() - cached.at < VERDICT_TTL_MS) return cached.ok;
+  const ok = (await checkUrl(url, undefined, allowHosts)).ok;
+  verdicts.set(origin, { ok, at: Date.now() });
+  return ok;
+}
+
+const hostOfUrl = (u: string): string => { try { return new URL(u).hostname; } catch { return ""; } };
+
+// Every request from every page: public http(s) only; writes need an approved host, and so does
+// the page that sends them (an approved site's cookies cannot be used by some other page).
 await context.route("**/*", async (route) => {
   const req: Request = route.request();
   const url = req.url();
   if (url.startsWith("data:") || url.startsWith("blob:")) return route.continue();
-  const origin = (() => { try { return new URL(url).origin; } catch { return url; } })();
-  let allowed = verdicts.get(origin);
-  if (allowed === undefined) {
-    allowed = (await checkUrl(url, undefined, allowHosts)).ok;
-    verdicts.set(origin, allowed);
-  }
-  if (!allowed) return route.abort("blockedbyclient");
+  if (!(await allowedUrl(url))) return route.abort("blockedbyclient");
   if (!READ_METHODS.has(req.method())) {
-    const host = new URL(url).hostname;
-    if (!hostApproved(host, approvedHosts)) {
+    const host = hostOfUrl(url);
+    const pageHost = (() => { try { return hostOfUrl(req.frame().url()); } catch { return ""; } })();
+    const approved = approvedNow();
+    if (!hostApproved(host, approved) || (pageHost !== "" && pageHost !== host && !hostApproved(pageHost, approved))) {
       blockedWrites.push(`${req.method()} ${host}`);
-      const pageHost = (() => { try { return new URL(req.frame().url()).hostname; } catch { return ""; } })();
       if (req.isNavigationRequest() || host === pageHost) blockedFirstParty ??= host;
       return route.abort("blockedbyclient");
     }
@@ -58,13 +76,38 @@ await context.route("**/*", async (route) => {
   return route.continue();
 });
 
+// WebSockets are not routed above: allow them only to public hosts with a live write approval.
+await context.routeWebSocket(/.*/, async (ws) => {
+  const host = hostOfUrl(ws.url().replace(/^ws/, "http"));
+  if (!(await allowedUrl(ws.url().replace(/^ws/, "http"))) || !hostApproved(host, approvedNow())) {
+    blockedWrites.push(`WEBSOCKET ${host}`);
+    return ws.close({ code: 1008, reason: "Blocked by Hive" });
+  }
+  ws.connectToServer();
+});
+
+// DNS can change between our check and Chrome's own lookup: if a response came from a private
+// address anyway, drop the page before the agent sees it.
+context.on("response", (res) => {
+  void res.serverAddr().then((addr) => {
+    if (!addr || !isBlockedAddress(addr.ipAddress) || allowHosts.includes(hostOfUrl(res.url()))) return;
+    blockedAddress = hostOfUrl(res.url());
+    verdicts.set(new URL(res.url()).origin, { ok: false, at: Date.now() });
+    const page = res.frame().page();
+    void page.goto("about:blank").catch(() => {});
+  }).catch(() => {});
+});
+
 const page = async (): Promise<Page> => context.pages().at(-1) ?? (await context.newPage());
 
 async function result(p: Page, extra: Partial<Extract<BrowserResponse, { ok: true }>> = {}): Promise<BrowserResponse> {
   const writes = blockedWrites;
   const firstParty = blockedFirstParty;
+  const rebound = blockedAddress;
   blockedWrites = [];
   blockedFirstParty = null;
+  blockedAddress = null;
+  if (rebound) return { ok: false, error: `${rebound} resolved to a private network address; the page was closed` };
   return {
     ok: true, url: p.url(), title: await p.title().catch(() => ""), ...extra,
     ...(writes.length ? { blockedWrites: [...new Set(writes)] } : {}),
@@ -110,7 +153,7 @@ async function run(command: BrowserCommand): Promise<BrowserResponse> {
       const target = await byRef(p, command.ref);
       const isPassword = (await target.getAttribute("type", { timeout: 5_000 }).catch(() => null)) === "password";
       const host = await hostOf(p);
-      if ((isPassword || command.submit) && !hostApproved(host, approvedHosts)) {
+      if ((isPassword || command.submit) && !hostApproved(host, approvedNow())) {
         return { ok: false, error: "Needs approval", needsApproval: { host, reason: isPassword ? "typing into a password field" : "submitting a form" } };
       }
       await target.fill(command.text, { timeout: 10_000 });
@@ -174,7 +217,7 @@ createServer((conn) => {
         let response: BrowserResponse;
         try {
           const req = JSON.parse(line) as BrowserRequest;
-          approvedHosts = req.approvedHosts ?? [];
+          approvals = Array.isArray(req.approvals) ? req.approvals : [];
           response = await run(req.command);
         } catch (error) {
           response = { ok: false, error: (error instanceof Error ? error.message : String(error)).split("\n")[0]!.slice(0, 300) };

@@ -16,6 +16,8 @@ interface OpenRouterModel {
 }
 
 const TTL_MS = 6 * 60 * 60 * 1000;
+/** After a failed load, models register text-only for a while instead of waiting on the network each time. */
+const FAILURE_TTL_MS = 5 * 60 * 1000;
 const perMillion = (v: string | undefined): number => (v ? Number(v) * 1_000_000 || 0 : 0);
 
 /**
@@ -24,6 +26,7 @@ const perMillion = (v: string | undefined): number => (v ? Number(v) * 1_000_000
  */
 export class OpenRouterCatalog {
   private cache = new Map<string, { at: number; models: Map<string, ModelFacts> }>();
+  private failedAt = new Map<string, number>();
 
   constructor(private readonly fetcher: typeof fetch = fetch) {}
 
@@ -31,8 +34,12 @@ export class OpenRouterCatalog {
     const key = baseUrl.replace(/\/+$/, "");
     let entry = this.cache.get(key);
     if (!entry || Date.now() - entry.at > TTL_MS) {
+      if (Date.now() - (this.failedAt.get(key) ?? 0) < FAILURE_TTL_MS) return entry?.models.get(modelId) ?? null;
       const models = await this.load(key);
-      if (!models) return entry?.models.get(modelId) ?? null;
+      if (!models) {
+        this.failedAt.set(key, Date.now());
+        return entry?.models.get(modelId) ?? null;
+      }
       entry = { at: Date.now(), models };
       this.cache.set(key, entry);
     }

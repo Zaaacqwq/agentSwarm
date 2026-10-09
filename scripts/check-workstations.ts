@@ -70,6 +70,7 @@ async function main(): Promise<void> {
       ["hived data", `ls ${backend.layout.hivedData}`],
       ["ws-2's workstation", `ls ${backend.layout.wsRoot}/ws-2`],
       ["ws-2's inbox", `ls ${backend.layout.inbox}/ws-2.git`],
+      ["its own browser state (sockets, cookies)", `ls ${backend.layout.browserState}/ws-1`],
     ];
     for (const [label, command] of denied) {
       const res = await run(command);

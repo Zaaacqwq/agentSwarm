@@ -13,7 +13,13 @@ const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x4
 /** Stands in for Hive Desktop: records commands and enforces arming like the real helper. */
 class FakeHelper implements DesktopHelper {
   readonly calls: Record<string, unknown>[] = [];
-  armed: { untilMs: number; holder: string } | null = null;
+  armed: { untilMs: number; holder: string; session: string } | null = null;
+  stoppedByUser = false;
+  /** The person clicks Stop in the menu bar. */
+  stop(): void {
+    this.armed = null;
+    this.stoppedByUser = true;
+  }
   available(): boolean {
     return true;
   }
@@ -22,12 +28,16 @@ class FakeHelper implements DesktopHelper {
     const front = { frontmost: { app: "TextEdit", title: "Untitled" } };
     switch (req.cmd) {
       case "status":
-        return { screenRecording: true, accessibility: true, armed: this.armed, stoppedByUser: false, displays: [{ index: 0, width: 2560, height: 1440, imageWidth: 1280, imageHeight: 720, main: true }], ...front } as T;
+        return { screenRecording: true, accessibility: true, armed: this.armed, stoppedByUser: this.stoppedByUser, displays: [{ index: 0, width: 2560, height: 1440, imageWidth: 1280, imageHeight: 720, main: true }], ...front } as T;
       case "arm":
-        this.armed = { untilMs: req.untilMs as number, holder: req.holder as string };
+        if (this.stoppedByUser) throw new HelperError("denied", "A person stopped desktop control; it must be approved again");
+        this.armed = { untilMs: req.untilMs as number, holder: req.holder as string, session: req.session as string };
         return {} as T;
       case "disarm":
-        this.armed = null;
+        if (!req.session || req.session === this.armed?.session) this.armed = null;
+        return {} as T;
+      case "ack_stop":
+        this.stoppedByUser = false;
         return {} as T;
       case "screenshot":
         return { image: JPEG, width: 1280, height: 720, display: 0, ...front } as T;
@@ -92,6 +102,34 @@ describe("ask_human", () => {
     await w.manager.idle();
     expect(results).toEqual(["No one answered within 10 minutes."]);
     expect(w.approvals.list(w.user, {})[0]?.status).toBe("expired");
+  });
+});
+
+describe("approval lifecycle", () => {
+  test("a stopped turn does not cancel a request another turn still waits on; floods are refused", async () => {
+    const w = await buildWorld();
+    const ada = w.makeAgent("Ada");
+    const first = new AbortController();
+    const ctx = (signal: AbortSignal): AgentContext => ({ ...ctxOf(w, ada.id), signal });
+    const a = w.approvals.request(ctx(first.signal), { kind: "browser_site", scope: "example.com", question: "post on example.com" });
+    const b = w.approvals.request(ctx(new AbortController().signal), { kind: "browser_site", scope: "example.com", question: "post on example.com" });
+    await Bun.sleep(5);
+    first.abort();
+    expect((await a).status).toBe("cancelled");
+    const [pending] = w.approvals.list(w.user, { status: "pending" });
+    expect(pending).toBeDefined();
+    w.approvals.decide(w.user, pending!.id, { decision: "deny" });
+    expect((await b).status).toBe("denied");
+    // Declined just now: asking again is answered without a new card.
+    expect((await w.approvals.request(ctx(new AbortController().signal), { kind: "browser_site", scope: "example.com", question: "again" })).status).toBe("denied");
+    expect(w.approvals.list(w.user, {})).toHaveLength(1);
+    for (let i = 0; i < 19; i++) {
+      const c = new AbortController();
+      const p = w.approvals.request(ctx(c.signal), { kind: "question", question: `q${i}?` });
+      c.abort();
+      await p;
+    }
+    await expect(w.approvals.request(ctx(new AbortController().signal), { kind: "question", question: "one more?" })).rejects.toThrow("too many times");
   });
 });
 
@@ -163,6 +201,42 @@ describe("desktop control sessions", () => {
     w.approvals.revoke(w.user, active.id);
     expect(w.approvals.active(ada.id, "desktop", "console")).toBeNull();
     await expect(w.desktop.act(ctxOf(w, ada.id), { cmd: "click", x: 1, y: 1 })).rejects.toThrow("do not hold the desktop");
+  });
+
+  test("a Stop from the menu bar cannot be undone by re-acquiring", async () => {
+    const helper = new FakeHelper();
+    const w = await buildWorld({ desktopHelper: helper });
+    const ada = w.makeAgent("Ada");
+    let asked = 0;
+    autoDecide(w, () => {
+      asked++;
+      return asked === 1 ? { decision: "approve" } : { decision: "deny" };
+    });
+    await w.desktop.acquire(ctxOf(w, ada.id), "Edit the doc", 15);
+    expect(helper.armed).not.toBeNull();
+    helper.stop();
+    // Within the poll window the agent tries again: the old approval no longer counts.
+    await expect(w.desktop.acquire(ctxOf(w, ada.id), "Edit the doc", 15)).rejects.toThrow("admin declined");
+    expect(asked).toBe(2);
+    expect(helper.armed).toBeNull();
+    expect(helper.stoppedByUser).toBe(false);
+    expect(w.approvals.list(w.user, {}).map((a) => a.status).sort()).toEqual(["denied", "revoked"]);
+  });
+
+  test("release ends the approval; a late disarm never ends a newer session", async () => {
+    const helper = new FakeHelper();
+    const w = await buildWorld({ desktopHelper: helper });
+    const ada = w.makeAgent("Ada");
+    autoDecide(w, () => ({ decision: "approve" }));
+    await w.desktop.acquire(ctxOf(w, ada.id), "Edit the doc", 15);
+    expect(await w.desktop.release(ctxOf(w, ada.id))).toBe("Released the desktop.");
+    expect(w.approvals.active(ada.id, "desktop", "console")).toBeNull();
+    await w.desktop.acquire(ctxOf(w, ada.id), "Edit again", 15);
+    const token = helper.armed!.session;
+    await helper.call({ cmd: "disarm", session: "stale-token" });
+    expect(helper.armed?.session).toBe(token);
+    await w.desktop.end("stale-token");
+    expect(helper.armed?.session).toBe(token);
   });
 
   test("a denied request leaves the desktop untouched", async () => {

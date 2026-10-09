@@ -114,6 +114,16 @@ ensure_user() {
   # Inbox: written by the workstation user, readable by the owner's group (staff), not by other workstations.
   mkdir -p "${VOLUME}/inbox/${user}.git"
   chown "${user}:staff" "${VOLUME}/inbox/${user}.git" && chmod 2750 "${VOLUME}/inbox/${user}.git"
+  browser_state "$user"
+}
+
+# Browser sockets and profiles: owned by the workstation user, but outside what its agent sandbox
+# allows, so an agent's shell cannot drive its browser directly or read its cookies.
+browser_state() {
+  local user="$1"
+  mkdir -p "${VOLUME}/browser/${user}"
+  chown root:wheel "${VOLUME}/browser" && chmod 0755 "${VOLUME}/browser"
+  chown "${user}:${GROUP}" "${VOLUME}/browser/${user}" && chmod 0700 "${VOLUME}/browser/${user}"
 }
 
 write_sudoers() {
@@ -147,8 +157,9 @@ verify() {
 
 case "$mode" in
   update-exec)
+    check_volume
     install_exec
-    for user in $(dscl . -list /Users | grep -E '^ws-[0-9]+$' || true); do verify "$user"; done
+    for user in $(dscl . -list /Users | grep -E '^ws-[0-9]+$' || true); do browser_state "$user"; verify "$user"; done
     exit 0
     ;;
   uninstall)

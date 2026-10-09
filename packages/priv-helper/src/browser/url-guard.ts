@@ -1,21 +1,49 @@
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 
-/** Addresses an agent's browser must never reach: loopback, private, link-local, CGNAT, multicast, unspecified. */
+/**
+ * Addresses an agent's browser must never reach: loopback, private, link-local, CGNAT, benchmark,
+ * IETF-reserved, multicast, unspecified, and IPv6 forms that embed one of those (mapped, NAT64, 6to4).
+ */
 export function isBlockedAddress(ip: string): boolean {
   const v = isIP(ip);
   if (v === 4) {
-    const [a, b] = ip.split(".").map(Number) as [number, number];
+    const [a, b, c] = ip.split(".").map(Number) as [number, number, number];
     return a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254)
-      || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || a >= 224;
+      || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 192 && b === 0 && c === 0)
+      || (a === 198 && (b === 18 || b === 19)) || a >= 224;
   }
   if (v === 6) {
-    const x = ip.toLowerCase();
-    if (x === "::" || x === "::1") return true;
-    if (x.startsWith("::ffff:")) return isBlockedAddress(x.slice(7));
-    return /^(fc|fd|fe8|fe9|fea|feb|ff)/.test(x);
+    const h = hextets(ip);
+    if (!h) return true;
+    if (h.every((x) => x === 0) || (h.slice(0, 7).every((x) => x === 0) && h[7] === 1)) return true;
+    const v4 = (hi: number, lo: number) => `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+    // ::ffff:a.b.c.d (mapped), ::a.b.c.d (compatible), 64:ff9b::/96 (NAT64)
+    if (h.slice(0, 5).every((x) => x === 0) && (h[5] === 0xffff || h[5] === 0)) return isBlockedAddress(v4(h[6]!, h[7]!));
+    if (h[0] === 0x64 && h[1] === 0xff9b && h.slice(2, 6).every((x) => x === 0)) return isBlockedAddress(v4(h[6]!, h[7]!));
+    if (h[0] === 0x2002) return isBlockedAddress(v4(h[1]!, h[2]!));
+    const first = h[0]!;
+    return (first & 0xfe00) === 0xfc00 || (first & 0xffc0) === 0xfe80 || (first & 0xff00) === 0xff00;
   }
   return true;
+}
+
+/** Eight 16-bit groups of an IPv6 address (handles :: and a trailing dotted IPv4). */
+function hextets(ip: string): number[] | null {
+  let s = ip.toLowerCase().split("%")[0]!;
+  const dotted = /(\d+\.\d+\.\d+\.\d+)$/.exec(s);
+  if (dotted) {
+    const p = dotted[1]!.split(".").map(Number);
+    s = s.slice(0, -dotted[1]!.length) + `${((p[0]! << 8) | p[1]!).toString(16)}:${((p[2]! << 8) | p[3]!).toString(16)}`;
+  }
+  const [head, tail] = s.split("::") as [string, string | undefined];
+  const parts = (x: string | undefined) => (x ? x.split(":").filter(Boolean) : []);
+  const left = parts(head);
+  const right = parts(tail);
+  const fill = tail === undefined ? 0 : 8 - left.length - right.length;
+  const all = [...left, ...Array<string>(Math.max(0, fill)).fill("0"), ...right];
+  if (all.length !== 8) return null;
+  return all.map((x) => parseInt(x, 16));
 }
 
 export type UrlVerdict = { ok: true; host: string } | { ok: false; reason: string };

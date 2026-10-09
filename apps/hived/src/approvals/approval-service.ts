@@ -17,6 +17,10 @@ export const DEFAULT_SESSION_MS: Record<Exclude<ApprovalKind, "question">, numbe
   browser_site: 30 * 60 * 1000,
 };
 export const MAX_SESSION_MS = 60 * 60 * 1000;
+/** Requests one agent may make per hour, so a looping agent cannot flood people with cards. */
+export const MAX_REQUESTS_PER_HOUR = 20;
+/** After a person declines a session approval, the same request is refused without asking again. */
+export const DENIAL_COOLDOWN_MS = 10 * 60 * 1000;
 
 export interface ApprovalRequest {
   readonly kind: ApprovalKind;
@@ -57,6 +61,17 @@ export class ApprovalService {
     }
     const pending = input.kind === "question" ? undefined : this.deps.db.select().from(schema.approvals)
       .where(and(eq(schema.approvals.agentId, ctx.agentId), eq(schema.approvals.kind, input.kind), eq(schema.approvals.scope, scope), eq(schema.approvals.status, "pending"))).get();
+    if (!pending) {
+      if (input.kind !== "question") {
+        const denied = this.deps.db.select().from(schema.approvals)
+          .where(and(eq(schema.approvals.agentId, ctx.agentId), eq(schema.approvals.kind, input.kind), eq(schema.approvals.scope, scope), eq(schema.approvals.status, "denied"), gt(schema.approvals.decidedAt, now - DENIAL_COOLDOWN_MS)))
+          .orderBy(desc(schema.approvals.decidedAt)).get();
+        if (denied) return denied;
+      }
+      const recent = this.deps.db.select({ id: schema.approvals.id }).from(schema.approvals)
+        .where(and(eq(schema.approvals.agentId, ctx.agentId), gt(schema.approvals.createdAt, now - 60 * 60 * 1000))).all().length;
+      if (recent >= MAX_REQUESTS_PER_HOUR) throw new Error("You have asked people too many times this hour; continue without it or wait.");
+    }
     const row = pending ?? this.create(ctx, { ...input, scope }, now);
     return this.wait(row, ctx);
   }
@@ -93,27 +108,39 @@ export class ApprovalService {
       const finish = (final: Row): void => {
         if (timer) clearTimeout(timer);
         ctx.signal?.removeEventListener("abort", onAbort);
-        this.waiters.get(row.id)?.delete(finish);
-        if (this.waiters.get(row.id)?.size === 0) this.waiters.delete(row.id);
+        this.detach(row.id, finish);
         this.deps.onWaiting?.(ctx.agentId, null);
         resolve(final);
       };
-      const onAbort = (): void => finish(this.close(row.id, "cancelled"));
-      if (ctx.signal?.aborted) return onAbort();
-      ctx.signal?.addEventListener("abort", onAbort, { once: true });
-      timer = setTimeout(() => finish(this.close(row.id, "expired")), Math.max(0, row.timeoutAt - Date.now()));
+      // A stopped turn withdraws the request only if nobody else is still waiting on it.
+      const onAbort = (): void => {
+        const others = [...(this.waiters.get(row.id) ?? [])].filter((f) => f !== finish);
+        if (others.length > 0) return finish({ ...this.row(row.id)!, status: "cancelled" });
+        this.close(row.id, "cancelled");
+      };
       const set = this.waiters.get(row.id) ?? new Set();
       set.add(finish);
       this.waiters.set(row.id, set);
+      if (ctx.signal?.aborted) return onAbort();
+      ctx.signal?.addEventListener("abort", onAbort, { once: true });
+      timer = setTimeout(() => this.close(row.id, "expired"), Math.max(0, row.timeoutAt - Date.now()));
     });
   }
 
-  /** Ends a still-pending request without a decision. */
+  private detach(id: string, finish: (row: Row) => void): void {
+    const set = this.waiters.get(id);
+    set?.delete(finish);
+    if (set?.size === 0) this.waiters.delete(id);
+  }
+
+  /** Ends a still-pending request without a decision and releases everyone waiting on it. */
   private close(id: string, status: "expired" | "cancelled", now = Date.now()): Row {
     const row = this.deps.db.update(schema.approvals).set({ status, decidedAt: now })
       .where(and(eq(schema.approvals.id, id), eq(schema.approvals.status, "pending"))).returning().get();
     if (row) this.publish(row);
-    return row ?? this.row(id)!;
+    const final = row ?? this.row(id)!;
+    for (const finish of [...(this.waiters.get(id) ?? [])]) finish(final);
+    return final;
   }
 
   decide(user: AuthUser, id: string, input: DecideApproval, now = Date.now()): Approval {
@@ -143,11 +170,7 @@ export class ApprovalService {
     const row = user ? this.visibleRow(user, id) : this.row(id);
     if (!row) throw notFound("Approval");
     if (user && row.kind !== "question" && user.role !== "admin") throw forbidden("Only admins can revoke access");
-    if (row.status === "pending") {
-      const closed = this.close(id, "cancelled", now);
-      for (const finish of [...(this.waiters.get(id) ?? [])]) finish(closed);
-      return this.toApproval(closed);
-    }
+    if (row.status === "pending") return this.toApproval(this.close(id, "cancelled", now));
     if (row.status !== "approved" || !row.expiresAt || row.expiresAt <= now) throw badRequest("This approval is not active");
     const updated = this.deps.db.update(schema.approvals).set({ status: "revoked", expiresAt: now }).where(eq(schema.approvals.id, id)).returning().get()!;
     writeAudit(this.deps.db, { orgId: row.orgId, actorKind: user ? "user" : "system", actorId: user?.id ?? null, action: "approval.revoked", targetId: id, metadata: { kind: row.kind, scope: row.scope } }, now);
@@ -163,11 +186,17 @@ export class ApprovalService {
       .orderBy(desc(schema.approvals.expiresAt)).get() ?? null;
   }
 
-  /** Hosts this agent may currently submit to in its browser. */
-  approvedHosts(agentId: string, now = Date.now()): string[] {
-    return this.deps.db.select({ scope: schema.approvals.scope }).from(schema.approvals)
+  /** Every live session approval of a kind, across agents. */
+  activeOfKind(kind: Exclude<ApprovalKind, "question">, now = Date.now()): Row[] {
+    return this.deps.db.select().from(schema.approvals)
+      .where(and(eq(schema.approvals.kind, kind), eq(schema.approvals.status, "approved"), gt(schema.approvals.expiresAt, now))).all();
+  }
+
+  /** Hosts this agent may currently submit to in its browser, each with its expiry. */
+  approvedHosts(agentId: string, now = Date.now()): { host: string; until: number }[] {
+    return this.deps.db.select({ scope: schema.approvals.scope, until: schema.approvals.expiresAt }).from(schema.approvals)
       .where(and(eq(schema.approvals.agentId, agentId), eq(schema.approvals.kind, "browser_site"), eq(schema.approvals.status, "approved"), gt(schema.approvals.expiresAt, now)))
-      .all().map((r) => r.scope);
+      .all().map((r) => ({ host: r.scope, until: r.until! }));
   }
 
   list(user: AuthUser, query: ApprovalQuery, now = Date.now()): Approval[] {
@@ -176,8 +205,8 @@ export class ApprovalService {
     if (query.agentId) conds.push(eq(schema.approvals.agentId, query.agentId));
     if (query.status === "active") conds.push(eq(schema.approvals.status, "approved"), gt(schema.approvals.expiresAt, now));
     else if (query.status) conds.push(eq(schema.approvals.status, query.status));
-    return this.deps.db.select().from(schema.approvals).where(and(...conds)).orderBy(desc(schema.approvals.createdAt)).limit(200).all()
-      .filter((r) => this.canSee(user, r)).map((r) => this.toApproval(r));
+    return this.deps.db.select().from(schema.approvals).where(and(...conds)).orderBy(desc(schema.approvals.createdAt)).limit(user.role === "admin" ? 200 : 2000).all()
+      .filter((r) => this.canSee(user, r)).slice(0, 200).map((r) => this.toApproval(r));
   }
 
   /** After a restart nobody is waiting on old requests; they lapse. */

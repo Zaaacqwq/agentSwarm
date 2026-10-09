@@ -4,14 +4,18 @@ import AppKit
 final class Commands {
     let arming = Arming()
     let ui = UITree()
-    private(set) var stoppedByUser = false
+    /// One command at a time touches the screen; status and ping never wait behind it.
+    private let work = NSLock()
 
     func stopByUser() {
-        stoppedByUser = true
-        arming.disarm()
+        arming.disarm(byUser: true)
     }
 
     func handle(_ req: [String: Any]) -> [String: Any] {
+        let cmd = req["cmd"] as? String ?? ""
+        let exclusive = cmd != "status" && cmd != "ping"
+        if exclusive { work.lock() }
+        defer { if exclusive { work.unlock() } }
         do {
             return try run(req).merging(["ok": true]) { a, _ in a }
         } catch let e as HelperError {
@@ -34,12 +38,16 @@ final class Commands {
             _ = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
             return status()
         case "arm":
-            guard let ms = req["untilMs"] as? Double, let holder = req["holder"] as? String else { throw HelperError.bad("arm needs untilMs and holder") }
-            stoppedByUser = false
-            arming.arm(until: Date(timeIntervalSince1970: ms / 1000), holder: holder)
+            guard let ms = req["untilMs"] as? Double, let holder = req["holder"] as? String, let session = req["session"] as? String, !session.isEmpty else {
+                throw HelperError.bad("arm needs untilMs, holder and session")
+            }
+            try arming.arm(until: Date(timeIntervalSince1970: ms / 1000), holder: holder, session: session)
             return status()
         case "disarm":
-            arming.disarm()
+            arming.disarm(session: req["session"] as? String)
+            return status()
+        case "ack_stop":
+            arming.acknowledgeStop()
             return status()
         case "screenshot":
             let shot = try Capture.screenshot(display: int(req, "display") ?? 0, maxWidth: maxWidth, grid: req["grid"] as? Bool ?? true)
@@ -68,6 +76,7 @@ final class Commands {
         case "key":
             try requireArmed()
             guard let combo = req["combo"] as? String else { throw HelperError.bad("key needs combo") }
+            if Policy.deniedCombos.contains(Policy.normalizedCombo(combo)) { throw HelperError.denied("\(combo) is off limits to agents") }
             try checkFrontmost()
             try Input.key(combo)
             return settle()
@@ -105,8 +114,9 @@ final class Commands {
     }
 
     private func checkFrontmost() throws {
-        guard let front = Windows.frontmost() else { return }
-        if let reason = Policy.deniedReason(bundle: front.bundle, title: front.title) { throw HelperError.denied(reason) }
+        if let front = Windows.frontmost(), let reason = Policy.deniedReason(bundle: front.bundle, title: front.title) { throw HelperError.denied(reason) }
+        let focused = Windows.focusedApp()
+        if let reason = Policy.deniedReason(bundle: focused.bundle, title: nil, url: focused.url) { throw HelperError.denied(reason) }
     }
 
     private func checkPoint(_ p: CGPoint) throws {
@@ -137,12 +147,12 @@ final class Commands {
     }
 
     func status() -> [String: Any] {
-        let armed: Any = arming.current.map { ["untilMs": Int($0.until.timeIntervalSince1970 * 1000), "holder": $0.holder] } ?? NSNull()
+        let armed: Any = arming.current.map { ["untilMs": Int($0.until.timeIntervalSince1970 * 1000), "holder": $0.holder, "session": $0.session] } ?? NSNull()
         return [
             "screenRecording": CGPreflightScreenCaptureAccess(),
             "accessibility": AXIsProcessTrusted(),
             "armed": armed,
-            "stoppedByUser": stoppedByUser,
+            "stoppedByUser": arming.stoppedByUser,
             "displays": Displays.all().map { d -> [String: Any] in
                 let (w, h) = Displays.imageSize(d, maxWidth: 1280)
                 return ["index": d.index, "width": Int(d.bounds.width), "height": Int(d.bounds.height), "main": d.main, "imageWidth": w, "imageHeight": h]

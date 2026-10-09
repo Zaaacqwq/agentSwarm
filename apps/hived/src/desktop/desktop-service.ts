@@ -34,12 +34,24 @@ interface ScreenshotReply {
 export class DesktopService implements DesktopPort {
   private watch: ReturnType<typeof setInterval> | null = null;
   private expiry: ReturnType<typeof setTimeout> | null = null;
+  /** The armed session's token; arm/disarm for older sessions are ignored by the helper. */
+  private session: { token: string; agentId: string } | null = null;
+  /** Arm and disarm reach the helper in the order they were issued. */
+  private helperQueue: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly deps: DesktopServiceDeps) {}
+
+  private enqueue<T>(work: () => Promise<T>): Promise<T> {
+    const next = this.helperQueue.then(work, work);
+    this.helperQueue = next.catch(() => undefined);
+    return next;
+  }
 
   async acquire(ctx: AgentContext, reason: string, minutes: number): Promise<string> {
     const status = await this.helperStatus();
     if (!status.screenRecording || !status.accessibility) throw new Error("The desktop helper lacks Screen Recording or Accessibility permission; ask a person to grant it.");
+    // A Stop from the menu bar ends every live desktop approval; control needs a fresh one.
+    if (status.stoppedByUser) await this.honourStop();
     const holder = this.deps.leases.current(DESKTOP_RESOURCE);
     if (holder && holder.holderAgentId !== ctx.agentId) {
       throw new Error(`${this.deps.agentName(holder.holderAgentId)} is using the desktop until ${clock(holder.expiresAt)}. Try again later.`);
@@ -52,22 +64,37 @@ export class DesktopService implements DesktopPort {
     const now = Date.now();
     const lease = this.deps.leases.acquire({ resourceId: DESKTOP_RESOURCE, agentId: ctx.agentId, runId: ctx.runId, ttlMs: approval.expiresAt - now, kind: "desktop" }, now);
     if (!lease.ok) throw new Error(`${this.deps.agentName(lease.holder.holderAgentId)} took the desktop first. Try again later.`);
+    const token = crypto.randomUUID();
     try {
-      await this.deps.helper.call({ cmd: "arm", untilMs: approval.expiresAt, holder: this.deps.agentName(ctx.agentId) });
+      await this.enqueue(() => this.deps.helper.call({ cmd: "arm", untilMs: approval.expiresAt, holder: this.deps.agentName(ctx.agentId), session: token }));
     } catch (error) {
       this.deps.leases.release(DESKTOP_RESOURCE, ctx.agentId);
+      if (error instanceof HelperError && error.code === "denied") await this.honourStop();
       throw new Error(`Could not start the desktop session: ${message(error)}`);
     }
-    this.startWatching(approval.expiresAt);
+    this.session = { token, agentId: ctx.agentId };
+    this.startWatching(approval.expiresAt, token);
     this.deps.onChange();
     return `Desktop control approved by ${approval.decidedBy ?? "a person"} until ${clock(approval.expiresAt)}. Look first with desktop_screenshot or desktop_ui, and call desktop_release when done.`;
   }
 
+  /** The agent is done: end the session and its approval, so control needs asking again. */
   async release(ctx: AgentContext): Promise<string> {
     const holder = this.deps.leases.current(DESKTOP_RESOURCE);
-    if (!holder || holder.holderAgentId !== ctx.agentId) return "You were not holding the desktop.";
-    await this.end();
+    const approval = this.deps.approvals.active(ctx.agentId, "desktop", "console");
+    if (approval) this.deps.approvals.revoke(null, approval.id);
+    if (!holder || holder.holderAgentId !== ctx.agentId) return approval ? "Ended your desktop approval." : "You were not holding the desktop.";
+    await this.end(this.session?.agentId === ctx.agentId ? this.session.token : undefined);
     return "Released the desktop.";
+  }
+
+  /** Revokes all live desktop approvals after a person's Stop, then lets the helper arm again later. */
+  private async honourStop(): Promise<void> {
+    const holder = this.deps.leases.current(DESKTOP_RESOURCE);
+    for (const a of this.deps.approvals.activeOfKind("desktop")) this.deps.approvals.revoke(null, a.id);
+    this.deps.log?.("desktop session stopped from the menu bar", { agentId: holder?.holderAgentId });
+    await this.end();
+    await this.deps.helper.call({ cmd: "ack_stop" }, 5_000).catch((error) => this.deps.log?.("desktop helper did not acknowledge the stop", { error: message(error) }));
   }
 
   async act(ctx: AgentContext, action: DesktopAction): Promise<DesktopOutcome> {
@@ -129,24 +156,30 @@ export class DesktopService implements DesktopPort {
     return { available: true };
   }
 
-  /** Ends the session: disarm the helper, return the lease. Safe to call repeatedly. */
-  async end(): Promise<void> {
+  /**
+   * Ends the session: disarm the helper, return the lease. Safe to call repeatedly. With a token,
+   * only that session is ended (a late timer or poll never ends a newer one).
+   */
+  async end(token?: string): Promise<void> {
+    if (token && this.session?.token !== token) return;
+    const ending = this.session;
+    this.session = null;
     this.stopWatching();
     const holder = this.deps.leases.current(DESKTOP_RESOURCE);
     if (holder) this.deps.leases.release(DESKTOP_RESOURCE, holder.holderAgentId);
-    await this.deps.helper.call({ cmd: "disarm" }, 5_000).catch(() => undefined);
+    await this.enqueue(() => this.deps.helper.call({ cmd: "disarm", ...(ending ? { session: ending.token } : {}) }, 5_000))
+      .catch((error) => this.deps.log?.("could not disarm the desktop helper", { error: message(error) }));
     this.deps.onChange();
   }
 
   /** Called whenever any lease changes; a desktop lease that ended (e.g. its run finished) disarms. */
   onLeaseChange(resourceId: string): void {
-    if (resourceId === DESKTOP_RESOURCE && !this.deps.leases.current(DESKTOP_RESOURCE) && this.watch) void this.end();
+    if (resourceId === DESKTOP_RESOURCE && !this.deps.leases.current(DESKTOP_RESOURCE) && this.session) void this.end(this.session.token);
   }
 
   /** Called when a person revokes a desktop approval. */
   onApprovalEnded(agentId: string): void {
-    const holder = this.deps.leases.current(DESKTOP_RESOURCE);
-    if (holder?.holderAgentId === agentId) void this.end();
+    if (this.session?.agentId === agentId) void this.end(this.session.token);
   }
 
   private async requireHolder(ctx: AgentContext): Promise<void> {
@@ -171,19 +204,14 @@ export class DesktopService implements DesktopPort {
   }
 
   /** Follows the session: ends it at expiry, or as soon as the person stops it from the menu bar. */
-  private startWatching(until: number): void {
+  private startWatching(until: number, token: string): void {
     this.stopWatching();
-    this.expiry = setTimeout(() => void this.end(), Math.max(0, until - Date.now()));
+    this.expiry = setTimeout(() => void this.end(token), Math.max(0, until - Date.now()));
     this.watch = setInterval(() => {
-      void this.deps.helper.call<HelperStatus>({ cmd: "status" }, 5_000).then(async (s) => {
-        if (s.armed) return;
-        const holder = this.deps.leases.current(DESKTOP_RESOURCE);
-        if (s.stoppedByUser && holder) {
-          const approval = this.deps.approvals.active(holder.holderAgentId, "desktop", "console");
-          if (approval) this.deps.approvals.revoke(null, approval.id);
-          this.deps.log?.("desktop session stopped from the menu bar", { agentId: holder.holderAgentId });
-        }
-        await this.end();
+      void this.deps.helper.call<HelperStatus & { armed: { session?: string } | null }>({ cmd: "status" }, 5_000).then(async (s) => {
+        if (this.session?.token !== token) return;
+        if (s.stoppedByUser) return this.honourStop();
+        if (!s.armed || s.armed.session !== token) await this.end(token);
       }).catch(() => undefined);
     }, WATCH_MS);
   }

@@ -37,6 +37,26 @@ function ancestors(paths: readonly string[]): string[] {
   return [...out].sort();
 }
 
-export function sandboxed(env: ExecEnv, argv: readonly string[]): string[] {
-  return env.sandbox ? ["/usr/bin/sandbox-exec", "-p", sandboxProfile(env), ...argv] : [...argv];
+export function sandboxed(env: ExecEnv, argv: readonly string[], profile = sandboxProfile(env)): string[] {
+  return env.sandbox ? ["/usr/bin/sandbox-exec", "-p", profile, ...argv] : [...argv];
+}
+
+/**
+ * The browser daemon's profile: its own state dir and the home dir only. It never sees the
+ * workstation's worktrees, and the agent's own sandbox (above) never sees the browser state.
+ */
+export function browserSandboxProfile(env: ExecEnv, stateDir: string): string {
+  const { layout } = env;
+  const q = (p: string) => JSON.stringify(p);
+  return [
+    "(version 1)",
+    "(allow default)",
+    `(deny file-read* file-write* (subpath "/Volumes"))`,
+    `(deny file-read* file-write* (regex #"^/Users/[^/]+/"))`,
+    `(deny file-read* file-write* (subpath ${q(layout.volume)}))`,
+    `(deny file-read* file-write* (subpath ${q(layout.hivedData)}))`,
+    `(allow file-read* file-write* (subpath ${q(env.home)}))`,
+    `(allow file-read* file-write* (subpath ${q(stateDir)}))`,
+    ...ancestors([env.home, stateDir]).map((d) => `(allow file-read-metadata (literal ${q(d)}))`),
+  ].join("\n");
 }

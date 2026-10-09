@@ -50,23 +50,26 @@ export const approvalRoutes = (deps: RouteDeps): FastifyPluginAsyncTypebox => as
 
   app.post("/desktop/stop", { schema: { response: { 200: Ok } } }, async (req) => {
     const user = requireAdmin(requireUser(req));
-    const status = await desktop.status();
-    if (status.holder) approvals.revoke(user, status.holder.approvalId);
-    await desktop.end();
+    // Every live desktop approval ends, held or not; the helper is disarmed even if a revoke fails.
+    try {
+      for (const a of approvals.activeOfKind("desktop")) approvals.revoke(user, a.id);
+    } finally {
+      await desktop.end();
+    }
     return { ok: true as const };
   });
 
+  // Screenshots show the owner's screen or logged-in pages: admins only. Ones an agent posted
+  // to a chat are channel attachments and follow that channel's access instead.
   app.get("/agents/:id/screenshots", { schema: { params: IdParams, response: { 200: Type.Array(Screenshot) } } }, async (req) => {
-    const user = requireUser(req);
+    const user = requireAdmin(requireUser(req));
     agents.getRow(user.orgId, req.params.id);
-    return screenshots.listForAgent(user.orgId, req.params.id).filter((s) => s.source === "browser" || user.role === "admin");
+    return screenshots.listForAgent(user.orgId, req.params.id);
   });
 
   app.get("/screenshots/:id", { schema: { params: IdParams } }, async (req, reply) => {
-    const user = requireUser(req);
-    const { row, data } = screenshots.bytes(user.orgId, req.params.id);
-    // Desktop screenshots show the owner's own screen.
-    if (row.source === "desktop") requireAdmin(user);
+    const user = requireAdmin(requireUser(req));
+    const { data } = screenshots.bytes(user.orgId, req.params.id);
     return reply.headers({ ...IMAGE_HEADERS, "Cache-Control": "private, max-age=86400" }).send(data);
   });
 
