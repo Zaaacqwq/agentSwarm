@@ -451,3 +451,9 @@ export const attachments = sqliteTable(
   },
   (t) => [index("attachments_channel_idx").on(t.channelId), index("attachments_message_idx").on(t.messageId)],
 );
+
+/** Monotonic per-org counters (task numbers are never reused, even after deletes). */
+export const orgCounters = sqliteTable("org_counters", {
+  orgId: text("org_id").primaryKey().references(() => organizations.id),
+  nextTaskNumber: integer("next_task_number").notNull(),
+});

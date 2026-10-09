@@ -31,7 +31,14 @@ export const fileRoutes = (deps: RouteDeps): FastifyPluginAsyncTypebox => async 
     const user = requireUser(req);
     chat.channels.assertUserCanWrite(user, req.params.id);
     const raw = req.headers["x-filename"];
-    const filename = typeof raw === "string" ? decodeURIComponent(raw) : "file";
+    let filename = "file";
+    if (typeof raw === "string") {
+      try {
+        filename = decodeURIComponent(raw);
+      } catch {
+        filename = raw;
+      }
+    }
     const body = req.body as Buffer;
     return files.save({ kind: "user", id: user.id, orgId: user.orgId }, req.params.id, filename, new Uint8Array(body));
   });

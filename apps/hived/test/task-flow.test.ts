@@ -239,3 +239,47 @@ describe("task permissions and budget", () => {
     expect(w.chat.listMessages(w.user, after.channelId!, {}).messages.at(-1)!.body).toContain("budget and is blocked");
   });
 });
+
+describe("P4 review fixes", () => {
+  test("handoff respects status; budget blocks stay until a person acts; numbers are never reused", async () => {
+    const out: string[] = [];
+    let world!: World;
+    world = await buildWorld({
+      script: async (input) => {
+        if (input.agent.name !== "Lead") return;
+        out.push((await callTool(input, "task_handoff", { task: "T-1", to: "Dev", notes: HANDOFF_NOTES })).text);
+        out.push((await callTool(input, "task_update", { task: "T-2", status: "in_progress" })).text);
+      },
+    });
+    const w = world;
+    const grantsOf = (role: keyof typeof ROLE_TEMPLATES) => ROLE_TEMPLATES[role].grants.map((g) => ({ ...g }));
+    const lead = w.agents.create(w.user, { name: "Lead", role: "lead", instructions: "", endpointId: w.endpoint.id, modelId: "fake", thinkingLevel: "off", grants: grantsOf("lead") });
+    w.agents.create(w.user, { name: "Dev", role: "dev", instructions: "", endpointId: w.endpoint.id, modelId: "fake", thinkingLevel: "off", grants: grantsOf("dev") });
+    // T-1 is an unapproved proposal (backlog); T-2 is over its budget and blocked.
+    const t1 = w.tasks.create({ kind: "agent", ctx: { agentId: lead.id, orgId: w.user.orgId, runId: "r", grants: [], currentGrants: () => [] } }, { title: "Proposal", description: "" });
+    const t2 = w.tasks.create({ kind: "user", user: w.user }, { title: "Pricey", description: "", budgetUsd: 0.01 });
+    w.tasks.chargeFromChannels([t2.channelId!], lead.id, 0.5);
+    expect(w.tasks.list(w.user.orgId).find((t) => t.id === t2.id)!.status).toBe("blocked");
+
+    w.chat.postUserMessage(w.user, w.chat.openDm(w.user, lead.id).id, "try things");
+    await w.manager.idle();
+    expect(out[0]).toContain("only active tasks can be handed off");
+    expect(out[1]).toContain("over its $0.01 budget");
+    expect(w.tasks.list(w.user.orgId).find((t) => t.id === t2.id)!.status).toBe("blocked");
+    // A person can still unblock it.
+    expect(w.tasks.update(w.user, t2.id, { budgetUsd: 5, status: "in_progress" }).status).toBe("in_progress");
+
+    w.tasks.remove(w.user, t1.id);
+    const t3 = w.tasks.create({ kind: "user", user: w.user }, { title: "Next", description: "" });
+    expect(t3.number).toBe(3);
+    // A rejected update changes nothing (dependencies are validated before writing).
+    expect(() => w.tasks.update(w.user, t3.id, { dependsOn: [t2.id], assigneeAgentId: "agt_missing" })).toThrow();
+    expect(w.tasks.list(w.user.orgId).find((t) => t.id === t3.id)!.dependsOn).toEqual([]);
+  });
+
+  test("an agent named like a task cannot reach task branches", async () => {
+    const { agentSlug } = await import("../src/repos/repo-service.ts");
+    expect(agentSlug("T5", "agt_x")).toBe("a-t5");
+    expect(agentSlug("Tina", "agt_x")).toBe("tina");
+  });
+});

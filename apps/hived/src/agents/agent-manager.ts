@@ -49,7 +49,7 @@ export interface AgentManagerDeps {
   /** Called once per run after it settles, e.g. to release its leases. */
   readonly onRunSettled?: (runId: string) => void;
   /** Each metered model call, with the channels the run was woken from (tasks charge their spend). */
-  readonly onUsage?: (channelIds: readonly string[], agentId: string, costUsd: number) => void;
+  readonly onUsage?: (runId: string, channelIds: readonly string[], agentId: string, costUsd: number) => void;
 }
 
 type StopReason = "stopped" | "timeout" | "tool_limit" | "deleted" | "shutdown";
@@ -290,7 +290,7 @@ export class AgentManager {
           cacheReadTokens: event.cacheReadTokens, cacheWriteTokens: event.cacheWriteTokens, costUsd: event.costUsd,
         });
         this.deps.bus.publish(orgId, { type: "run.updated", run: updated });
-        this.deps.onUsage?.(channels, run.agentId, event.costUsd);
+        this.deps.onUsage?.(run.id, channels, run.agentId, event.costUsd);
         return;
       }
       if (event.kind === "tool_call" && ++toolCalls > this.limits.maxToolCallsPerRun) this.abort(run.agentId, "tool_limit");

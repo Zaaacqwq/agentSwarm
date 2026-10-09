@@ -232,7 +232,14 @@ export class ChatService implements ChatPort {
       channelId: ch.id, authorKind: "agent", authorId: ctx.agentId, authorName: this.agentName(ctx.agentId), body: input.body,
       runId: ctx.runId, replyToId: input.replyToId ?? null, chainId, mentions: mentions.ids, createdAt: now,
     });
-    if (input.attachmentIds?.length) this.deps.files?.bind(input.attachmentIds, row.id, ch.id, { kind: "agent", id: ctx.agentId });
+    if (input.attachmentIds?.length) {
+      try {
+        this.deps.files?.bind(input.attachmentIds, row.id, ch.id, { kind: "agent", id: ctx.agentId });
+      } catch (error) {
+        this.deps.db.delete(schema.messages).where(eq(schema.messages.id, row.id)).run();
+        throw error;
+      }
+    }
     this.deps.bus.publish(ch.orgId, { type: "message.created", message: this.toMessage(row) }, { channelId: ch.id });
     for (const agentId of recipients) this.deps.deliver({ orgId: ch.orgId, agentId, messageId: row.id, fromAgent: true });
     return { id: row.id };
@@ -279,7 +286,12 @@ export class ChatService implements ChatPort {
     const ch = this.channels.get(channelId);
     if (!ch || !this.channels.isAgentMember(channelId, ctx.agentId)) throw new Error(`You are not a member of channel ${channelId}.`);
     const file = this.deps.files.save({ kind: "agent", id: ctx.agentId, orgId: ch.orgId }, channelId, filename, bytes);
-    return this.send(ctx, { channelId, body: caption || `📎 ${file.filename}`, attachmentIds: [file.id] });
+    try {
+      return this.send(ctx, { channelId, body: caption || `📎 ${file.filename}`, attachmentIds: [file.id] });
+    } catch (error) {
+      this.deps.files.discard(file.id);
+      throw error;
+    }
   }
 
   directory(ctx: AgentContext): ColleagueView[] {

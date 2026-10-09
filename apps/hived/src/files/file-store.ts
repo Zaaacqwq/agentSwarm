@@ -1,5 +1,5 @@
-import { and, eq, inArray, isNull } from "drizzle-orm";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { and, eq, inArray, isNull, lt } from "drizzle-orm";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { newId, type Attachment } from "@hive/core";
 import type { Db } from "../db/client.ts";
@@ -7,6 +7,9 @@ import { schema } from "../db/client.ts";
 import { badRequest, notFound } from "../http/errors.ts";
 
 export const MAX_FILE_BYTES = 10 * 1024 * 1024;
+/** Uploads not yet attached to a message, per uploader; older ones are purged after a day. */
+const MAX_UNBOUND_PER_UPLOADER = 30;
+const UNBOUND_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_TEXT_READ = 200 * 1024;
 
 /** Types we store and how we recognise them. The client's Content-Type is never trusted. */
@@ -67,9 +70,17 @@ export class FileStore {
     const name = cleanFilename(filename);
     const mime = sniffMime(bytes, name);
     if (!mime) throw badRequest("Only images (PNG, JPEG, GIF, WebP), PDFs and UTF-8 text files are accepted");
+    const pending = this.db.select({ id: schema.attachments.id }).from(schema.attachments)
+      .where(and(eq(schema.attachments.uploaderKind, uploader.kind), eq(schema.attachments.uploaderId, uploader.id), isNull(schema.attachments.messageId))).all().length;
+    if (pending >= MAX_UNBOUND_PER_UPLOADER) throw badRequest("Too many unsent uploads; send or discard them first");
     const sha256 = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
     const path = join(this.dir, sha256);
-    if (!existsSync(path)) writeFileSync(path, bytes, { mode: 0o600 });
+    if (!existsSync(path)) {
+      // Write then rename, so a crash never leaves a truncated file under the content hash.
+      const tmp = `${path}.${crypto.randomUUID()}.tmp`;
+      writeFileSync(tmp, bytes, { mode: 0o600 });
+      renameSync(tmp, path);
+    }
     const row = this.db.insert(schema.attachments).values({
       id: newId("file"), orgId: uploader.orgId, channelId, messageId: null, uploaderKind: uploader.kind, uploaderId: uploader.id,
       filename: name, mime, size: bytes.byteLength, sha256, createdAt: now,
@@ -84,6 +95,16 @@ export class FileStore {
     const valid = rows.filter((r) => r.channelId === channelId && r.uploaderKind === uploader.kind && r.uploaderId === uploader.id && r.messageId === null);
     if (valid.length !== new Set(ids).size) throw badRequest("Attachments must be your own unused uploads to this channel");
     this.db.update(schema.attachments).set({ messageId }).where(and(inArray(schema.attachments.id, [...ids]), isNull(schema.attachments.messageId))).run();
+  }
+
+  /** Drops an upload that was never attached (e.g. its message was refused). */
+  discard(id: string): void {
+    this.db.delete(schema.attachments).where(and(eq(schema.attachments.id, id), isNull(schema.attachments.messageId))).run();
+  }
+
+  /** Forgets uploads that were never attached to a message within a day. Blobs stay (shared by hash). */
+  purgeUnbound(now = Date.now()): void {
+    this.db.delete(schema.attachments).where(and(isNull(schema.attachments.messageId), lt(schema.attachments.createdAt, now - UNBOUND_TTL_MS))).run();
   }
 
   get(id: string): (typeof schema.attachments.$inferSelect) | null {

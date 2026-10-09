@@ -31,14 +31,19 @@ export function TaskDrawer({ task, onClose }: { task: Task; onClose: () => void 
   const save = useMutation({ mutationFn: (patch: UpdateTask) => api.updateTask(task.id, patch), onSuccess: apply });
   const approve = useMutation({ mutationFn: () => api.approveTask(task.id), onSuccess: apply });
 
+  /** Sends only what the person changed, so live updates from agents are never reverted. */
   const submit = () => {
-    const budget = draft.budget.trim() ? Number(draft.budget) : null;
-    save.mutate({
-      title: draft.title, description: draft.description,
-      acceptance: draft.acceptance.split("\n").map((l) => l.replace(/^[-*]\s*/, "").trim()).filter(Boolean),
-      assigneeAgentId: draft.assignee || null, reviewerAgentId: draft.reviewer || null,
-      repositoryId: draft.repo || null, budgetUsd: budget, dependsOn: draft.dependsOn,
-    });
+    const base = toDraft(task);
+    const patch: UpdateTask = {};
+    if (draft.title !== base.title) patch.title = draft.title;
+    if (draft.description !== base.description) patch.description = draft.description;
+    if (draft.acceptance !== base.acceptance) patch.acceptance = draft.acceptance.split("\n").map((l) => l.replace(/^[-*]\s*/, "").trim()).filter(Boolean);
+    if (draft.assignee !== base.assignee) patch.assigneeAgentId = draft.assignee || null;
+    if (draft.reviewer !== base.reviewer) patch.reviewerAgentId = draft.reviewer || null;
+    if (draft.repo !== base.repo) patch.repositoryId = draft.repo || null;
+    if (draft.budget !== base.budget) patch.budgetUsd = draft.budget.trim() ? Number(draft.budget) : null;
+    if (draft.dependsOn.join() !== base.dependsOn.join()) patch.dependsOn = draft.dependsOn;
+    if (Object.keys(patch).length) save.mutate(patch);
   };
 
   const others = (tasks.data ?? []).filter((t) => t.id !== task.id);

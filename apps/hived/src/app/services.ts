@@ -1,5 +1,5 @@
 import { createColleaguesPack, createCommunicationPack, ToolpackRegistry } from "@hive/tools";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import type { ServerEvent } from "@hive/core";
 import { schema, type Db } from "../db/client.ts";
 import type { SecretBox } from "../crypto/secret-box.ts";
@@ -166,6 +166,14 @@ export function createServices(deps: ServiceDeps): Services & { start(): Promise
   tasks = new TaskService({
     db, bus, chat, repos, relay, workstations, github, log,
     stopAgent: (agentId) => requireManager().stop(agentId),
+    markRunTask: (runId, taskId) => runs.setTask(runId, taskId),
+    nextTaskNumber: (orgId) => {
+      const max = db.select({ n: sql<number>`coalesce(max(${schema.tasks.number}), 0)` }).from(schema.tasks).where(eq(schema.tasks.orgId, orgId)).get()?.n ?? 0;
+      const row = db.insert(schema.orgCounters).values({ orgId, nextTaskNumber: max + 2 })
+        .onConflictDoUpdate({ target: schema.orgCounters.orgId, set: { nextTaskNumber: sql`max(${schema.orgCounters.nextTaskNumber}, ${max + 1}) + 1` } })
+        .returning().get();
+      return row.nextTaskNumber - 1;
+    },
   });
   registry.register(createTasksPack(tasks));
 
@@ -188,7 +196,7 @@ export function createServices(deps: ServiceDeps): Services & { start(): Promise
     },
     log,
     ...(deps.limits ? { limits: deps.limits } : {}),
-    onUsage: (channelIds, agentId, costUsd) => tasks!.chargeFromChannels(channelIds, agentId, costUsd),
+    onUsage: (runId, channelIds, agentId, costUsd) => tasks!.chargeFromChannels(channelIds, agentId, costUsd, runs.taskOf(runId)),
     onRunSettled: (runId) => {
       leases.releaseForRun(runId);
       chat.forgetRun(runId);
@@ -205,6 +213,7 @@ export function createServices(deps: ServiceDeps): Services & { start(): Promise
       await registry.refreshHealth();
       // Leases belong to runs; after a restart no run is active, so none can still be held.
       leases.releaseAll();
+      files.purgeUnbound();
       requireManager().recover();
       if ((await deps.backend.health()).ready) {
         for (const org of db.select({ id: schema.organizations.id }).from(schema.organizations).all()) {

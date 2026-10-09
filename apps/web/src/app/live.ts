@@ -141,6 +141,9 @@ export function applyEvent(client: QueryClient, event: ServerEvent): void {
       });
       void client.invalidateQueries({ queryKey: qk.task(event.task.id) });
       return;
+    case "task.deleted":
+      client.setQueryData<Task[]>(qk.tasks, (list) => list?.filter((t) => t.id !== event.taskId));
+      return;
   }
 }
 

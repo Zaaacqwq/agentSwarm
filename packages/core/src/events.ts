@@ -20,6 +20,7 @@ export type ServerEvent =
   | { type: "worktree.updated"; worktree: Worktree }
   | { type: "git.pushed"; push: GitPush }
   | { type: "host.updated"; host: HostStatus }
-  | { type: "task.updated"; task: Task };
+  | { type: "task.updated"; task: Task }
+  | { type: "task.deleted"; taskId: string };
 
 export type ServerEventType = ServerEvent["type"];

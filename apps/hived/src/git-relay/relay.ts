@@ -42,6 +42,9 @@ export class GitRelay {
     const wt = this.deps.repos.worktree(input.worktreeId);
     if (!wt || wt.removedAt || wt.agentId !== input.agentId) return this.reject(input, "", null, "Not your worktree");
     if (!BRANCH_PATTERN.test(wt.branch)) return this.reject(input, wt.branch, null, "Branch name is not a hive/<agent>/<slug> branch");
+    if (!wt.taskId && /^hive\/t\d+\//.test(wt.branch)) {
+      return this.reject(input, wt.branch, null, "hive/t<n>/… branches belong to tasks; use task_start");
+    }
     if (wt.taskId && this.deps.taskAssignee?.(wt.taskId) !== input.agentId) {
       return this.reject(input, wt.branch, null, "Only the task's current assignee may push its branch");
     }

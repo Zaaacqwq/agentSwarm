@@ -29,6 +29,10 @@ export interface TaskServiceDeps {
   readonly log: (level: "info" | "warn" | "error", msg: string, extra?: Record<string, unknown>) => void;
   /** Stops an agent's current turn (budget exceeded). */
   readonly stopAgent: (agentId: string) => void;
+  /** Records which task a run is working on (set by task_start) so its cost is charged there. */
+  readonly markRunTask?: (runId: string, taskId: string) => void;
+  /** Allocates the next task number for an org; numbers are never reused. */
+  readonly nextTaskNumber?: (orgId: string) => number;
 }
 
 /** Tasks for people (HTTP) and agents (core.tasks), with role checks at execution time. */
@@ -58,7 +62,8 @@ export class TaskService implements TaskPort {
     const assignee = byUser ? (input.assigneeAgentId ?? null) : null;
     const reviewer = byUser ? (input.reviewerAgentId ?? null) : null;
     const inserted = this.deps.db.transaction((tx) => {
-      const number = (tx.select({ n: sql<number>`coalesce(max(${schema.tasks.number}), 0)` }).from(schema.tasks).where(eq(schema.tasks.orgId, orgId)).get()?.n ?? 0) + 1;
+      const number = this.deps.nextTaskNumber?.(orgId)
+        ?? (tx.select({ n: sql<number>`coalesce(max(${schema.tasks.number}), 0)` }).from(schema.tasks).where(eq(schema.tasks.orgId, orgId)).get()?.n ?? 0) + 1;
       const id = newId("task");
       const created = tx.insert(schema.tasks).values({
         id, orgId, number, title: input.title.trim(), description: input.description, acceptance: input.acceptance ?? [],
@@ -107,20 +112,21 @@ export class TaskService implements TaskPort {
       patch.status = input.status;
       if (row.status === "backlog") patch.approvedAt = Date.now();
     }
-    if (input.dependsOn) this.setDeps(row, this.resolveDeps(user.orgId, input.dependsOn));
     const reassigned = input.assigneeAgentId !== undefined && input.assigneeAgentId !== row.assigneeAgentId;
     const newReviewer = input.reviewerAgentId !== undefined && input.reviewerAgentId !== row.reviewerAgentId;
     for (const agentId of [input.assigneeAgentId, input.reviewerAgentId]) if (agentId) this.assertAgent(user.orgId, agentId);
     if (reassigned) patch.assigneeAgentId = input.assigneeAgentId ?? null;
     if (newReviewer) patch.reviewerAgentId = input.reviewerAgentId ?? null;
     if ((reassigned || newReviewer) && (patch.status ?? row.status) === "backlog") throw badRequest("Approve the task before assigning it");
+    // Validate dependencies before writing anything, so a rejected request changes nothing.
+    const deps = input.dependsOn ? this.resolveDeps(user.orgId, input.dependsOn) : null;
+    if (deps) this.assertNoCycle(row, deps);
     row = this.save(row, patch);
+    if (deps) this.setDeps(row, deps);
     if (patch.title) this.deps.chat.channels.rename(row.channelId!, `T-${row.number} ${row.title}`);
     this.event(row, { kind: "user", user }, "updated", { fields: Object.keys(patch) });
-    if (patch.status === "done") {
-      void this.cleanup(row);
-      this.notifyDependents(row);
-    }
+    // Worktrees are only removed after a merge; a manual "done" may still hold unpushed work.
+    if (patch.status === "done") this.notifyDependents(row);
     if (reassigned && row.assigneeAgentId) this.notifyAssignee(row, "user");
     if (newReviewer && row.reviewerAgentId) this.deps.chat.channels.addAgents(row.channelId!, [row.reviewerAgentId]);
     return this.toTask(row);
@@ -129,7 +135,13 @@ export class TaskService implements TaskPort {
   remove(user: AuthUser, id: string): void {
     const row = this.row(user.orgId, id);
     if (!["backlog", "todo", "done"].includes(row.status)) throw conflict("Only tasks that are not in flight can be deleted");
+    const waiting = this.deps.db.select({ n: schema.tasks.number }).from(schema.taskDependencies)
+      .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskDependencies.taskId))
+      .where(eq(schema.taskDependencies.dependsOnTaskId, id)).all();
+    if (row.status !== "done" && waiting.length) throw conflict(`T-${waiting.map((w) => w.n).join(", T-")} depend on this task; remove those dependencies first`);
     this.deps.db.delete(schema.tasks).where(eq(schema.tasks.id, id)).run();
+    if (row.channelId) this.deps.chat.channels.remove(row.channelId);
+    this.deps.bus.publish(row.orgId, { type: "task.deleted", taskId: id });
   }
 
   // --- agents (TaskPort) ---------------------------------------------------------
@@ -171,11 +183,15 @@ export class TaskService implements TaskPort {
     let row = this.byRef(ctx.orgId, ref);
     if (row.assigneeAgentId !== ctx.agentId) throw new Error(`T-${row.number} is not assigned to you.`);
     if (!canTransition(row.status, "in_progress", "assignee")) throw new Error(`T-${row.number} is ${row.status}; it cannot be started.`);
+    this.assertNotOverBudget(row);
     this.assertDepsDone(row, (m) => new Error(m));
     const ws = this.deps.workstations.forAgent(ctx.agentId);
     if (!ws) throw new Error("No workstation is assigned to you. Ask your owner to assign one in your agent settings.");
     const repoId = row.repositoryId ?? this.onlyRepo(ctx.orgId);
-    const res = await this.deps.repos.checkoutTask({ orgId: ctx.orgId, agentId: ctx.agentId, workstation: { id: ws.id, osUser: ws.osUser }, repoId, task: { id: row.id, number: row.number, slug: taskSlug(row.title) } });
+    // Keep the branch the task started on, even if its title changed since.
+    const slug = row.branch?.split("/")[2] ?? taskSlug(row.title);
+    const res = await this.deps.repos.checkoutTask({ orgId: ctx.orgId, agentId: ctx.agentId, workstation: { id: ws.id, osUser: ws.osUser }, repoId, task: { id: row.id, number: row.number, slug } });
+    this.deps.markRunTask?.(ctx.runId, row.id);
     row = this.save(row, { status: "in_progress", branch: res.branch, repositoryId: repoId });
     this.event(row, { kind: "agent", ctx }, "started", { branch: res.branch });
     return { task: this.view(this.toTask(row)), branch: res.branch, created: res.created };
@@ -187,6 +203,7 @@ export class TaskService implements TaskPort {
     if (!role) throw new Error(`Only the assignee or a lead can update T-${row.number}.`);
     if (status && status !== row.status) {
       if (!canTransition(row.status, status, role)) throw new Error(`As ${role} you cannot move T-${row.number} from ${row.status} to ${status}.`);
+      if (row.status === "blocked") this.assertNotOverBudget(row);
       if (status === "in_progress") this.assertDepsDone(row, (m) => new Error(m));
       row = this.save(row, { status });
       if (status === "in_review" && row.reviewerAgentId && row.reviewerAgentId !== ctx.agentId) {
@@ -207,14 +224,19 @@ export class TaskService implements TaskPort {
     let row = this.byRef(ctx.orgId, ref);
     const role = this.roleOf(ctx, row);
     if (role !== "assignee" && role !== "lead") throw new Error(`Only the assignee or a lead can hand off T-${row.number}.`);
+    if (row.status === "backlog" || row.status === "done") throw new Error(`T-${row.number} is ${row.status}; only active tasks can be handed off.`);
     const missing = missingHandoffSections(notes);
     if (missing.length) throw new Error(`Handoff notes are missing: ${missing.join(", ")}. Write each as a heading or "label:" line with content.`);
     const target = this.agentByName(ctx.orgId, to);
     if (target.id === row.assigneeAgentId) throw new Error(`${target.name} already owns T-${row.number}.`);
     let pushed = "not pushed (handed off by a lead)";
     if (role === "assignee") pushed = await this.pushWip(ctx, row);
+    // The push awaited: a merge, budget block or reassignment may have landed meanwhile.
+    row = this.row(ctx.orgId, row.id);
+    if (row.status === "done") throw new Error(`T-${row.number} was completed while handing off; nothing to hand over.`);
     const from = row.assigneeAgentId;
-    row = this.save(row, { assigneeAgentId: target.id, ...(row.status === "in_review" ? {} : { status: row.status === "todo" ? "todo" : "in_progress" }) });
+    // A handoff changes the owner only; status (including a budget or dependency block) is kept.
+    row = this.save(row, { assigneeAgentId: target.id });
     this.event(row, { kind: "agent", ctx }, "handoff", { from: from ? this.agentName(from) : null, to: target.name, pushed, note: notes });
     this.deps.chat.channels.addAgents(row.channelId!, [target.id]);
     this.deps.chat.postNotice(ctx.orgId, row.channelId!,
@@ -240,6 +262,7 @@ export class TaskService implements TaskPort {
 
   async prViewFor(ctx: AgentContext, ref: string): Promise<string> {
     const row = this.byRef(ctx.orgId, ref);
+    if (this.roleOf(ctx, row) === null) throw new Error(`You are not working on T-${row.number}.`);
     if (!row.prUrl) throw new Error(`T-${row.number} has no pull request yet.`);
     if (!this.deps.github.view) throw new Error("PR viewing is not available");
     const pr = await this.deps.github.view(row.prUrl);
@@ -270,11 +293,16 @@ export class TaskService implements TaskPort {
     this.deps.chat.postNotice(row.orgId, row.channelId!, `PR for T-${row.number}: ${input.url}${reviewer ? `\n@${this.agentName(reviewer)} please review it against the acceptance criteria (pr_view, then task_review).` : ""}`, reviewer ? [reviewer] : [], "agent");
   }
 
-  /** Charges a model call made from a task channel; a set budget, once exceeded, blocks the task. */
-  chargeFromChannels(channelIds: readonly string[], agentId: string, costUsd: number): void {
-    if (costUsd <= 0 || channelIds.length === 0) return;
-    const row = this.deps.db.select().from(schema.tasks).where(inArray(schema.tasks.channelId, [...channelIds])).get();
-    if (!row) return;
+  /**
+   * Charges a model call to the task the run is working on: the task it started with task_start,
+   * otherwise the task channel it was woken from. A set budget, once exceeded, blocks the task.
+   */
+  chargeFromChannels(channelIds: readonly string[], agentId: string, costUsd: number, runTaskId: string | null = null): void {
+    if (costUsd <= 0) return;
+    const row = runTaskId
+      ? this.deps.db.select().from(schema.tasks).where(eq(schema.tasks.id, runTaskId)).get()
+      : channelIds.length ? this.deps.db.select().from(schema.tasks).where(inArray(schema.tasks.channelId, [...channelIds])).get() : undefined;
+    if (!row || row.status === "done") return;
     const updated = this.save(row, { spentUsd: row.spentUsd + costUsd }, false);
     if (updated.budgetUsd !== null && updated.spentUsd > updated.budgetUsd && updated.status !== "blocked" && updated.status !== "done") {
       const blocked = this.save(updated, { status: "blocked" });
@@ -286,8 +314,20 @@ export class TaskService implements TaskPort {
     }
   }
 
-  /** Polls open PRs (every couple of minutes) and moves tasks accordingly. */
+  private syncing = false;
+
+  /** Polls open PRs (every couple of minutes) and moves tasks accordingly. Never runs twice at once. */
   async syncPullRequests(): Promise<number> {
+    if (!this.deps.github.status || this.syncing) return 0;
+    this.syncing = true;
+    try {
+      return await this.syncOnce();
+    } finally {
+      this.syncing = false;
+    }
+  }
+
+  private async syncOnce(): Promise<number> {
     if (!this.deps.github.status) return 0;
     const open = this.deps.db.select().from(schema.tasks).where(and(inArray(schema.tasks.status, ["in_review", "in_progress", "blocked"]), sql`${schema.tasks.prUrl} is not null`)).all();
     let changed = 0;
@@ -332,7 +372,10 @@ export class TaskService implements TaskPort {
       // Nothing to commit is fine.
     }
     const outcome = await this.deps.relay.push({ agentId: ctx.agentId, worktreeId: wt.id, osUser: wt.osUser });
-    return outcome.push.status === "pushed" ? `WIP pushed to ${row.branch}` : `push ${outcome.push.status}: ${outcome.push.reason ?? ""}`;
+    if (outcome.push.status === "pushed") return `WIP pushed to ${row.branch}`;
+    if (/Nothing new/i.test(outcome.push.reason ?? "")) return "nothing new to push";
+    // Never hand over work that only exists on this workstation.
+    throw new Error(`Handoff stopped: your WIP could not be pushed (${outcome.push.reason ?? outcome.push.status}). Fix that, then hand off again.`);
   }
 
   private async cleanup(row: TaskRow): Promise<void> {
@@ -371,6 +414,13 @@ export class TaskService implements TaskPort {
       [a], origin);
   }
 
+  /** A task over its budget stays blocked until a person raises the budget or unblocks it. */
+  private assertNotOverBudget(row: TaskRow): void {
+    if (row.budgetUsd !== null && row.spentUsd > row.budgetUsd) {
+      throw new Error(`T-${row.number} is over its $${row.budgetUsd.toFixed(2)} budget; only a person can unblock it.`);
+    }
+  }
+
   private roleOf(ctx: AgentContext, row: TaskRow): TaskActor | null {
     if (row.assigneeAgentId === ctx.agentId) return "assignee";
     if (isGranted(ctx.currentGrants(), "core.tasks", "task_assign")) return "lead";
@@ -397,9 +447,13 @@ export class TaskService implements TaskPort {
     return [...new Set(ids)].map((id) => this.row(orgId, id).id);
   }
 
-  private setDeps(row: TaskRow, deps: string[]): void {
+  private assertNoCycle(row: TaskRow, deps: readonly string[]): void {
     if (deps.includes(row.id)) throw badRequest("A task cannot depend on itself");
     for (const d of deps) if (this.reaches(d, row.id)) throw badRequest("That dependency would create a cycle");
+  }
+
+  private setDeps(row: TaskRow, deps: string[]): void {
+    this.assertNoCycle(row, deps);
     this.deps.db.transaction((tx) => {
       tx.delete(schema.taskDependencies).where(eq(schema.taskDependencies.taskId, row.id)).run();
       if (deps.length) tx.insert(schema.taskDependencies).values(deps.map((d) => ({ taskId: row.id, dependsOnTaskId: d }))).run();

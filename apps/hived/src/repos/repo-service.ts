@@ -18,7 +18,9 @@ const SLUG = /^[a-z0-9][a-z0-9._-]{0,59}$/;
 /** Branch-safe slug for an agent name, e.g. "Ada Lovelace" -> "ada-lovelace". */
 export function agentSlug(name: string, id: string): string {
   const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32);
-  return slug || id.slice(-8).toLowerCase();
+  const safe = slug || id.slice(-8).toLowerCase();
+  // "t<n>" is reserved for task branches (hive/t<n>/<slug>); an agent named "T5" must not collide.
+  return /^t\d+$/.test(safe) ? `a-${safe}` : safe;
 }
 
 export interface RepoServiceDeps {
@@ -145,7 +147,8 @@ export class RepoService {
     const existing = this.deps.db.select().from(schema.worktrees)
       .where(and(eq(schema.worktrees.workstationId, input.workstation.id), eq(schema.worktrees.scope, scope), isNull(schema.worktrees.removedAt))).get();
     if (existing) {
-      const row = this.deps.db.update(schema.worktrees).set({ agentId: input.agentId, taskId: input.task.id, lastUsedAt: now }).where(eq(schema.worktrees.id, existing.id)).returning().get()!;
+      if (existing.taskId !== input.task.id) throw conflict(`${scope} belongs to other work; ask a person to clean it up`);
+      const row = this.deps.db.update(schema.worktrees).set({ agentId: input.agentId, lastUsedAt: now }).where(eq(schema.worktrees.id, existing.id)).returning().get()!;
       this.deps.onWorktree(toWorktree(row));
       return { worktree: toWorktree(row), branch, created: false, resumed: true };
     }
