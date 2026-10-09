@@ -28,6 +28,7 @@ function fakeChat(overrides: Partial<ChatPort> = {}) {
     reactAsAgent: () => {},
     directory: () => [{ id: "agt_b", name: "Bob", role: "builder" }],
     messageAgent: (_c, target) => ({ channelId: `ch_${target}`, id: 7 }),
+    readFile: () => ({ filename: "log.txt", text: "hello", truncated: false }),
     ...overrides,
   };
   return { port, sent };

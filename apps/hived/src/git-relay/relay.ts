@@ -20,6 +20,10 @@ export interface RelayDeps {
   readonly git: GitRunner;
   readonly github: GitHubPort;
   readonly onPush: (push: GitPush) => void;
+  /** Task branches may only be pushed by the task's current assignee. */
+  readonly taskAssignee?: (taskId: string) => string | null;
+  /** A PR was opened (or found) for a worktree; tasks move to review. */
+  readonly onPullRequest?: (input: { worktreeId: string; taskId: string | null; agentId: string; url: string }) => void;
 }
 
 export interface PushOutcome {
@@ -38,6 +42,12 @@ export class GitRelay {
     const wt = this.deps.repos.worktree(input.worktreeId);
     if (!wt || wt.removedAt || wt.agentId !== input.agentId) return this.reject(input, "", null, "Not your worktree");
     if (!BRANCH_PATTERN.test(wt.branch)) return this.reject(input, wt.branch, null, "Branch name is not a hive/<agent>/<slug> branch");
+    if (!wt.taskId && /^hive\/t\d+\//.test(wt.branch)) {
+      return this.reject(input, wt.branch, null, "hive/t<n>/… branches belong to tasks; use task_start");
+    }
+    if (wt.taskId && this.deps.taskAssignee?.(wt.taskId) !== input.agentId) {
+      return this.reject(input, wt.branch, null, "Only the task's current assignee may push its branch");
+    }
     const repo = this.deps.db.select().from(schema.repositories).where(eq(schema.repositories.id, wt.repositoryId)).get();
     if (!repo) return this.reject(input, wt.branch, null, "Repository no longer registered");
 
@@ -71,6 +81,7 @@ export class GitRelay {
   async createPullRequest(input: { agentId: string; worktreeId: string; title: string; body: string }): Promise<string> {
     const wt = this.deps.repos.worktree(input.worktreeId);
     if (!wt || wt.agentId !== input.agentId) throw new Error("Not your worktree");
+    if (wt.taskId && this.deps.taskAssignee?.(wt.taskId) !== input.agentId) throw new Error("Only the task's current assignee may open its pull request");
     const last = this.deps.db.select().from(schema.gitPushes)
       .where(and(eq(schema.gitPushes.worktreeId, wt.id), eq(schema.gitPushes.status, "pushed")))
       .orderBy(desc(schema.gitPushes.id)).limit(1).get();
@@ -81,6 +92,7 @@ export class GitRelay {
     const url = await this.deps.github.createPullRequest({ repo: repo.githubFullName, head: wt.branch, base: repo.defaultBranch, title: input.title, body });
     const row = this.deps.db.update(schema.gitPushes).set({ prUrl: url }).where(eq(schema.gitPushes.id, last.id)).returning().get()!;
     this.deps.onPush(toPush(row));
+    this.deps.onPullRequest?.({ worktreeId: wt.id, taskId: wt.taskId, agentId: input.agentId, url });
     return url;
   }
 

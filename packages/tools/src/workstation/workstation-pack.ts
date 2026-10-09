@@ -153,6 +153,12 @@ export function createWorkstationPack(port: WorkstationPort, health: () => Promi
       execute: (ctx) => attempt(() => port.gitPush(ctx)),
     }),
     defineHiveTool({
+      name: "attach_file", label: "Attach file", access: "w",
+      description: "Post a text file from your worktree (log, report, diff; up to 2 MB) as an attachment in a channel.",
+      parameters: Type.Object({ channel_id: Type.String(), path: Type.String(), message: Type.Optional(Type.String({ maxLength: 2000 })) }),
+      execute: (ctx, p) => attempt(() => port.attachFile(ctx, p.channel_id, p.path, p.message ?? "")),
+    }),
+    defineHiveTool({
       name: "pr_create", label: "Open pull request", access: "w",
       description: "Open a pull request for your pushed branch against the default branch.",
       parameters: Type.Object({ title: Type.String({ minLength: 1, maxLength: 200 }), body: Type.String({ maxLength: 20000 }) }),

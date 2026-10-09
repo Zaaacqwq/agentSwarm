@@ -18,6 +18,8 @@ const fake = startFakeOpenAI((req) => {
   // Stay quiet when only another agent spoke, so fake agents never ping-pong.
   if (!text.includes("(person):")) return { kind: "text", text: "Noted; nothing to add." };
   const said = text.split("(person): ").slice(1).join("(person): ");
+  const proposal = /propose task (.+)/i.exec(said)?.[1];
+  if (proposal) return { kind: "tool", name: "task_create", args: { title: proposal.trim(), description: "Proposed by the lead.", acceptance: ["it is done"] } };
   const relay = /relay to (\w+)/i.exec(said)?.[1];
   if (relay) return { kind: "tool", name: "message_agent", args: { agent: relay, body: "relayed from the owner" } };
   return {

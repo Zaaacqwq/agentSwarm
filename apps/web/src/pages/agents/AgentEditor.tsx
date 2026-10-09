@@ -2,7 +2,7 @@ import { useState, type FormEvent, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, MessagesSquare, Trash2 } from "lucide-react";
-import type { Agent, CreateAgent, ThinkingLevel, ToolGrant } from "@hive/core";
+import { ROLE_TEMPLATES, type Agent, type CreateAgent, type RoleTemplateId, type ThinkingLevel, type ToolGrant } from "@hive/core";
 import { api, qk } from "../../app/api.ts";
 import { AgentAvatar } from "../../components/AgentAvatar.tsx";
 import { Button } from "../../components/ui/Button.tsx";
@@ -91,6 +91,25 @@ export function AgentEditor({ agent }: { agent: Agent | undefined }) {
           <p className="rounded-field border border-warn/30 bg-warn/5 px-3 py-2 text-sm text-warn">
             Add a model endpoint in <Link className="underline" to="/settings">Settings</Link> before creating agents.
           </p>
+        ) : null}
+
+        {!agent ? (
+          <Section title="Start from a role" subtitle="Pre-fills role, instructions and tool grants. Everything stays editable.">
+            <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Role template">
+              {(Object.keys(ROLE_TEMPLATES) as RoleTemplateId[]).map((id) => {
+                const t = ROLE_TEMPLATES[id];
+                const active = form.role === t.role && form.instructions === t.instructions;
+                return (
+                  <button key={id} type="button" role="radio" aria-checked={active}
+                    onClick={() => setForm((f) => ({ ...f, role: t.role, instructions: t.instructions, grants: t.grants.map((g) => ({ ...g })) }))}
+                    className={`rounded-2xl border px-4 py-2.5 text-left transition-colors ${active ? "border-honey/60 bg-honey/10" : "border-line bg-sunken hover:border-line-strong"}`}>
+                    <span className="block text-sm font-bold">{t.label}</span>
+                    <span className="block text-xs text-muted">{t.grants.length} grants</span>
+                  </button>
+                );
+              })}
+            </div>
+          </Section>
         ) : null}
 
         <Section title="Identity">

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { CornerUpLeft, SmilePlus } from "lucide-react";
+import { CornerUpLeft, FileText, SmilePlus } from "lucide-react";
 import type { Agent, Channel, Message, MessagePage } from "@hive/core";
 import { api, qk } from "../../app/api.ts";
 import { AgentAvatar } from "../../components/AgentAvatar.tsx";
@@ -95,6 +95,7 @@ function Bubble({ message: m, mine, tint, replied, agents, focused, canAct, onRe
       >
         {mine ? <p className="whitespace-pre-wrap text-[0.95rem] leading-relaxed">{highlightMentions(m.body, agents)}</p> : <Markdown text={m.body} />}
       </div>
+      {m.attachments.length ? <Attachments message={m} /> : null}
       {m.reactions.length ? (
         <ul className="mt-1 flex flex-wrap gap-1" aria-label="Reactions">
           {m.reactions.map((r) => {
@@ -155,4 +156,28 @@ function groupMessages(messages: readonly Message[]): Message[][] {
     }
   }
   return groups;
+}
+
+const IMAGE = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+
+function Attachments({ message }: { message: Message }) {
+  return (
+    <ul className="mt-1.5 flex max-w-full flex-wrap gap-2" aria-label="Attachments">
+      {message.attachments.map((a) => (
+        <li key={a.id}>
+          {IMAGE.has(a.mime) ? (
+            <a href={api.fileUrl(a.id, true)} target="_blank" rel="noreferrer noopener" className="block overflow-hidden rounded-xl border border-line">
+              <img src={api.fileUrl(a.id, true)} alt={a.filename} loading="lazy" width={220} height={150} className="h-[150px] w-[220px] object-cover" />
+            </a>
+          ) : (
+            <a href={api.fileUrl(a.id)} className="flex items-center gap-2 rounded-xl border border-line bg-sunken px-3 py-2 text-xs transition-colors hover:border-line-strong">
+              <FileText size={14} className="text-honey" aria-hidden />
+              <span className="max-w-48 truncate">{a.filename}</span>
+              <span className="text-faint">{Math.max(1, Math.round(a.size / 1024))} KB</span>
+            </a>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
 }

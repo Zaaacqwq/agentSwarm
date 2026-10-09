@@ -15,6 +15,7 @@ import { agentRoutes } from "../http/routes/agent-routes.ts";
 import { chatRoutes, messageRoutes } from "../http/routes/chat-routes.ts";
 import { metaRoutes } from "../http/routes/meta-routes.ts";
 import { workstationRoutes } from "../http/routes/workstation-routes.ts";
+import { fileRoutes, taskRoutes } from "../http/routes/task-routes.ts";
 import { registerWebSocket } from "../http/routes/ws-route.ts";
 
 const PUBLIC_API = new Set(["/api/auth/session", "/api/auth/setup", "/api/auth/login", "/api/auth/logout"]);
@@ -62,6 +63,8 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   await app.register(metaRoutes(deps), { prefix: "/api" });
   await app.register(messageRoutes(deps), { prefix: "/api" });
   await app.register(workstationRoutes(deps), { prefix: "/api" });
+  await app.register(taskRoutes(deps), { prefix: "/api" });
+  await app.register(fileRoutes(deps), { prefix: "/api" });
   registerWebSocket(app, deps);
   app.get("/api/openapi.json", { schema: { hide: true } }, async () => app.swagger());
 

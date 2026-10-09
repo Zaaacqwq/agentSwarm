@@ -135,9 +135,33 @@ export class ChannelStore {
     writeAudit(this.db, { orgId: user.orgId, actorKind: "user", actorId: user.id, action: "group.delete", targetId: channelId }, now);
   }
 
+  /** A task's discussion channel: its owner plus the agents working on it. */
+  createTaskChannel(orgId: string, ownerUserId: string, title: string, agentIds: readonly string[], now = Date.now()): ChannelRow {
+    const row: ChannelRow = { id: newId("ch"), orgId, ownerUserId, kind: "task", title, dmKey: null, createdAt: now };
+    this.db.transaction((tx) => {
+      tx.insert(schema.channels).values(row).run();
+      tx.insert(schema.channelMembers).values([
+        { channelId: row.id, memberKind: "user" as const, memberId: ownerUserId, joinedAt: now },
+        ...[...new Set(agentIds)].map((id) => ({ channelId: row.id, memberKind: "agent" as const, memberId: id, joinedAt: now })),
+      ]).run();
+    });
+    return row;
+  }
+
+  /** Adds agents that are not yet members (task channels only grow; history stays readable). */
+  addAgents(channelId: string, agentIds: readonly string[], now = Date.now()): void {
+    const current = new Set(this.agentMembers(channelId));
+    const added = [...new Set(agentIds)].filter((id) => !current.has(id));
+    if (added.length) this.db.insert(schema.channelMembers).values(added.map((id) => ({ channelId, memberKind: "agent" as const, memberId: id, joinedAt: now }))).run();
+  }
+
+  rename(channelId: string, title: string): void {
+    this.db.update(schema.channels).set({ title }).where(eq(schema.channels.id, channelId)).run();
+  }
+
   /** Display title: group name, the agent's name for a DM, "A ↔ B" for an agent DM. */
   title(row: ChannelRow): string {
-    if (row.kind === "group") return row.title ?? "Group";
+    if (row.kind === "group" || row.kind === "task") return row.title ?? (row.kind === "task" ? "Task" : "Group");
     const agents = this.agentMembers(row.id).map((id) => this.agentName(id));
     return row.kind === "dm" ? (agents[0] ?? "Direct message") : agents.join(" ↔ ");
   }

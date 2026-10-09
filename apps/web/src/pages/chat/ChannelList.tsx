@@ -11,6 +11,7 @@ import { GroupDialog } from "./GroupDialog.tsx";
 
 const SECTIONS: { kind: Channel["kind"]; label: string }[] = [
   { kind: "group", label: "Groups" },
+  { kind: "task", label: "Tasks" },
   { kind: "dm", label: "Direct" },
   { kind: "agent_dm", label: "Between agents" },
 ];
@@ -87,6 +88,13 @@ function ChannelRow({ channel: c, active, agents }: { channel: Channel; active: 
 
 function ChannelGlyph({ channel, agents }: { channel: Channel; agents: Agent[] }) {
   if (channel.kind === "dm" && agents[0]) return <AgentAvatar seed={agents[0].avatarSeed} state={channel.agentState} label={agents[0].name} />;
+  if (channel.kind === "task") {
+    return (
+      <span className="grid size-10 shrink-0 place-items-center rounded-[0.9rem] border border-line bg-sunken font-mono text-[0.65rem] font-bold text-muted">
+        {(channel.title ?? "").split(" ")[0]}
+      </span>
+    );
+  }
   if (channel.kind === "agent_dm") {
     return (
       <span className="relative block size-10 shrink-0">

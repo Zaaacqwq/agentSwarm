@@ -36,4 +36,5 @@ export interface WorkstationPort {
   gitCommit(ctx: AgentContext, message: string): Promise<{ head: string }>;
   gitPush(ctx: AgentContext): Promise<string>;
   pullRequest(ctx: AgentContext, title: string, body: string): Promise<string>;
+  attachFile(ctx: AgentContext, channelId: string, path: string, caption: string): Promise<string>;
 }

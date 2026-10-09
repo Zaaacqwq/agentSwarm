@@ -32,7 +32,8 @@ function attempt(work: () => string): ToolResult {
 function formatMessage(m: ChannelMessageView): string {
   const reply = m.replyToId ? ` (reply to #${m.replyToId})` : "";
   const reactions = m.reactions.length ? `  [${m.reactions.join(" ")}]` : "";
-  return `#${m.id} ${m.author}${m.authorKind === "agent" ? " (agent)" : ""}${reply}: ${m.body}${reactions}`;
+  const files = m.attachments?.length ? `  [files: ${m.attachments.join(", ")}]` : "";
+  return `#${m.id} ${m.author}${m.authorKind === "agent" ? " (agent)" : ""}${reply}: ${m.body}${reactions}${files}`;
 }
 
 export function createCommunicationPack(chat: ChatPort): Toolpack {
@@ -88,6 +89,17 @@ export function createCommunicationPack(chat: ChatPort): Toolpack {
         return attempt(() => {
           const hits = chat.searchFor(ctx, p.query, p.channel_id);
           return hits.length ? hits.map((h) => `[${h.channel}] ${formatMessage(h)}`).join("\n") : "No matches.";
+        });
+      },
+    }),
+    defineHiveTool({
+      name: "read_file", label: "Read attached file", access: "r",
+      description: "Read a text file attached to a message in one of your channels (ids look like file_…).",
+      parameters: Type.Object({ file_id: Type.String({ minLength: 1 }) }),
+      async execute(ctx, p) {
+        return attempt(() => {
+          const f = chat.readFile(ctx, p.file_id);
+          return `${f.filename}${f.truncated ? " (first 200 KB)" : ""}:\n${f.text.length > 7000 ? `${f.text.slice(0, 7000)}\n… [truncated]` : f.text}`;
         });
       },
     }),

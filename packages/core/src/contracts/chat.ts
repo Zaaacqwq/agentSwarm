@@ -4,7 +4,10 @@ import { AgentState } from "./agents.ts";
 export const AuthorKind = Type.Union([Type.Literal("user"), Type.Literal("agent"), Type.Literal("system")]);
 export type AuthorKind = Static<typeof AuthorKind>;
 
-export const ChannelKind = Type.Union([Type.Literal("dm"), Type.Literal("group"), Type.Literal("agent_dm")]);
+export const ChannelKind = Type.Union([Type.Literal("dm"), Type.Literal("group"), Type.Literal("agent_dm"), Type.Literal("task")]);
+
+export const AttachmentRef = Type.Object({ id: Type.String(), filename: Type.String(), mime: Type.String(), size: Type.Number() });
+export type AttachmentRef = Static<typeof AttachmentRef>;
 export type ChannelKind = Static<typeof ChannelKind>;
 
 export const Actor = Type.Object({ kind: Type.Union([Type.Literal("user"), Type.Literal("agent")]), id: Type.String() });
@@ -25,6 +28,7 @@ export const Message = Type.Object({
   chainId: Type.Union([Type.String(), Type.Null()]),
   mentions: Type.Array(Type.String()),
   reactions: Type.Array(ReactionSummary),
+  attachments: Type.Array(AttachmentRef),
   createdAt: Type.Number(),
 });
 export type Message = Static<typeof Message>;
@@ -58,6 +62,7 @@ export const PostMessage = Type.Object(
   {
     body: Type.String({ minLength: 1, maxLength: 20000 }),
     replyToId: Type.Optional(Type.Integer({ minimum: 1 })),
+    attachmentIds: Type.Optional(Type.Array(Type.String(), { maxItems: 10 })),
   },
   { additionalProperties: false },
 );

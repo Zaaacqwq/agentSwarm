@@ -1,5 +1,5 @@
 import { createColleaguesPack, createCommunicationPack, ToolpackRegistry } from "@hive/tools";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import type { ServerEvent } from "@hive/core";
 import { schema, type Db } from "../db/client.ts";
 import type { SecretBox } from "../crypto/secret-box.ts";
@@ -22,6 +22,12 @@ import { runGit, type GitRunner } from "../repos/git-cli.ts";
 import { GitRelay } from "../git-relay/relay.ts";
 import { ghCli, type GitHubPort } from "../git-relay/github.ts";
 import { HostMonitor, macProbe, type HostProbe } from "../host/host-monitor.ts";
+import { createTasksPack } from "@hive/tools";
+import { TaskService } from "../tasks/task-service.ts";
+import { FileStore } from "../files/file-store.ts";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 export type Logger = (level: "info" | "warn" | "error", msg: string, extra?: Record<string, unknown>) => void;
 
@@ -37,6 +43,10 @@ export interface ServiceDeps {
   readonly hostProbe?: HostProbe;
   readonly heavySlots?: number;
   readonly leaseWaitMs?: number;
+  /** Where channel attachments are stored (defaults to a temp dir, for tests). */
+  readonly filesDir?: string;
+  /** How often open PRs are checked; 0 disables the poller. */
+  readonly prPollMs?: number;
 }
 
 export interface Services {
@@ -55,6 +65,8 @@ export interface Services {
   readonly heavy: HeavySlots;
   readonly relay: GitRelay;
   readonly host: HostMonitor;
+  readonly tasks: TaskService;
+  readonly files: FileStore;
 }
 
 /** Composition root. Construction has no side effects; call start() before serving. */
@@ -79,7 +91,15 @@ export function createServices(deps: ServiceDeps): Services & { start(): Promise
   workstations = new WorkstationService(db, deps.backend, leases);
   const git = deps.git ?? runGit;
   const repos = new RepoService({ db, backend: deps.backend, git, onWorktree: (wt) => publishForWorkstation(wt.workstationId, { type: "worktree.updated", worktree: wt }) });
-  const relay = new GitRelay({ db, backend: deps.backend, repos, git, github: deps.github ?? ghCli, onPush: (push) => publishForAgent(push.agentId, { type: "git.pushed", push }) });
+  const github = deps.github ?? ghCli;
+  let tasks: TaskService | null = null;
+  const relay = new GitRelay({
+    db, backend: deps.backend, repos, git, github,
+    onPush: (push) => publishForAgent(push.agentId, { type: "git.pushed", push }),
+    taskAssignee: (taskId) => db.select({ a: schema.tasks.assigneeAgentId }).from(schema.tasks).where(eq(schema.tasks.id, taskId)).get()?.a ?? null,
+    onPullRequest: (pr) => tasks?.onPullRequest(pr),
+  });
+  const files = new FileStore(db, deps.filesDir ?? mkdtempSync(join(tmpdir(), "hive-files-")));
   let host: HostMonitor | null = null;
   const heavy = new HeavySlots(deps.heavySlots ?? 2, () => host?.underPressure() ?? false);
 
@@ -115,6 +135,7 @@ export function createServices(deps: ServiceDeps): Services & { start(): Promise
     agents: (orgId) => agents.list({ id: "", orgId, username: "", role: "admin" }).map((a) => ({ id: a.id, name: a.name, role: a.role })),
     deliver: ({ orgId, agentId, messageId }) => requireManager().notify(orgId, agentId, messageId),
     canAcceptFromAgent: (agentId) => requireManager().canAcceptFromAgent(agentId),
+    files,
   });
 
   registry.register(createCommunicationPack(chat));
@@ -124,6 +145,7 @@ export function createServices(deps: ServiceDeps): Services & { start(): Promise
     findAgent: (id) => agents.findRow(id),
     agentName: (id) => agents.findRow(id)?.name ?? "another agent",
     onWaiting: (agentId, reason) => requireManager().setWaiting(agentId, reason),
+    attach: (ctx, channelId, filename, bytes, caption) => chat.attachAsAgent(ctx, channelId, filename, bytes, caption),
     ...(deps.leaseWaitMs !== undefined ? { leaseWaitMs: deps.leaseWaitMs } : {}),
   });
   registry.register(createWorkstationPack(adapter, async () => {
@@ -140,6 +162,20 @@ export function createServices(deps: ServiceDeps): Services & { start(): Promise
       for (const org of db.select({ id: schema.organizations.id }).from(schema.organizations).all()) bus.publish(org.id, { type: "host.updated", host: status });
     },
   });
+
+  tasks = new TaskService({
+    db, bus, chat, repos, relay, workstations, github, log,
+    stopAgent: (agentId) => requireManager().stop(agentId),
+    markRunTask: (runId, taskId) => runs.setTask(runId, taskId),
+    nextTaskNumber: (orgId) => {
+      const max = db.select({ n: sql<number>`coalesce(max(${schema.tasks.number}), 0)` }).from(schema.tasks).where(eq(schema.tasks.orgId, orgId)).get()?.n ?? 0;
+      const row = db.insert(schema.orgCounters).values({ orgId, nextTaskNumber: max + 2 })
+        .onConflictDoUpdate({ target: schema.orgCounters.orgId, set: { nextTaskNumber: sql`max(${schema.orgCounters.nextTaskNumber}, ${max + 1}) + 1` } })
+        .returning().get();
+      return row.nextTaskNumber - 1;
+    },
+  });
+  registry.register(createTasksPack(tasks));
 
   manager = new AgentManager({
     runs,
@@ -160,19 +196,24 @@ export function createServices(deps: ServiceDeps): Services & { start(): Promise
     },
     log,
     ...(deps.limits ? { limits: deps.limits } : {}),
+    onUsage: (runId, channelIds, agentId, costUsd) => tasks!.chargeFromChannels(channelIds, agentId, costUsd, runs.taskOf(runId)),
     onRunSettled: (runId) => {
       leases.releaseForRun(runId);
       chat.forgetRun(runId);
     },
   });
 
-  const services = { db, bus, auth, endpoints, agents, chat, runs, registry, manager, workstations, repos, leases, heavy, relay, host };
+  const services = { db, bus, auth, endpoints, agents, chat, runs, registry, manager, workstations, repos, leases, heavy, relay, host, tasks, files };
   return {
     ...services,
     async start() {
+      if (deps.prPollMs && deps.prPollMs > 0) {
+        setInterval(() => void tasks!.syncPullRequests().catch((error) => log("warn", "PR sync failed", { error: String(error) })), deps.prPollMs).unref?.();
+      }
       await registry.refreshHealth();
       // Leases belong to runs; after a restart no run is active, so none can still be held.
       leases.releaseAll();
+      files.purgeUnbound();
       requireManager().recover();
       if ((await deps.backend.health()).ready) {
         for (const org of db.select({ id: schema.organizations.id }).from(schema.organizations).all()) {
