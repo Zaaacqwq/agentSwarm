@@ -286,3 +286,92 @@ describe("scheduling", () => {
     expect(states.some((s) => s.agentId === bob.id && s.queue?.position === 1)).toBe(true);
   });
 });
+
+describe("review fixes", () => {
+  test("WebSocket events reach only people who can read the channel", async () => {
+    const { buildApp } = await import("../src/app/build-app.ts");
+    const { w, ada } = await crew(async () => {});
+    // A second person in the same org (P6 will add a UI for this).
+    const hash = await Bun.password.hash("second-user-password", { algorithm: "argon2id" });
+    w.handle.db.insert(schema.users).values({ id: "usr_b", orgId: w.user.orgId, username: "bea", passwordHash: hash, role: "member", createdAt: 1 }).run();
+    const bea = await w.auth.login({ username: "bea", password: "second-user-password" });
+    const app = await buildApp({ services: w, config: { secureCookies: false, webDistDir: null } });
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const port = (app.server.address() as { port: number }).port;
+    const seen: string[] = [];
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/api/ws`, { headers: { cookie: `hive_session=${bea.token}` } });
+    ws.onmessage = (m) => seen.push(JSON.parse(String(m.data)).type);
+    await new Promise((r) => (ws.onopen = r));
+    const dm = w.chat.openDm(w.user, ada.id);
+    w.chat.postUserMessage(w.user, dm.id, "private to admin");
+    const group = w.chat.createGroup(w.user, "Admins only", [ada.id]);
+    w.chat.postUserMessage(w.user, group.id, "also private");
+    await w.manager.idle();
+    await Bun.sleep(50);
+    expect(seen.filter((t) => t.startsWith("message.") || t.startsWith("channel."))).toEqual([]);
+    expect(seen).toContain("agent.state");
+    ws.close();
+    await app.close();
+  });
+
+  test("a stopped run stops waiting for a workstation lease", async () => {
+    const { localBackend } = await import("./local-backend.ts");
+    const results: string[] = [];
+    let w!: World;
+    w = await buildWorld({
+      backend: localBackend().backend,
+      leaseWaitMs: 10_000,
+      script: async (input) => {
+        results.push((await callTool(input, "ws_where", {})).text);
+        results.push((await callTool(input, "ws_checkout", { repo: "nope", slug: "x" })).text);
+      },
+    });
+    const ada = w.makeAgent("Ada", [...GRANTS, { toolpackId: "core.workstation", toolName: "*" }]);
+    const ws = await w.workstations.create(w.user, { name: "Bench", osUser: "ws-1" });
+    w.workstations.bind(w.user, ada.id, ws.id);
+    w.leases.acquire({ resourceId: ws.id, agentId: "someone-else", runId: null });
+    w.chat.postUserMessage(w.user, w.chat.openDm(w.user, ada.id).id, "go");
+    while (w.manager.queueInfo(ada.id)?.waitingFor === undefined) await Bun.sleep(5);
+    expect(w.manager.queueInfo(ada.id)?.waitingFor).toContain("Bench");
+    const started = Date.now();
+    w.manager.stop(ada.id);
+    await w.manager.idle();
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(w.leases.current(ws.id)?.holderAgentId).toBe("someone-else");
+  });
+
+  test("a refused first message_agent leaves no empty agent DM", async () => {
+    const results: string[] = [];
+    const { w, ada } = await crew(async (input) => {
+      results.push((await callTool(input, "message_agent", { agent: "Bob", body: "hi" })).text);
+    }, { maxPendingPerAgent: 0 });
+    w.chat.postUserMessage(w.user, w.chat.openDm(w.user, ada.id).id, "go");
+    await w.manager.idle();
+    expect(results[0]).toContain("too many pending");
+    expect(w.chat.listChannels(w.user).filter((c) => c.kind === "agent_dm")).toHaveLength(0);
+  });
+
+  test("the debounce cannot postpone a turn forever", async () => {
+    const started: number[] = [];
+    const { w, ada } = await crew(async () => {
+      started.push(Date.now());
+    }, { debounceMs: 30 });
+    const dm = w.chat.openDm(w.user, ada.id);
+    const t0 = Date.now();
+    for (let i = 0; i < 12; i++) {
+      w.chat.postUserMessage(w.user, dm.id, `m${i}`);
+      await Bun.sleep(20);
+    }
+    await w.manager.idle();
+    expect(started[0]! - t0).toBeLessThan(200);
+  });
+
+  test("around paging respects small limits", async () => {
+    const { w, ada } = await crew(async () => {});
+    const dm = w.chat.openDm(w.user, ada.id);
+    const ids = ["a", "b", "c", "d", "e"].map((b) => w.chat.postUserMessage(w.user, dm.id, b).id);
+    await w.manager.shutdown();
+    expect(w.chat.listMessages(w.user, dm.id, { around: ids[2]!, limit: 2 }).messages.map((m) => m.body)).toEqual(["b", "c"]);
+    expect(w.chat.listMessages(w.user, dm.id, { around: ids[2]!, limit: 1 }).messages.map((m) => m.body)).toEqual(["c"]);
+  });
+});

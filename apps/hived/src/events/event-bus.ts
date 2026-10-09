@@ -1,8 +1,17 @@
 import type { ServerEvent } from "@hive/core";
 
+/** Who may receive an event beyond org membership. Without an audience, the whole org sees it. */
+export interface Audience {
+  /** Only people who can read this channel (members, or anyone in the org for agent DMs). */
+  readonly channelId?: string;
+  /** Only these users (e.g. the members of a channel that no longer exists). */
+  readonly userIds?: readonly string[];
+}
+
 export interface EventEnvelope {
   readonly orgId: string;
   readonly event: ServerEvent;
+  readonly audience?: Audience;
 }
 
 type Listener = (envelope: EventEnvelope) => void;
@@ -13,10 +22,10 @@ export class EventBus {
 
   constructor(private readonly onListenerError: (error: unknown) => void = () => {}) {}
 
-  publish(orgId: string, event: ServerEvent): void {
+  publish(orgId: string, event: ServerEvent, audience?: Audience): void {
     for (const listener of this.listeners) {
       try {
-        listener({ orgId, event });
+        listener(audience ? { orgId, event, audience } : { orgId, event });
       } catch (error) {
         this.onListenerError(error);
       }

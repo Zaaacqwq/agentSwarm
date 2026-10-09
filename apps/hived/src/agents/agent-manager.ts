@@ -59,6 +59,8 @@ interface ActiveRun {
 }
 
 const RESULT_PREVIEW = 2000;
+/** A burst can extend the quiet period to at most this many debounce intervals. */
+const MAX_DEBOUNCE_FACTOR = 3;
 
 /**
  * Owns agent turns: one active turn per agent, a global concurrency cap, and message
@@ -70,6 +72,8 @@ export class AgentManager {
   private readonly settled = new Set<Promise<void>>();
   /** Debounce: an agent's queued run may start only after this time. */
   private readonly readyAt = new Map<string, number>();
+  /** When the current burst for an agent began, so chatter cannot postpone a turn forever. */
+  private readonly burstStart = new Map<string, number>();
   /** Why a working agent is blocked (e.g. waiting for a workstation), for the UI. */
   private readonly waiting = new Map<string, string>();
   private closed = false;
@@ -89,8 +93,12 @@ export class AgentManager {
     const run = queued ? this.deps.runs.appendTrigger(queued.id, messageId) : this.deps.runs.createQueued(orgId, agentId, [messageId]);
     this.deps.bus.publish(orgId, { type: "run.updated", run });
     if (this.limits.debounceMs > 0) {
-      this.readyAt.set(agentId, Date.now() + this.limits.debounceMs);
-      setTimeout(() => this.pump(), this.limits.debounceMs + 5);
+      const now = Date.now();
+      const start = queued ? (this.burstStart.get(agentId) ?? now) : now;
+      this.burstStart.set(agentId, start);
+      const at = Math.min(now + this.limits.debounceMs, start + this.limits.debounceMs * MAX_DEBOUNCE_FACTOR);
+      this.readyAt.set(agentId, at);
+      setTimeout(() => this.pump(), at - now + 5);
     }
     this.publishState(orgId, agentId);
     this.pump();
@@ -186,6 +194,7 @@ export class AgentManager {
       const done = this.execute(next, active).catch((error: unknown) => this.onCrash(next, error)).finally(() => {
         this.active.delete(next.agentId);
         this.waiting.delete(next.agentId);
+        this.burstStart.delete(next.agentId);
         try {
           this.deps.onRunSettled?.(next.id);
         } catch (error) {
@@ -234,10 +243,15 @@ export class AgentManager {
   private dropStale(run: Run): void {
     const dropped = this.deps.runs.finish(run.id, "failed", "Dropped: messages from other agents waited too long");
     const orgId = this.deps.runs.orgOf(run.id);
-    if (orgId) {
-      this.deps.bus.publish(orgId, { type: "run.updated", run: dropped });
-      this.publishState(orgId, run.agentId);
+    if (!orgId) return;
+    this.deps.bus.publish(orgId, { type: "run.updated", run: dropped });
+    this.publishState(orgId, run.agentId);
+    const name = this.deps.findAgent(run.agentId)?.name ?? "An agent";
+    // System messages wake nobody, so this tells people without restarting the loop.
+    for (const channelId of new Set(this.deps.chat.getMessages(run.triggerMessageIds).map((m) => m.channelId))) {
+      this.deps.chat.postSystemMessage(orgId, channelId, `${name} was too busy and skipped messages that waited more than 5 minutes.`, run.id);
     }
+    this.deps.log("warn", "dropped stale agent-only run", { runId: run.id, agentId: run.agentId });
   }
 
   private async execute(queuedRun: Run, active: ActiveRun): Promise<void> {
@@ -289,7 +303,7 @@ export class AgentManager {
       secret = endpoint.apiKey;
       const grants = this.deps.grantsOf(agent.id);
       if (messages.length === 0) throw new Error("No deliverable messages (the agent left those channels)");
-      const context: AgentContext = { agentId: agent.id, orgId, runId: run.id, grants, currentGrants: () => this.deps.grantsOf(agent.id), trigger };
+      const context: AgentContext = { agentId: agent.id, orgId, runId: run.id, grants, currentGrants: () => this.deps.grantsOf(agent.id), trigger, signal: active.controller.signal };
       const toolset = this.deps.registry.resolve(context);
       if (!toolset.tools.some((t) => t.toolpackId === COMMUNICATION_PACK_ID && t.tool.name === "send_message")) {
         emit({ kind: "notice", text: "send_message is not granted, so this agent cannot reply in chat." });

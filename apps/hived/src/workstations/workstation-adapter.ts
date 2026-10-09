@@ -150,6 +150,8 @@ export class WorkstationAdapter implements WorkstationPort {
     let announced = false;
     try {
       for (;;) {
+        // A stopped run must not take (and then strand) a lease or perform its write later.
+        if (ctx.signal?.aborted) throw ctx.signal.reason instanceof Error ? ctx.signal.reason : new Error("Run stopped");
         const res = this.deps.leases.acquire({ resourceId: ws.id, agentId: ctx.agentId, runId: ctx.runId });
         if (res.ok) return;
         const holder = this.deps.agentName(res.holder.holderAgentId);
@@ -160,7 +162,7 @@ export class WorkstationAdapter implements WorkstationPort {
           this.deps.onWaiting?.(ctx.agentId, `${ws.name} (held by ${holder})`);
           announced = true;
         }
-        await Bun.sleep(Math.min(1000, Math.max(10, deadline - Date.now())));
+        await abortableSleep(Math.min(1000, Math.max(10, deadline - Date.now())), ctx.signal);
       }
     } finally {
       if (announced) this.deps.onWaiting?.(ctx.agentId, null);
@@ -185,4 +187,14 @@ export class WorkstationAdapter implements WorkstationPort {
       throw error;
     }
   }
+}
+
+function abortableSleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => {
+      clearTimeout(timer);
+      resolve();
+    }, { once: true });
+  });
 }

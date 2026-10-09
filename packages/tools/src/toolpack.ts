@@ -22,6 +22,8 @@ export interface AgentContext {
   readonly currentGrants: () => readonly ToolGrant[];
   /** What started this turn; server-owned, used for publication policy. */
   readonly trigger?: TurnTrigger;
+  /** Aborted when the run is stopped or times out; long waits inside tools must honour it. */
+  readonly signal?: AbortSignal;
 }
 
 export interface TurnTrigger {

@@ -24,8 +24,10 @@ export function openDatabase(path: string): DbHandle {
   // and PRAGMA foreign_keys is ignored inside the migrator's transaction, so toggle it here.
   sqlite.exec("PRAGMA foreign_keys = OFF;");
   migrate(db, { migrationsFolder: MIGRATIONS_DIR });
-  const violations = sqlite.query("PRAGMA foreign_key_check").all();
-  if (violations.length > 0) throw new Error(`Migration left ${violations.length} foreign key violations`);
+  // Only tables that migrations rebuild are checked: older stray rows elsewhere must not brick startup.
+  const rebuilt = new Set(["channels", "channel_members", "messages", "reactions"]);
+  const violations = (sqlite.query("PRAGMA foreign_key_check").all() as { table: string }[]).filter((v) => rebuilt.has(v.table));
+  if (violations.length > 0) throw new Error(`Migration left ${violations.length} foreign key violations in chat tables`);
   sqlite.exec("PRAGMA foreign_keys = ON;");
   return { db, sqlite, close: () => sqlite.close() };
 }

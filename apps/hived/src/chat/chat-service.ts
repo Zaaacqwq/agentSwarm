@@ -64,21 +64,22 @@ export class ChatService implements ChatPort {
 
   createGroup(user: AuthUser, title: string, agentIds: readonly string[]): Channel {
     const channel = this.toChannel(this.channels.createGroup(user, title, agentIds));
-    this.deps.bus.publish(user.orgId, { type: "channel.updated", channel });
+    this.deps.bus.publish(user.orgId, { type: "channel.updated", channel }, { channelId: channel.id });
     return channel;
   }
 
   updateGroup(user: AuthUser, channelId: string, input: { title?: string; agentIds?: readonly string[] }): Channel {
     const { row } = this.channels.updateGroup(user, channelId, input);
     const channel = this.toChannel(row);
-    this.deps.bus.publish(user.orgId, { type: "channel.updated", channel });
+    this.deps.bus.publish(user.orgId, { type: "channel.updated", channel }, { channelId: channel.id });
     return channel;
   }
 
   deleteGroup(user: AuthUser, channelId: string, hasPendingWork: (channelId: string) => boolean): void {
     if (hasPendingWork(channelId)) throw conflict("Agents are still working on messages from this group; stop them or wait, then retry");
+    const userIds = this.channels.members(channelId).filter((m) => m.kind === "user").map((m) => m.id);
     this.channels.deleteGroup(user, channelId);
-    this.deps.bus.publish(user.orgId, { type: "channel.deleted", channelId });
+    this.deps.bus.publish(user.orgId, { type: "channel.deleted", channelId }, { userIds });
   }
 
   listMessages(user: AuthUser, channelId: string, opts: { before?: number; around?: number; limit?: number }): MessagePage {
@@ -87,9 +88,10 @@ export class ChatService implements ChatPort {
     if (opts.around !== undefined) {
       const newer = this.deps.db.select().from(schema.messages).where(and(eq(schema.messages.channelId, channelId), gte(schema.messages.id, opts.around)))
         .orderBy(schema.messages.id).limit(Math.ceil(limit / 2)).all();
-      const older = this.page(channelId, opts.around, Math.floor(limit / 2) + 1);
-      const hasMore = older.length > Math.floor(limit / 2);
-      return { messages: [...older.slice(-Math.floor(limit / 2)), ...newer].map((r) => this.toMessage(r)), hasMore };
+      const half = Math.floor(limit / 2);
+      const older = this.page(channelId, opts.around, half + 1);
+      const hasMore = older.length > half;
+      return { messages: [...older.slice(Math.max(0, older.length - half)), ...newer].map((r) => this.toMessage(r)), hasMore };
     }
     const rows = this.page(channelId, opts.before, limit + 1);
     return { messages: rows.slice(-limit).map((r) => this.toMessage(r)), hasMore: rows.length > limit };
@@ -106,7 +108,7 @@ export class ChatService implements ChatPort {
       return { ...row, chainId: chain.id };
     });
     const view = this.toMessage(message);
-    this.deps.bus.publish(user.orgId, { type: "message.created", message: view });
+    this.deps.bus.publish(user.orgId, { type: "message.created", message: view }, { channelId });
     for (const agentId of this.recipients(ch, { kind: "user", id: user.id }, mentions)) {
       this.deps.deliver({ orgId: user.orgId, agentId, messageId: message.id, fromAgent: false });
     }
@@ -116,7 +118,7 @@ export class ChatService implements ChatPort {
   postSystemMessage(orgId: string, channelId: string, body: string, runId: string | null, now = Date.now()): Message {
     const row = this.insert({ channelId, authorKind: "system", authorId: "system", authorName: "system", body, runId, replyToId: null, chainId: null, mentions: [], createdAt: now });
     const view = this.toMessage(row);
-    this.deps.bus.publish(orgId, { type: "message.created", message: view });
+    this.deps.bus.publish(orgId, { type: "message.created", message: view }, { channelId });
     return view;
   }
 
@@ -145,7 +147,7 @@ export class ChatService implements ChatPort {
       this.deps.db.delete(schema.reactions).where(and(eq(schema.reactions.messageId, messageId), eq(schema.reactions.actorKind, actor.kind), eq(schema.reactions.actorId, actor.id), eq(schema.reactions.emoji, emoji))).run();
     }
     const view = this.toMessage(row);
-    this.deps.bus.publish(actor.orgId, { type: "message.updated", message: view });
+    this.deps.bus.publish(actor.orgId, { type: "message.updated", message: view }, { channelId: row.channelId });
     return view;
   }
 
@@ -208,7 +210,7 @@ export class ChatService implements ChatPort {
       channelId: ch.id, authorKind: "agent", authorId: ctx.agentId, authorName: this.agentName(ctx.agentId), body: input.body,
       runId: ctx.runId, replyToId: input.replyToId ?? null, chainId, mentions: mentions.ids, createdAt: now,
     });
-    this.deps.bus.publish(ch.orgId, { type: "message.created", message: this.toMessage(row) });
+    this.deps.bus.publish(ch.orgId, { type: "message.created", message: this.toMessage(row) }, { channelId: ch.id });
     for (const agentId of recipients) this.deps.deliver({ orgId: ch.orgId, agentId, messageId: row.id, fromAgent: true });
     return { id: row.id };
   }
@@ -252,10 +254,23 @@ export class ChatService implements ChatPort {
     if (!peer || peer.id === ctx.agentId) throw new Error(`No colleague named ${target}. Use agent_directory to see who you can message.`);
     const owner = this.deps.db.select({ u: schema.agents.ownerUserId }).from(schema.agents).where(eq(schema.agents.id, ctx.agentId)).get()?.u;
     if (!owner) throw new Error("Agent not found");
-    const ch = this.channels.openAgentDm(ctx.orgId, owner, ctx.agentId, peer.id);
-    this.deps.bus.publish(ctx.orgId, { type: "channel.updated", channel: this.toChannel(ch) });
-    const { id } = this.send(ctx, { channelId: ch.id, body });
+    const existed = this.channels.findByKey([ctx.agentId, peer.id].sort().join(":"));
+    const ch = existed ?? this.channels.openAgentDm(ctx.orgId, owner, ctx.agentId, peer.id);
+    let id: number;
+    try {
+      ({ id } = this.send(ctx, { channelId: ch.id, body }));
+    } catch (error) {
+      // Do not leave an empty, org-visible channel behind when policy refuses the first message.
+      if (!existed) this.channels.remove(ch.id);
+      throw error;
+    }
+    if (!existed) this.deps.bus.publish(ctx.orgId, { type: "channel.updated", channel: this.toChannel(ch) }, { channelId: ch.id });
     return { channelId: ch.id, id };
+  }
+
+  /** Drops per-run state once a run has settled. */
+  forgetRun(runId: string): void {
+    this.branchChains.delete(runId);
   }
 
   // --- internals ----------------------------------------------------------------

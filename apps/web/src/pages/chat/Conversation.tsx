@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Link, useSearchParams } from "react-router";
+import { Link, useNavigate, useSearchParams } from "react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Eye, Hash, Pencil, SlidersHorizontal } from "lucide-react";
 import type { Agent, Channel, Message, MessagePage } from "@hive/core";
@@ -12,13 +12,16 @@ import { GroupDialog } from "./GroupDialog.tsx";
 
 export function Conversation({ channelId }: { channelId: string }) {
   const client = useQueryClient();
+  const navigate = useNavigate();
   const [params] = useSearchParams();
   const focusId = Number(params.get("m")) || undefined;
   const channels = useQuery({ queryKey: qk.channels, queryFn: api.channels });
   const agents = useQuery({ queryKey: qk.agents, queryFn: api.agents });
   const queue = useQuery<QueueMap>({ queryKey: qk.queue, queryFn: () => ({}), staleTime: Infinity });
+  // A search jump loads a window around one message; keep it apart from the live latest page.
+  const pageKey = focusId ? [...qk.messages(channelId), "around", focusId] : qk.messages(channelId);
   const page = useQuery({
-    queryKey: qk.messages(channelId),
+    queryKey: pageKey,
     queryFn: () => api.messages(channelId, focusId ? { around: focusId } : {}),
   });
   const channel = channels.data?.find((c) => c.id === channelId);
@@ -50,7 +53,7 @@ export function Conversation({ channelId }: { channelId: string }) {
     setLoadingOlder(true);
     try {
       const older = await api.messages(channelId, { before: oldest.id });
-      client.setQueryData<MessagePage>(qk.messages(channelId), (cur) => (cur ? { messages: [...older.messages, ...cur.messages], hasMore: older.hasMore } : cur));
+      client.setQueryData<MessagePage>(pageKey, (cur) => (cur ? { messages: [...older.messages, ...cur.messages], hasMore: older.hasMore } : cur));
     } finally {
       setLoadingOlder(false);
     }
@@ -101,7 +104,12 @@ export function Conversation({ channelId }: { channelId: string }) {
       {readOnly ? (
         <p className="flex items-center gap-2 border-t border-line px-5 py-3 text-sm text-muted"><Eye size={14} aria-hidden /> Agents talk here on their own. You can read along but not post.</p>
       ) : channel ? (
-        <Composer channel={channel} members={members} replyTo={replyTo} onCancelReply={() => setReplyTo(null)} onSent={() => { stick.current = true; setReplyTo(null); }} />
+        <Composer channel={channel} members={members} replyTo={replyTo} onCancelReply={() => setReplyTo(null)} onSent={() => {
+          stick.current = true;
+          setReplyTo(null);
+          // Leave a search-jump window so the new message shows on the live page.
+          if (focusId) void navigate(`/chat/${channelId}`, { replace: true });
+        }} />
       ) : null}
     </div>
   );

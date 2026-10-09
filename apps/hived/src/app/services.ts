@@ -160,7 +160,10 @@ export function createServices(deps: ServiceDeps): Services & { start(): Promise
     },
     log,
     ...(deps.limits ? { limits: deps.limits } : {}),
-    onRunSettled: (runId) => leases.releaseForRun(runId),
+    onRunSettled: (runId) => {
+      leases.releaseForRun(runId);
+      chat.forgetRun(runId);
+    },
   });
 
   const services = { db, bus, auth, endpoints, agents, chat, runs, registry, manager, workstations, repos, leases, heavy, relay, host };

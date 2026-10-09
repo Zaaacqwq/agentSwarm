@@ -22,6 +22,14 @@ export class ChannelStore {
     return this.db.select().from(schema.channels).where(eq(schema.channels.id, channelId)).get() ?? null;
   }
 
+  findByKey(dmKey: string): ChannelRow | null {
+    return this.db.select().from(schema.channels).where(eq(schema.channels.dmKey, dmKey)).get() ?? null;
+  }
+
+  remove(channelId: string): void {
+    this.db.delete(schema.channels).where(eq(schema.channels.id, channelId)).run();
+  }
+
   members(channelId: string): Actor[] {
     return this.db.select({ kind: schema.channelMembers.memberKind, id: schema.channelMembers.memberId })
       .from(schema.channelMembers).where(eq(schema.channelMembers.channelId, channelId)).all();
