@@ -46,6 +46,15 @@ export class RunStore {
     return row ? toRun(row) : null;
   }
 
+  /** Whether a queued or running run was woken by a message in this channel. */
+  hasPendingWorkIn(channelId: string): boolean {
+    const active = this.db.select().from(schema.runs).where(inArray(schema.runs.status, ["queued", "running"])).all();
+    const ids = active.flatMap((r) => r.triggerMessageIds);
+    if (ids.length === 0) return false;
+    return !!this.db.select({ id: schema.messages.id }).from(schema.messages)
+      .where(and(inArray(schema.messages.id, ids), eq(schema.messages.channelId, channelId))).limit(1).get();
+  }
+
   listQueued(): Run[] {
     return this.db.select().from(schema.runs).where(eq(schema.runs.status, "queued")).orderBy(asc(schema.runs.createdAt)).all().map(toRun);
   }
