@@ -14,8 +14,10 @@ APP="${HOME}/Applications/Hive Desktop.app"
 BIN="${APP}/Contents/MacOS/hive-desktop"
 LABEL="dev.hive.desktop"
 PLIST="${HOME}/Library/LaunchAgents/${LABEL}.plist"
-DATA="${HIVE_DATA_DIR:-/Volumes/HiveWS/hived}"
-SOCKET="${DATA}/desktop.sock"
+# In your own Library (not the external HiveWS volume, which would need another macOS permission).
+# Workstation users cannot reach your home directory.
+SOCKET_DIR="${HOME}/Library/Application Support/Hive"
+SOCKET="${SOCKET_DIR}/desktop.sock"
 LOG="${HOME}/Library/Logs/hive-desktop.log"
 
 say() { print -r -- "== $*"; }
@@ -49,7 +51,8 @@ else
   rebuilt=0
 fi
 
-mkdir -p "${HOME}/Library/LaunchAgents" "${HOME}/Library/Logs"
+mkdir -p "${HOME}/Library/LaunchAgents" "${HOME}/Library/Logs" "$SOCKET_DIR"
+chmod 0700 "$SOCKET_DIR"
 cat > "$PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -68,18 +71,29 @@ cat > "$PLIST" <<PLIST
 PLIST
 
 launchctl bootout "gui/${UID}/${LABEL}" 2>/dev/null || true
-launchctl bootstrap "gui/${UID}" "$PLIST"
-for _ in {1..40}; do [[ -S "$SOCKET" ]] && break; sleep 0.25; done
-[[ -S "$SOCKET" ]] || die "Hive Desktop did not open ${SOCKET}; see ${LOG}"
-
-status="$(print -r -- '{"cmd":"status"}' | nc -U "$SOCKET")"
-if [[ "$status" != *'"screenRecording":true'* || "$status" != *'"accessibility":true'* ]]; then
+# bootout returns before the old job is gone; bootstrap fails until it is.
+for _ in {1..40}; do launchctl print "gui/${UID}/${LABEL}" >/dev/null 2>&1 || break; sleep 0.25; done
+loaded=0
+for _ in {1..5}; do
+  if launchctl bootstrap "gui/${UID}" "$PLIST" 2>/dev/null; then loaded=1; break; fi
+  sleep 1
+done
+(( loaded )) || die "launchctl could not load ${PLIST}"
+# Wait until the new process answers (an old socket file may still be there for a moment).
+helper_status=""
+for _ in {1..40}; do
+  helper_status="$(print -r -- '{"cmd":"status"}' | nc -U "$SOCKET" 2>/dev/null || true)"
+  [[ -n "$helper_status" ]] && break
+  sleep 0.25
+done
+[[ -n "$helper_status" ]] || die "Hive Desktop did not answer on ${SOCKET}; see ${LOG}"
+if [[ "$helper_status" != *'"screenRecording":true'* || "$helper_status" != *'"accessibility":true'* ]]; then
   # Ask from inside the helper so macOS shows "Hive Desktop" in its prompts.
   print -r -- '{"cmd":"request_access"}' | nc -U "$SOCKET" >/dev/null
   say "Grant Hive Desktop both permissions in System Settings → Privacy & Security:"
   say "  • Screen & System Audio Recording   • Accessibility"
   say "Then rerun this script (or: launchctl kickstart -k gui/${UID}/${LABEL})."
-  (( rebuilt )) && say "(This build is new, so earlier grants for Hive Desktop no longer apply; remove the old entries first.)"
+  if (( rebuilt )); then say "(This build is new, so earlier grants for Hive Desktop no longer apply; remove the old entries first.)"; fi
 else
   say "Hive Desktop is running with Screen Recording and Accessibility"
 fi

@@ -1,8 +1,8 @@
 import AppKit
 
 // hive-desktop: lets hived drive this Mac's GUI session during approved control sessions.
-//   hive-desktop --socket /Volumes/HiveWS/hived/desktop.sock
-var socketPath = "/Volumes/HiveWS/hived/desktop.sock"
+//   hive-desktop --socket "~/Library/Application Support/Hive/desktop.sock"
+var socketPath = NSHomeDirectory() + "/Library/Application Support/Hive/desktop.sock"
 var args = CommandLine.arguments.dropFirst().makeIterator()
 while let arg = args.next() {
     if arg == "--socket", let value = args.next() { socketPath = value }

@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import { chmodSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig } from "./config.ts";
@@ -34,8 +35,8 @@ async function main(): Promise<void> {
     db: database.db, secrets, runtime, log, backend,
     limits: { maxConcurrentRuns: config.maxConcurrentRuns }, heavySlots: config.heavySlots,
     filesDir: join(config.dataDir, "files"), prPollMs: 120_000,
-    // Hive Desktop (scripts/install-desktop-helper.sh) listens here, mode 0600.
-    desktopHelper: new SocketHelper(join(config.dataDir, "desktop.sock")),
+    // Hive Desktop (scripts/install-desktop-helper.sh) listens here, mode 0600, in the owner's home.
+    desktopHelper: new SocketHelper(process.env.HIVE_DESKTOP_SOCKET ?? join(homedir(), "Library/Application Support/Hive/desktop.sock")),
   });
   await services.start();
   services.host.start();
