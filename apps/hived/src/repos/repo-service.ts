@@ -133,6 +133,40 @@ export class RepoService {
     return { worktree: toWorktree(row), resumed: cloned.resumed, created: true };
   }
 
+  /**
+   * Opens the worktree for a task branch (hive/t<n>/<slug>) on the agent's workstation. The branch
+   * belongs to the task, so a new assignee resumes it after a handoff; on the same workstation the
+   * existing clone simply changes hands.
+   */
+  async checkoutTask(input: { orgId: string; agentId: string; workstation: { id: string; osUser: string }; repoId: string; task: { id: string; number: number; slug: string } }, now = Date.now()) {
+    const repo = this.get(input.orgId, input.repoId);
+    const scope = `worktrees/${repo.name}/t${input.task.number}-${input.task.slug}`;
+    const branch = `hive/t${input.task.number}/${input.task.slug}`;
+    const existing = this.deps.db.select().from(schema.worktrees)
+      .where(and(eq(schema.worktrees.workstationId, input.workstation.id), eq(schema.worktrees.scope, scope), isNull(schema.worktrees.removedAt))).get();
+    if (existing) {
+      const row = this.deps.db.update(schema.worktrees).set({ agentId: input.agentId, taskId: input.task.id, lastUsedAt: now }).where(eq(schema.worktrees.id, existing.id)).returning().get()!;
+      this.deps.onWorktree(toWorktree(row));
+      return { worktree: toWorktree(row), branch, created: false, resumed: true };
+    }
+    await this.refresh(repo);
+    const cloned = await this.deps.backend.call<{ head: string; resumed: boolean }>(input.workstation.osUser, {
+      op: "git.clone", scope, mirror: repo.mirrorName, branch, base: repo.defaultBranch,
+    });
+    const row = this.deps.db.insert(schema.worktrees).values({
+      id: newId("wt"), workstationId: input.workstation.id, repositoryId: repo.id, agentId: input.agentId, scope, branch, taskId: input.task.id, createdAt: now, lastUsedAt: now,
+    }).returning().get();
+    this.deps.onWorktree(toWorktree(row));
+    return { worktree: toWorktree(row), branch, created: true, resumed: cloned.resumed };
+  }
+
+  /** Every live worktree of a task, on any workstation (for cleanup when it is done). */
+  taskWorktrees(taskId: string): { id: string; osUser: string; agentId: string; scope: string }[] {
+    return this.deps.db.select({ id: schema.worktrees.id, osUser: schema.workstations.osUser, agentId: schema.worktrees.agentId, scope: schema.worktrees.scope })
+      .from(schema.worktrees).innerJoin(schema.workstations, eq(schema.workstations.id, schema.worktrees.workstationId))
+      .where(and(eq(schema.worktrees.taskId, taskId), isNull(schema.worktrees.removedAt))).all();
+  }
+
   touch(worktreeId: string, now = Date.now()): void {
     this.deps.db.update(schema.worktrees).set({ lastUsedAt: now }).where(eq(schema.worktrees.id, worktreeId)).run();
   }

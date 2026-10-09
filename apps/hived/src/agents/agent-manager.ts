@@ -42,12 +42,14 @@ export interface AgentManagerDeps {
     authorName(kind: Message["authorKind"], id: string): string;
     postSystemMessage(orgId: string, channelId: string, body: string, runId: string | null): Message;
     /** Kind and display title of a channel, and whether the agent is still a member. */
-    describeChannel(channelId: string, agentId: string): { kind: "dm" | "group" | "agent_dm"; title: string; member: boolean } | null;
+    describeChannel(channelId: string, agentId: string): { kind: "dm" | "group" | "agent_dm" | "task"; title: string; member: boolean } | null;
   };
   readonly log: (level: "info" | "warn" | "error", msg: string, extra?: Record<string, unknown>) => void;
   readonly limits?: Partial<ManagerLimits>;
   /** Called once per run after it settles, e.g. to release its leases. */
   readonly onRunSettled?: (runId: string) => void;
+  /** Each metered model call, with the channels the run was woken from (tasks charge their spend). */
+  readonly onUsage?: (channelIds: readonly string[], agentId: string, costUsd: number) => void;
 }
 
 type StopReason = "stopped" | "timeout" | "tool_limit" | "deleted" | "shutdown";
@@ -288,6 +290,7 @@ export class AgentManager {
           cacheReadTokens: event.cacheReadTokens, cacheWriteTokens: event.cacheWriteTokens, costUsd: event.costUsd,
         });
         this.deps.bus.publish(orgId, { type: "run.updated", run: updated });
+        this.deps.onUsage?.(channels, run.agentId, event.costUsd);
         return;
       }
       if (event.kind === "tool_call" && ++toolCalls > this.limits.maxToolCallsPerRun) this.abort(run.agentId, "tool_limit");
@@ -348,16 +351,17 @@ export class AgentManager {
 
   /** Server-written source headers; message text cannot forge them. */
   private formatPrompt(messages: readonly Message[], agentId: string): string {
-    const kinds = { dm: "private chat with your owner", group: "group", agent_dm: "private chat with an agent" } as const;
+    const kinds = { dm: "private chat with your owner", group: "group", agent_dm: "private chat with an agent", task: "task channel" } as const;
     return messages
       .map((m) => {
         const ch = this.deps.chat.describeChannel(m.channelId, agentId);
-        const where = ch ? (ch.kind === "group" ? `group "${ch.title}"` : kinds[ch.kind]) : "channel";
+        const where = ch ? (ch.kind === "group" || ch.kind === "task" ? `${kinds[ch.kind]} "${ch.title}"` : kinds[ch.kind]) : "channel";
         const who = m.authorName || this.deps.chat.authorName(m.authorKind, m.authorId);
         const role = m.authorKind === "user" ? "person" : m.authorKind;
         const reply = m.replyToId ? ` · reply to #${m.replyToId}` : "";
         const mentioned = m.mentions.includes(agentId) ? " · you were mentioned" : "";
-        return `[channel_id=${m.channelId} · ${where} · message #${m.id}${reply}${mentioned}]\n${who} (${role}): ${m.body}`;
+        const files = m.attachments.length ? `\n[attachments: ${m.attachments.map((a) => `${a.filename} (${a.id})`).join(", ")}]` : "";
+        return `[channel_id=${m.channelId} · ${where} · message #${m.id}${reply}${mentioned}]\n${who} (${role}): ${m.body}${files}`;
       })
       .join("\n\n");
   }

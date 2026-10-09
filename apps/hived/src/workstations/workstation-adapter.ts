@@ -21,6 +21,8 @@ export interface AdapterDeps {
   /** How long a write waits for another agent's lease before giving up. */
   readonly leaseWaitMs?: number;
   readonly onWaiting?: (agentId: string, reason: string | null) => void;
+  /** Posts an agent-produced file into a channel. */
+  readonly attach?: (ctx: AgentContext, channelId: string, filename: string, bytes: Uint8Array, caption: string) => { id: number };
 }
 
 type WorktreeRow = NonNullable<ReturnType<RepoService["activeWorktree"]>>;
@@ -118,6 +120,13 @@ export class WorkstationAdapter implements WorkstationPort {
     const ws = this.workstation(ctx);
     const wt = this.worktree(ctx, ws);
     return this.call(() => this.deps.relay.createPullRequest({ agentId: ctx.agentId, worktreeId: wt.id, title, body }));
+  }
+
+  async attachFile(ctx: AgentContext, channelId: string, path: string, caption: string) {
+    if (!this.deps.attach) throw new Error("Attachments are not available");
+    const res = await this.op<{ content: string; totalLines: number; truncated: boolean }>(ctx, (scope) => ({ op: "fs.read", scope, path, offset: 1, limit: 1_000_000 }));
+    const { id } = this.deps.attach(ctx, channelId, path.split("/").pop() ?? "file.txt", new TextEncoder().encode(res.content), caption);
+    return `Posted ${path} as message ${id}.`;
   }
 
   // -------------------------------------------------------------------------

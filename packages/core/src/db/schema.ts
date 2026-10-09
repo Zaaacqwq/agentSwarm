@@ -97,13 +97,13 @@ export const channels = sqliteTable(
     orgId: text("org_id").notNull().references(() => organizations.id),
     ownerUserId: text("owner_user_id").notNull().references(() => users.id),
     // dm: human <-> agent; group: human-managed room; agent_dm: two agents, humans read only.
-    kind: text("kind", { enum: ["dm", "group", "agent_dm"] }).notNull(),
+    kind: text("kind", { enum: ["dm", "group", "agent_dm", "task"] }).notNull(),
     title: text("title"),
     // dm: "<userId>:<agentId>"; agent_dm: the two agent ids sorted and joined. Null for groups.
     dmKey: text("dm_key"),
     createdAt: createdAt(),
   },
-  (t) => [uniqueIndex("channels_dm_key_uq").on(t.dmKey), check("channels_kind_ck", sql`${t.kind} in ('dm','group','agent_dm')`)],
+  (t) => [uniqueIndex("channels_dm_key_uq").on(t.dmKey), check("channels_kind_ck", sql`${t.kind} in ('dm','group','agent_dm','task')`)],
 );
 
 export const channelMembers = sqliteTable(
@@ -157,6 +157,8 @@ export const runs = sqliteTable(
     error: text("error"),
     // Messages this run was woken for; the run delivers all of them at one turn boundary.
     triggerMessageIds: text("trigger_message_ids", { mode: "json" }).$type<number[]>().notNull(),
+    // Set when the run was woken from a task channel; its cost is charged to that task.
+    taskId: text("task_id"),
     inputTokens: integer("input_tokens").notNull().default(0),
     outputTokens: integer("output_tokens").notNull().default(0),
     cacheReadTokens: integer("cache_read_tokens").notNull().default(0),
@@ -293,6 +295,7 @@ export const worktrees = sqliteTable(
     // Relative to the workstation root, e.g. worktrees/<repo>/<agent>-<slug>
     scope: text("scope").notNull(),
     branch: text("branch").notNull(),
+    taskId: text("task_id"),
     createdAt: createdAt(),
     lastUsedAt: integer("last_used_at").notNull(),
     removedAt: integer("removed_at"),
@@ -368,4 +371,83 @@ export const reactions = sqliteTable(
     createdAt: createdAt(),
   },
   (t) => [primaryKey({ columns: [t.messageId, t.actorKind, t.actorId, t.emoji] }), index("reactions_message_idx").on(t.messageId)],
+);
+
+// --- P4: tasks and channel files ---------------------------------------------------
+
+export const TASK_STATUSES = ["backlog", "todo", "in_progress", "in_review", "done", "blocked"] as const;
+
+export const tasks = sqliteTable(
+  "tasks",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull().references(() => organizations.id),
+    number: integer("number").notNull(),
+    title: text("title").notNull(),
+    description: text("description").notNull(),
+    acceptance: text("acceptance", { mode: "json" }).$type<string[]>().notNull(),
+    status: text("status", { enum: TASK_STATUSES }).notNull(),
+    assigneeAgentId: text("assignee_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    reviewerAgentId: text("reviewer_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    createdByKind: text("created_by_kind", { enum: ["user", "agent"] }).notNull(),
+    createdById: text("created_by_id").notNull(),
+    ownerUserId: text("owner_user_id").notNull().references(() => users.id),
+    repositoryId: text("repository_id").references(() => repositories.id, { onDelete: "set null" }),
+    branch: text("branch"),
+    channelId: text("channel_id").references(() => channels.id, { onDelete: "set null" }),
+    prUrl: text("pr_url"),
+    prState: text("pr_state", { enum: ["open", "merged", "closed", "checks_failed"] }),
+    budgetUsd: real("budget_usd"),
+    spentUsd: real("spent_usd").notNull().default(0),
+    approvedAt: integer("approved_at"),
+    createdAt: createdAt(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (t) => [
+    uniqueIndex("tasks_org_number_uq").on(t.orgId, t.number),
+    index("tasks_status_idx").on(t.orgId, t.status),
+    check("tasks_status_ck", sql`${t.status} in ('backlog','todo','in_progress','in_review','done','blocked')`),
+  ],
+);
+
+export const taskDependencies = sqliteTable(
+  "task_dependencies",
+  {
+    taskId: text("task_id").notNull().references(() => tasks.id, { onDelete: "cascade" }),
+    dependsOnTaskId: text("depends_on_task_id").notNull().references(() => tasks.id, { onDelete: "cascade" }),
+  },
+  (t) => [primaryKey({ columns: [t.taskId, t.dependsOnTaskId] })],
+);
+
+/** Append-only task history: status changes, assignments, handoffs, reviews, PR updates. */
+export const taskEvents = sqliteTable(
+  "task_events",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    taskId: text("task_id").notNull().references(() => tasks.id, { onDelete: "cascade" }),
+    actorKind: text("actor_kind", { enum: ["user", "agent", "system"] }).notNull(),
+    actorId: text("actor_id").notNull(),
+    kind: text("kind").notNull(),
+    data: text("data", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [index("task_events_task_idx").on(t.taskId, t.id)],
+);
+
+export const attachments = sqliteTable(
+  "attachments",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull().references(() => organizations.id),
+    channelId: text("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
+    messageId: integer("message_id").references(() => messages.id, { onDelete: "cascade" }),
+    uploaderKind: text("uploader_kind", { enum: ["user", "agent"] }).notNull(),
+    uploaderId: text("uploader_id").notNull(),
+    filename: text("filename").notNull(),
+    mime: text("mime").notNull(),
+    size: integer("size").notNull(),
+    sha256: text("sha256").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [index("attachments_channel_idx").on(t.channelId), index("attachments_message_idx").on(t.messageId)],
 );

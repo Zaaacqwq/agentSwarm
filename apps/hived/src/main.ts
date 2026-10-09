@@ -32,6 +32,7 @@ async function main(): Promise<void> {
   const services = createServices({
     db: database.db, secrets, runtime, log, backend,
     limits: { maxConcurrentRuns: config.maxConcurrentRuns }, heavySlots: config.heavySlots,
+    filesDir: join(config.dataDir, "files"), prPollMs: 120_000,
   });
   await services.start();
   services.host.start();

@@ -9,6 +9,7 @@ import { badRequest, conflict, notFound } from "../http/errors.ts";
 import { ChannelStore, type ChannelRow } from "./channels.ts";
 import { ChainStore } from "./chains.ts";
 import { parseMentions } from "./mentions.ts";
+import type { FileStore } from "../files/file-store.ts";
 
 type MessageRow = typeof schema.messages.$inferSelect;
 
@@ -33,6 +34,7 @@ export interface ChatServiceDeps {
   /** Whether an agent can accept another agent-originated delivery right now (queue caps). */
   readonly canAcceptFromAgent: (agentId: string) => boolean;
   readonly queueOf?: (agentId: string) => QueueInfo | undefined;
+  readonly files?: FileStore;
 }
 
 /** Messages, wake rules, publication policy, reactions and search. Implements the agent-facing ChatPort. */
@@ -97,16 +99,20 @@ export class ChatService implements ChatPort {
     return { messages: rows.slice(-limit).map((r) => this.toMessage(r)), hasMore: rows.length > limit };
   }
 
-  postUserMessage(user: AuthUser, channelId: string, body: string, replyToId?: number, now = Date.now()): Message {
+  postUserMessage(user: AuthUser, channelId: string, body: string, replyToId?: number, attachmentIds: readonly string[] = [], now = Date.now()): Message {
     const ch = this.channels.assertUserCanWrite(user, channelId);
     if (replyToId !== undefined) this.assertReplyTarget(channelId, replyToId);
     const mentions = this.mentionsIn(ch, body);
-    const message = this.deps.db.transaction(() => {
-      const row = this.insert({ channelId, authorKind: "user", authorId: user.id, authorName: user.username, body, runId: null, replyToId: replyToId ?? null, chainId: null, mentions: mentions.ids, createdAt: now });
-      const chain = this.chains.start(user.orgId, "user", row.id, now);
-      this.deps.db.update(schema.messages).set({ chainId: chain.id }).where(eq(schema.messages.id, row.id)).run();
-      return { ...row, chainId: chain.id };
-    });
+    const row = this.insert({ channelId, authorKind: "user", authorId: user.id, authorName: user.username, body, runId: null, replyToId: replyToId ?? null, chainId: null, mentions: mentions.ids, createdAt: now });
+    try {
+      this.deps.files?.bind(attachmentIds, row.id, channelId, { kind: "user", id: user.id });
+    } catch (error) {
+      this.deps.db.delete(schema.messages).where(eq(schema.messages.id, row.id)).run();
+      throw error;
+    }
+    const chain = this.chains.start(user.orgId, "user", row.id, now);
+    this.deps.db.update(schema.messages).set({ chainId: chain.id }).where(eq(schema.messages.id, row.id)).run();
+    const message = { ...row, chainId: chain.id };
     const view = this.toMessage(message);
     this.deps.bus.publish(user.orgId, { type: "message.created", message: view }, { channelId });
     for (const agentId of this.recipients(ch, { kind: "user", id: user.id }, mentions)) {
@@ -119,6 +125,22 @@ export class ChatService implements ChatPort {
     const row = this.insert({ channelId, authorKind: "system", authorId: "system", authorName: "system", body, runId, replyToId: null, chainId: null, mentions: [], createdAt: now });
     const view = this.toMessage(row);
     this.deps.bus.publish(orgId, { type: "message.created", message: view }, { channelId });
+    return view;
+  }
+
+  /**
+   * A system notice that deliberately wakes specific agents (task assignment, review requests,
+   * handoffs). It starts its own chain so the woken agents can publish.
+   */
+  postNotice(orgId: string, channelId: string, body: string, wake: readonly string[], origin: "user" | "agent", now = Date.now()): Message {
+    const row = this.insert({ channelId, authorKind: "system", authorId: "system", authorName: "system", body, runId: null, replyToId: null, chainId: null, mentions: [...wake], createdAt: now });
+    const chain = this.chains.start(orgId, origin, row.id, now);
+    this.deps.db.update(schema.messages).set({ chainId: chain.id }).where(eq(schema.messages.id, row.id)).run();
+    const view = this.toMessage({ ...row, chainId: chain.id });
+    this.deps.bus.publish(orgId, { type: "message.created", message: view }, { channelId });
+    for (const agentId of wake) {
+      if (this.channels.isAgentMember(channelId, agentId)) this.deps.deliver({ orgId, agentId, messageId: row.id, fromAgent: origin === "agent" });
+    }
     return view;
   }
 
@@ -183,7 +205,7 @@ export class ChatService implements ChatPort {
     }));
   }
 
-  send(ctx: AgentContext, input: { channelId: string; body: string; replyToId?: number }, now = Date.now()): { id: number } {
+  send(ctx: AgentContext, input: { channelId: string; body: string; replyToId?: number; attachmentIds?: readonly string[] }, now = Date.now()): { id: number } {
     const ch = this.channels.get(input.channelId);
     if (!ch || !this.channels.isAgentMember(ch.id, ctx.agentId)) throw new Error(`You are not a member of channel ${input.channelId}.`);
     if (ch.kind === "dm" && !(ctx.trigger?.humanChannelIds.includes(ch.id) ?? false)) {
@@ -210,6 +232,7 @@ export class ChatService implements ChatPort {
       channelId: ch.id, authorKind: "agent", authorId: ctx.agentId, authorName: this.agentName(ctx.agentId), body: input.body,
       runId: ctx.runId, replyToId: input.replyToId ?? null, chainId, mentions: mentions.ids, createdAt: now,
     });
+    if (input.attachmentIds?.length) this.deps.files?.bind(input.attachmentIds, row.id, ch.id, { kind: "agent", id: ctx.agentId });
     this.deps.bus.publish(ch.orgId, { type: "message.created", message: this.toMessage(row) }, { channelId: ch.id });
     for (const agentId of recipients) this.deps.deliver({ orgId: ch.orgId, agentId, messageId: row.id, fromAgent: true });
     return { id: row.id };
@@ -242,6 +265,21 @@ export class ChatService implements ChatPort {
     if (!row || !this.channels.isAgentMember(row.channelId, ctx.agentId)) throw new Error(`Message ${messageId} is not in a channel you belong to.`);
     const ch = this.channels.get(row.channelId)!;
     this.react({ kind: "agent", id: ctx.agentId, orgId: ch.orgId }, messageId, emoji, true);
+  }
+
+  readFile(ctx: AgentContext, fileId: string): { filename: string; text: string; truncated: boolean } {
+    const file = this.deps.files?.get(fileId);
+    if (!file || !this.channels.isAgentMember(file.channelId, ctx.agentId)) throw new Error(`No file ${fileId} in your channels.`);
+    return this.deps.files!.readText(fileId);
+  }
+
+  /** Stores a file an agent produced and posts it in a channel (subject to the normal send policy). */
+  attachAsAgent(ctx: AgentContext, channelId: string, filename: string, bytes: Uint8Array, caption: string): { id: number } {
+    if (!this.deps.files) throw new Error("Files are not available");
+    const ch = this.channels.get(channelId);
+    if (!ch || !this.channels.isAgentMember(channelId, ctx.agentId)) throw new Error(`You are not a member of channel ${channelId}.`);
+    const file = this.deps.files.save({ kind: "agent", id: ctx.agentId, orgId: ch.orgId }, channelId, filename, bytes);
+    return this.send(ctx, { channelId, body: caption || `📎 ${file.filename}`, attachmentIds: [file.id] });
   }
 
   directory(ctx: AgentContext): ColleagueView[] {
@@ -302,11 +340,12 @@ export class ChatService implements ChatPort {
     const agents = this.channels.agentMembers(ch.id).filter((id) => !(author.kind === "agent" && id === author.id));
     if (ch.kind === "dm") return author.kind === "user" ? agents : [];
     if (ch.kind === "agent_dm") return agents;
+    // Groups and task channels: only mentioned agents wake.
     return mentions.all ? agents : agents.filter((id) => mentions.ids.includes(id));
   }
 
   private mentionsIn(ch: ChannelRow, body: string): { ids: string[]; all: boolean } {
-    if (ch.kind !== "group") return { ids: [], all: false };
+    if (ch.kind !== "group" && ch.kind !== "task") return { ids: [], all: false };
     const candidates = this.channels.agentMembers(ch.id).map((id) => ({ id, name: this.agentName(id) }));
     return parseMentions(body, candidates);
   }
@@ -369,8 +408,13 @@ export class ChatService implements ChatPort {
     return {
       id: row.id, channelId: row.channelId, authorKind: row.authorKind, authorId: row.authorId, authorName: row.authorName,
       body: row.body, runId: row.runId, replyToId: row.replyToId, chainId: row.chainId, mentions: row.mentions,
-      reactions: this.reactionsOf([row.id]).get(row.id) ?? [], createdAt: row.createdAt,
+      reactions: this.reactionsOf([row.id]).get(row.id) ?? [], attachments: this.attachmentsOf(row.id), createdAt: row.createdAt,
     };
+  }
+
+  private attachmentsOf(messageId: number): Message["attachments"] {
+    return this.deps.db.select({ id: schema.attachments.id, filename: schema.attachments.filename, mime: schema.attachments.mime, size: schema.attachments.size })
+      .from(schema.attachments).where(eq(schema.attachments.messageId, messageId)).all();
   }
 
   private toView(row: MessageRow): ChannelMessageView {
@@ -378,7 +422,8 @@ export class ChatService implements ChatPort {
     const body = row.body.length <= BODY_PREVIEW ? row.body : `${row.body.slice(0, BODY_PREVIEW)}… [${row.body.length - BODY_PREVIEW} more chars]`;
     return {
       id: row.id, author: row.authorName || this.authorName(row.authorKind, row.authorId), authorKind: row.authorKind, body,
-      replyToId: row.replyToId, reactions: reactions.map((r) => `${r.emoji}×${r.actors.length}`), createdAt: row.createdAt,
+      replyToId: row.replyToId, reactions: reactions.map((r) => `${r.emoji}×${r.actors.length}`),
+      attachments: this.attachmentsOf(row.id).map((a) => `${a.filename} (${a.id}, ${Math.max(1, Math.round(a.size / 1024))} KB)`), createdAt: row.createdAt,
     };
   }
 
@@ -387,7 +432,7 @@ export class ChatService implements ChatPort {
     const members = this.channels.members(row.id);
     const agentId = row.kind === "dm" ? (members.find((m) => m.kind === "agent")?.id ?? null) : null;
     return {
-      id: row.id, kind: row.kind, title: row.kind === "group" ? row.title : this.channels.title(row), members, agentId,
+      id: row.id, kind: row.kind, title: row.kind === "group" || row.kind === "task" ? row.title : this.channels.title(row), members, agentId,
       lastMessage: last ? this.toMessage(last) : null,
       agentState: agentId ? this.deps.agentStateOf(agentId) : "idle",
       createdAt: row.createdAt,
