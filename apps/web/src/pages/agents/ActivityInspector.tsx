@@ -2,7 +2,8 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronRight, GitPullRequest } from "lucide-react";
 import type { ActivityEvent, Agent, Run } from "@hive/core";
-import { api, qk } from "../../app/api.ts";
+import { Link } from "react-router";
+import { api, qk, type RunSource } from "../../app/api.ts";
 import { clockTime, tokens, usd } from "../../lib/format.ts";
 
 const STATUS_STYLE: Record<Run["status"], string> = {
@@ -42,7 +43,7 @@ export function ActivityInspector({ agent }: { agent: Agent }) {
       </header>
       <ol className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
         {(runs.data?.runs ?? []).map((run, i) => (
-          <RunCard key={run.id} run={run} events={byRun.get(run.id) ?? []} defaultOpen={i === 0} />
+          <RunCard key={run.id} run={run} events={byRun.get(run.id) ?? []} sources={runs.data?.sources[run.id] ?? []} defaultOpen={i === 0} />
         ))}
         {runs.isSuccess && runs.data.runs.length === 0 ? <li className="px-3 py-8 text-center text-sm text-muted">No runs yet. Message this agent to start one.</li> : null}
       </ol>
@@ -59,7 +60,7 @@ function Stat({ label, value, accent = false }: { label: string; value: string; 
   );
 }
 
-function RunCard({ run, events, defaultOpen }: { run: Run; events: ActivityEvent[]; defaultOpen: boolean }) {
+function RunCard({ run, events, sources, defaultOpen }: { run: Run; events: ActivityEvent[]; sources: RunSource[]; defaultOpen: boolean }) {
   const [open, setOpen] = useState(defaultOpen);
   const duration = run.startedAt && run.finishedAt ? `${((run.finishedAt - run.startedAt) / 1000).toFixed(1)}s` : run.status === "running" ? "running" : "—";
   return (
@@ -72,6 +73,16 @@ function RunCard({ run, events, defaultOpen }: { run: Run; events: ActivityEvent
       </button>
       {open ? (
         <ol className="space-y-1.5 border-t border-line px-3 py-3">
+          {sources.length ? (
+            <li className="flex flex-wrap gap-1 text-[0.7rem] text-faint">
+              Woken by
+              {sources.map((s) => (
+                <Link key={s.messageId} to={`/chat/${s.channelId}?m=${s.messageId}`} className="rounded-pill border border-line px-1.5 text-muted hover:border-honey/50 hover:text-ink">
+                  {s.authorName}{s.authorKind === "agent" ? " (agent)" : ""} · {s.channelTitle}
+                </Link>
+              ))}
+            </li>
+          ) : null}
           {run.error ? <li className="text-xs text-err">{run.error}</li> : null}
           {events.map((e) => <EventRow key={e.id} event={e} />)}
           {events.length === 0 && !run.error ? <li className="text-xs text-faint">No activity recorded.</li> : null}

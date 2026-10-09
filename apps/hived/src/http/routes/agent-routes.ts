@@ -4,7 +4,8 @@ import { ActivityEvent, Agent, CreateAgent, IdParams, Ok, Run, UpdateAgent, Usag
 import { requireUser, type RouteDeps } from "../context.ts";
 
 const RunsQuery = Type.Object({ limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) });
-const RunsWithActivity = Type.Object({ runs: Type.Array(Run), activity: Type.Array(ActivityEvent) });
+const RunSource = Type.Object({ messageId: Type.Number(), authorName: Type.String(), authorKind: Type.String(), channelId: Type.String(), channelTitle: Type.String() });
+const RunsWithActivity = Type.Object({ runs: Type.Array(Run), activity: Type.Array(ActivityEvent), sources: Type.Record(Type.String(), Type.Array(RunSource)) });
 
 export const agentRoutes = (deps: RouteDeps): FastifyPluginAsyncTypebox => async (app) => {
   const { agents, manager, runs, bus } = deps.services;
@@ -48,7 +49,14 @@ export const agentRoutes = (deps: RouteDeps): FastifyPluginAsyncTypebox => async
     const user = requireUser(request);
     agents.getRow(user.orgId, request.params.id);
     const list = runs.listRuns(user.orgId, request.params.id, request.query.limit ?? 20);
-    return { runs: list, activity: runs.listActivity(list.map((r) => r.id)) };
+    const { chat } = deps.services;
+    const messages = new Map(chat.getMessages(list.flatMap((r) => r.triggerMessageIds)).map((m) => [m.id, m]));
+    const sources = Object.fromEntries(list.map((r) => [r.id, r.triggerMessageIds.flatMap((id) => {
+      const m = messages.get(id);
+      const ch = m ? chat.channelRow(m.channelId) : null;
+      return m && ch ? [{ messageId: m.id, authorName: m.authorName, authorKind: m.authorKind, channelId: ch.id, channelTitle: chat.channels.title(ch) }] : [];
+    })]));
+    return { runs: list, activity: runs.listActivity(list.map((r) => r.id)), sources };
   });
 
   app.get("/:id/usage", { schema: { params: IdParams, response: { 200: UsageSummary } } }, async (request) => {

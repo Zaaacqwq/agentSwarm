@@ -32,7 +32,9 @@ export function preview(text: string, max = 80): string {
     .replace(/```[\s\S]*?```/g, " [code] ")
     .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
     .replace(/^\s{0,3}(#{1,6}|>|[-*+]|\d+\.)\s+/gm, "")
-    .replace(/[*_~`]+/g, "");
+    .replace(/[*~`]+/g, "")
+    // Underscores only when they wrap words as emphasis, so send_message stays intact.
+    .replace(/(^|[\s(])_+([^_\s][^_]*?)_+(?=[\s).,!?]|$)/g, "$1$2");
   const flat = plain.replace(/\s+/g, " ").trim();
   return flat.length <= max ? flat : `${flat.slice(0, max - 1)}…`;
 }

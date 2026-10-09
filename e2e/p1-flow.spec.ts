@@ -1,19 +1,18 @@
 import { expect, test, type Page } from "@playwright/test";
-import { randomBytes } from "node:crypto";
+import { MODEL_URL, PASSWORD, SHOTS } from "./support.ts";
 
 // P1 acceptance through the real UI: setup, endpoint, two agents, separate DMs,
 // replies via send_message, state surviving a reload, and the activity inspector.
-const MODEL_URL = "http://127.0.0.1:4391/v1";
-const password = `e2e-${randomBytes(8).toString("hex")}`;
-const shots = ".tmp/e2e-results/screens";
+const password = PASSWORD;
+const shots = SHOTS;
 const log = (page: Page) => page.getByRole("list", { name: "Messages" });
 
 test.describe.configure({ mode: "serial" });
 
 async function createAgent(page: Page, name: string, role: string) {
   await page.goto("/agents/new");
-  await page.getByLabel("Name").fill(name);
-  await page.getByLabel("Role").fill(role);
+  await page.getByRole("textbox", { name: "Name", exact: true }).fill(name);
+  await page.getByRole("textbox", { name: "Role", exact: true }).fill(role);
   await page.getByLabel("Model id").fill("fake/echo-1");
   await page.getByRole("button", { name: "Create" }).click();
   await expect(page.getByRole("heading", { name })).toBeVisible();
@@ -22,7 +21,7 @@ async function createAgent(page: Page, name: string, role: string) {
 
 async function chatWith(page: Page, name: string, text: string) {
   await page.getByRole("link", { name: "Chat" }).first().click();
-  await page.getByRole("button", { name: "New" }).click();
+  await page.getByRole("button", { name: "DM" }).click();
   await page.getByRole("button", { name }).click();
   await page.getByLabel("Message", { exact: true }).fill(text);
   await page.keyboard.press("Enter");

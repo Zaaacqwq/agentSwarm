@@ -2,7 +2,18 @@ import type {
   ActivityEvent, Agent, Channel, CreateAgent, CreateEndpoint, Credentials, Endpoint, Message, MessagePage,
   Run, SessionInfo, ToolpackInfo, UpdateAgent, UpdateEndpoint, UsageSummary,
   CreateWorkstation, GitPush, HostStatus, Repository, Terminal, Workstation, Worktree,
+  QueueInfo, SearchHit, UpdateGroup,
 } from "@hive/core";
+
+export type QueueMap = Record<string, QueueInfo | undefined>;
+
+export interface RunSource {
+  readonly messageId: number;
+  readonly authorName: string;
+  readonly authorKind: string;
+  readonly channelId: string;
+  readonly channelTitle: string;
+}
 
 export type FileView =
   | { kind: "dir"; entries: string[]; truncated: boolean }
@@ -57,14 +68,23 @@ export const api = {
   updateAgent: (id: string, a: UpdateAgent) => request<Agent>("PATCH", `/agents/${id}`, a),
   deleteAgent: (id: string) => request<{ ok: true }>("DELETE", `/agents/${id}`),
   stopAgent: (id: string) => request<{ stopped: boolean }>("POST", `/agents/${id}/stop`),
-  agentRuns: (id: string) => request<{ runs: Run[]; activity: ActivityEvent[] }>("GET", `/agents/${id}/runs?limit=15`),
+  agentRuns: (id: string) => request<{ runs: Run[]; activity: ActivityEvent[]; sources: Record<string, RunSource[]> }>("GET", `/agents/${id}/runs?limit=15`),
   agentUsage: (id: string) => request<UsageSummary>("GET", `/agents/${id}/usage`),
 
   channels: () => request<Channel[]>("GET", "/channels"),
   openDm: (agentId: string) => request<Channel>("POST", "/channels/dm", { agentId }),
-  messages: (channelId: string, before?: number) =>
-    request<MessagePage>("GET", `/channels/${channelId}/messages${before ? `?before=${before}` : ""}`),
-  postMessage: (channelId: string, body: string) => request<Message>("POST", `/channels/${channelId}/messages`, { body }),
+  messages: (channelId: string, opts: { before?: number; around?: number } = {}) => {
+    const q = opts.before ? `?before=${opts.before}` : opts.around ? `?around=${opts.around}&limit=80` : "";
+    return request<MessagePage>("GET", `/channels/${channelId}/messages${q}`);
+  },
+  postMessage: (channelId: string, body: string, replyToId?: number) =>
+    request<Message>("POST", `/channels/${channelId}/messages`, replyToId ? { body, replyToId } : { body }),
+  createGroup: (title: string, agentIds: string[]) => request<Channel>("POST", "/channels/groups", { title, agentIds }),
+  updateGroup: (id: string, input: UpdateGroup) => request<Channel>("PATCH", `/channels/${id}`, input),
+  deleteGroup: (id: string) => request<{ ok: true }>("DELETE", `/channels/${id}`),
+  react: (messageId: number, emoji: string, add: boolean) => request<Message>(add ? "PUT" : "DELETE", `/messages/${messageId}/reactions`, { emoji }),
+  search: (q: string, channelId?: string) =>
+    request<SearchHit[]>("GET", `/search?q=${encodeURIComponent(q)}${channelId ? `&channelId=${encodeURIComponent(channelId)}` : ""}&limit=25`),
 
   workstations: () => request<Workstation[]>("GET", "/workstations"),
   createWorkstation: (w: CreateWorkstation) => request<Workstation>("POST", "/workstations", w),
@@ -101,4 +121,6 @@ export const qk = {
   pushes: (agentId: string) => ["pushes", agentId] as const,
   repositories: ["repositories"] as const,
   host: ["host"] as const,
+  queue: ["agent-queue"] as const,
+  search: (q: string) => ["search", q] as const,
 };

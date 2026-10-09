@@ -21,6 +21,7 @@ describe("format", () => {
     expect(preview("Got it. You said **alpha73**.\n\n- I run on a *fake* model")).toBe("Got it. You said alpha73. I run on a fake model");
     expect(preview("see [docs](https://x.y) and `code`")).toBe("see docs and code");
     expect(preview("```ts\nconst a = 1\n```")).toBe("[code]");
+    expect(preview("call `send_message` and _really_ mean it")).toBe("call send_message and really mean it");
     expect(preview("a".repeat(100), 10)).toBe(`${"a".repeat(9)}…`);
   });
 

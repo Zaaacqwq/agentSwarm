@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useQueryClient, type QueryClient } from "@tanstack/react-query";
 import type { Agent, Channel, MessagePage, ServerEvent, Workstation } from "@hive/core";
-import { qk } from "./api.ts";
+import { qk, type QueueMap } from "./api.ts";
 
 export type LiveStatus = "connecting" | "live" | "offline";
 
@@ -77,7 +77,27 @@ export function applyEvent(client: QueryClient, event: ServerEvent): void {
       );
       return;
     }
+    case "message.updated": {
+      const { message } = event;
+      client.setQueryData<MessagePage>(qk.messages(message.channelId), (page) =>
+        page ? { ...page, messages: page.messages.map((m) => (m.id === message.id ? message : m)) } : page,
+      );
+      return;
+    }
+    case "channel.updated":
+      client.setQueryData<Channel[]>(qk.channels, (list) => {
+        if (!list) return list;
+        return list.some((c) => c.id === event.channel.id)
+          ? list.map((c) => (c.id === event.channel.id ? { ...event.channel, lastMessage: event.channel.lastMessage ?? c.lastMessage } : c))
+          : [event.channel, ...list];
+      });
+      return;
+    case "channel.deleted":
+      client.setQueryData<Channel[]>(qk.channels, (list) => list?.filter((c) => c.id !== event.channelId));
+      client.removeQueries({ queryKey: qk.messages(event.channelId) });
+      return;
     case "agent.state":
+      client.setQueryData<QueueMap>(qk.queue, (map) => ({ ...map, [event.agentId]: event.queue }));
       client.setQueryData<Agent[]>(qk.agents, (list) => list?.map((a) => (a.id === event.agentId ? { ...a, state: event.state } : a)));
       client.setQueryData<Channel[]>(qk.channels, (list) => list?.map((c) => (c.agentId === event.agentId ? { ...c, agentState: event.state } : c)));
       return;
