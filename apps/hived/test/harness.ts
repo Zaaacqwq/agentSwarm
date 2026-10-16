@@ -56,7 +56,7 @@ function makeRemote(base: string): string {
   return remote;
 }
 
-export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: number } = {}): Promise<Harness> {
+export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: number; webDist?: string } = {}): Promise<Harness> {
   const base = realpathSync(mkdtempSync(join(tmpdir(), "hived-test-")));
   const volume = join(base, "HiveWS");
   const layout: Layout = {
@@ -101,7 +101,7 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
     ...(opts.limits ? { limits: opts.limits } : {}),
   });
   await services.pool.sync();
-  const app = await buildApp({ services, webDist: null, check: { dataDir: layout.hivedData, volume: null } });
+  const app = await buildApp({ services, webDist: opts.webDist ?? null, check: { dataDir: layout.hivedData, volume: null } });
 
   const api: Harness["api"] = async (method, url, body, cookie) => {
     const res = await app.inject({

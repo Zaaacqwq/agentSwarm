@@ -1,0 +1,66 @@
+// Checks the real workstations through the same sudo + ws-exec path hived uses. No sudo password needed.
+//   npm run check
+import { homedir } from "node:os";
+import type { ExecResult } from "@hive/ws-exec";
+import { PRODUCTION_LAYOUT } from "@hive/ws-exec";
+import { SudoBackend } from "../apps/hived/src/workstations/backend.ts";
+
+const backend = new SudoBackend();
+const results: { name: string; ok: boolean; detail: string }[] = [];
+const record = (name: string, ok: boolean, detail = "") => {
+  results.push({ name, ok, detail });
+  console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? `  (${detail})` : ""}`);
+};
+
+const users = await backend.listUsers();
+record("workstation users exist", users.length > 0, users.join(", ") || "none; run sudo zsh scripts/setup.sh");
+
+for (const user of users) {
+  try {
+    const info = await backend.call<{ user: string; root: string; sandbox: boolean }>(user, { op: "info" }, { timeoutMs: 20_000 });
+    record(`ws-exec runs as ${user}, sandboxed`, info.user === user && info.sandbox, info.root);
+  } catch (e) {
+    record(`ws-exec runs as ${user}`, false, (e as Error).message);
+  }
+}
+
+const ws = users[0];
+const other = users[1];
+if (ws) {
+  const scope = "hive-check";
+  const run = (command: string) => backend.call<ExecResult>(ws, { op: "exec", scope, command, timeoutMs: 30_000 });
+  const denied = async (name: string, command: string) => {
+    const r = await run(command);
+    record(name, r.exitCode !== 0 && /Operation not permitted|Permission denied/.test(r.output), r.output.trim().split("\n")[0]?.slice(0, 100) ?? "");
+  };
+  try {
+    await backend.call(ws, { op: "fs.write", scope, path: "note.txt", content: "hello\n" });
+    const own = await run("cat note.txt && echo ok > out.txt && cat out.txt");
+    record(`${ws} can read and write its own files`, own.exitCode === 0 && own.output.includes("ok"));
+    const id = await run("id -un; id -Gn");
+    record(`commands run as ${ws}, not in staff`, id.output.startsWith(ws) && !/\bstaff\b/.test(id.output), id.output.replace(/\n/g, " | ").trim());
+    await denied("cannot read your home", `cat ${JSON.stringify(`${homedir()}/.zshrc`)}`);
+    await denied("cannot read /Volumes/Data", "ls /Volumes/Data");
+    await denied("cannot read hived data", `ls ${PRODUCTION_LAYOUT.hivedData}`);
+    if (other) {
+      await denied(`cannot read ${other}'s workstation`, `ls ${PRODUCTION_LAYOUT.wsRoot}/${other}`);
+      await denied(`cannot read ${other}'s inbox`, `ls ${PRODUCTION_LAYOUT.inbox}/${other}.git`);
+    }
+    const env = await run("env | sort | cut -d= -f1 | tr '\\n' ' '");
+    record("no secrets in the command environment", !/TOKEN|KEY|SECRET|PASSWORD/i.test(env.output), env.output.trim().slice(0, 160));
+    const node = await run("node --version && which node");
+    record("Hive's Node runtime is on PATH", node.exitCode === 0 && node.output.includes("/usr/local/libexec/hive/node/bin/node"), node.output.replace(/\n/g, " ").trim());
+    const net = await run("curl -s -o /dev/null -w '%{http_code}' https://github.com");
+    record("network is allowed", net.output.trim() === "200", net.output.trim());
+    const escape = await backend.call(ws, { op: "fs.read", scope, path: "../../ws-2/x" }).then(() => false, () => true);
+    record("path traversal is refused", escape);
+  } catch (e) {
+    record("workstation checks", false, (e as Error).message);
+  } finally {
+    await run("cd .. && rm -rf hive-check").catch(() => undefined);
+  }
+}
+
+const failed = results.filter((r) => !r.ok).length;
+console.log(`\n${results.length - failed} passed, ${failed} failed`);
+process.exit(failed ? 1 : 0);
