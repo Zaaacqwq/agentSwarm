@@ -6,6 +6,9 @@
  *
  *   HIVE_PASSWORD=... bun evals/runner/p5-desktop.ts --url http://127.0.0.1:4319
  */
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { ROLE_TEMPLATES } from "../../packages/core/src/contracts/tasks.ts";
 
@@ -34,15 +37,17 @@ const op = await api<{ id: string; name: string }>("POST", "/agents", { name: `D
 await api("PUT", `/agents/${op.id}/workstation`, { workstationId: ws.id });
 const dm = await api<{ id: string }>("POST", "/channels/dm", { agentId: op.id });
 
-// A blank TextEdit document in front, so the agent never has to launch apps itself.
-Bun.spawnSync(["/usr/bin/open", "-a", "TextEdit", "-n", "-F"]);
-await Bun.sleep(1500);
-Bun.spawnSync(["/usr/bin/osascript", "-e", 'tell application "TextEdit" to make new document', "-e", 'tell application "TextEdit" to activate']);
+// A blank TextEdit document in front, so the agent never has to launch apps itself. A file, not
+// AppleScript: scripting TextEdit would need one more permission (Automation) for the terminal.
+const docPath = join(mkdtempSync(join(tmpdir(), "hive-desktop-")), "hive-desktop-check.txt");
+writeFileSync(docPath, "");
+Bun.spawnSync(["/usr/bin/open", "-a", "TextEdit", docPath]);
+await Bun.sleep(2000);
 
 const started = Date.now();
 await api("POST", `/channels/${dm.id}/messages`, {
   body: [
-    "A blank TextEdit document is open on this Mac.",
+    "A blank TextEdit document (hive-desktop-check.txt) is open on this Mac.",
     "Ask for desktop control for 10 minutes, then read TextEdit's interface with desktop_ui,",
     `click into the document and type exactly: ${LINE}`,
     `Then post a desktop screenshot to this chat (channel ${dm.id}), release the desktop, and tell me what you did.`,
@@ -66,10 +71,10 @@ while (Date.now() - started < 15 * 60_000) {
 const msgs = (await api<{ messages: Message[] }>("GET", `/channels/${dm.id}/messages`)).messages.filter((m) => m.authorKind === "agent" && m.authorId === op.id);
 const runs = (await api<{ runs: Run[] }>("GET", `/agents/${op.id}/runs?limit=15`)).runs;
 const desk = await api<{ available: boolean; accessibility: boolean; holder: unknown }>("GET", "/desktop").catch((e) => ({ error: String(e) }));
-const doc = Bun.spawnSync(["/usr/bin/osascript", "-e", 'tell application "TextEdit" to get text of front document']).stdout.toString().trim();
 
 console.log(`\napproval: ${approval ? `${approval.status} by ${approval.decidedBy ?? "-"}` : "never asked"}`);
-console.log(`document contains the line: ${doc.includes(LINE)} (${JSON.stringify(doc.slice(0, 80))})`);
+console.log(`line to find in the screenshot and the agent's own desktop_ui reading: ${LINE}`);
+console.log(`document (unsaved, close it without saving): ${docPath}`);
 console.log(`screenshots posted: ${msgs.flatMap((m) => m.attachments).filter((f) => f.mime === "image/jpeg").length}`);
 console.log(`desktop after the run: ${JSON.stringify(desk).slice(0, 200)}`);
 console.log(`runs: ${runs.map((r) => r.status).join(", ")} · $${runs.reduce((s, r) => s + r.costUsd, 0).toFixed(4)}`);
