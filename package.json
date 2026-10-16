@@ -1,0 +1,26 @@
+{
+  "name": "hive",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.11"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "node --watch apps/hived/src/main.ts",
+    "dev:web": "npm run dev --workspace @hive/web",
+    "build:web": "npm run build --workspace @hive/web",
+    "test": "node --test --test-concurrency=4 \"packages/*/test/**/*.test.ts\" \"apps/hived/test/**/*.test.ts\"",
+    "typecheck": "tsc -p tsconfig.json && tsc -p apps/web/tsconfig.json",
+    "e2e": "playwright test",
+    "check": "node scripts/check.ts",
+    "db:generate": "drizzle-kit generate --config apps/hived/drizzle.config.ts"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "typescript": "7.0.2"
+  }
+}
