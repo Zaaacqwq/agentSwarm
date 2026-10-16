@@ -79,6 +79,18 @@ export class AuthService {
     this.db.delete(schema.loginSessions).where(eq(schema.loginSessions.tokenHash, hashToken(token))).run();
   }
 
+  /** Local recovery (apps/hived/src/reset-password.ts): new hash, and every session of that user ends. */
+  async resetPassword(username: string, password: string, now = Date.now()): Promise<void> {
+    const row = this.db.select().from(schema.users).where(eq(schema.users.username, username)).get();
+    if (!row) throw new Error(`No user named ${username}`);
+    const passwordHash = await Bun.password.hash(password, { algorithm: "argon2id" });
+    this.db.transaction((tx) => {
+      tx.update(schema.users).set({ passwordHash }).where(eq(schema.users.id, row.id)).run();
+      tx.delete(schema.loginSessions).where(eq(schema.loginSessions.userId, row.id)).run();
+    });
+    writeAudit(this.db, { orgId: row.orgId, actorKind: "system", actorId: null, action: "auth.password_reset", targetId: row.id, metadata: { via: "local-cli" } }, now);
+  }
+
   pruneExpired(now = Date.now()): void {
     this.db.delete(schema.loginSessions).where(lt(schema.loginSessions.expiresAt, now)).run();
   }

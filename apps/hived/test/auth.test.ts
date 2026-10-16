@@ -71,3 +71,25 @@ describe("RateLimiter", () => {
     expect(rl.hit("ip", 1000)).toBe(true);
   });
 });
+
+describe("local password reset", () => {
+  test("replaces the hash, ends the user's sessions and is audited", async () => {
+    const { db } = memoryDb();
+    const auth = new AuthService(db);
+    const { token } = await auth.setupAdmin(ADMIN);
+    await auth.resetPassword(ADMIN.username, "a brand new long password");
+    expect(auth.resolve(token)).toBeNull();
+    await expect(auth.login(ADMIN)).rejects.toThrow();
+    expect((await auth.login({ username: ADMIN.username, password: "a brand new long password" })).user.username).toBe(ADMIN.username);
+    const audit = db.select().from(schema.auditLogs).all().filter((a) => a.action === "auth.password_reset");
+    expect(audit).toHaveLength(1);
+    expect(JSON.stringify(audit)).not.toContain("brand new");
+  });
+
+  test("refuses an unknown user", async () => {
+    const { db } = memoryDb();
+    const auth = new AuthService(db);
+    await auth.setupAdmin(ADMIN);
+    await expect(auth.resetPassword("nobody", "a brand new long password")).rejects.toThrow("No user");
+  });
+});
