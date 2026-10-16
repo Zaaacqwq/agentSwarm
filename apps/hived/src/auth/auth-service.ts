@@ -67,6 +67,18 @@ export class AuthService {
     if (token) this.db.delete(schema.loginSessions).where(eq(schema.loginSessions.tokenHash, hashToken(token))).run();
   }
 
+  /** Local recovery (src/reset-password.ts): a new hash, and every session of that user ends. */
+  async resetPassword(username: string, password: string, now = Date.now()): Promise<void> {
+    const row = this.db.select().from(schema.users).where(eq(schema.users.username, username)).get();
+    if (!row) throw new Error(`No user named ${username}`);
+    const passwordHash = await hashPassword(password);
+    this.db.transaction((tx) => {
+      tx.update(schema.users).set({ passwordHash }).where(eq(schema.users.id, row.id)).run();
+      tx.delete(schema.loginSessions).where(eq(schema.loginSessions.userId, row.id)).run();
+    });
+    audit(this.db, "local-cli", "auth.password_reset", row.id, {}, now);
+  }
+
   pruneExpired(now = Date.now()): void {
     this.db.delete(schema.loginSessions).where(lt(schema.loginSessions.expiresAt, now)).run();
   }

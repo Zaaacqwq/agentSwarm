@@ -51,3 +51,20 @@ describe("units", () => {
     assert.match(p, /never push main/);
   });
 });
+
+describe("local password reset", () => {
+  test("replaces the hash and ends the user's sessions", async () => {
+    const { openDatabase } = await import("../src/db/client.ts");
+    const { AuthService } = await import("../src/auth/auth-service.ts");
+    const db = openDatabase(":memory:");
+    const auth = new AuthService(db.db);
+    const admin = { username: "admin", password: "correct horse battery staple" };
+    const { token } = await auth.setup(admin);
+    await auth.resetPassword("admin", "a brand new long password");
+    assert.equal(auth.resolve(token), null);
+    await assert.rejects(auth.login(admin));
+    assert.equal((await auth.login({ username: "admin", password: "a brand new long password" })).user.username, "admin");
+    await assert.rejects(auth.resetPassword("nobody", "a brand new long password"), /No user/);
+    db.close();
+  });
+});
