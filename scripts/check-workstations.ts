@@ -123,7 +123,8 @@ async function browserChecks(): Promise<void> {
     const opened = await call({ cmd: "open", url: "https://example.com/" });
     record("browser opens a public page", opened.ok && opened.title === "Example Domain", opened.error ?? opened.title ?? "");
     const snap = await call({ cmd: "snapshot" });
-    record("browser snapshot", Boolean(snap.text?.includes("Example Domain")));
+    // The page body (not the title): example.com's text changes, so look for its stable parts.
+    record("browser snapshot", Boolean(snap.text?.includes("documentation") && /\[ref=e\d+\]/.test(snap.text)), snap.error ?? "");
     const shot = await call({ cmd: "screenshot" });
     record("browser screenshot", (shot.image?.length ?? 0) > 1000);
     const local = await call({ cmd: "open", url: "http://127.0.0.1:4319/" });

@@ -42,7 +42,11 @@
   - `ask_human` 的提问卡片在聊天里批准；从顶部横幅拒绝时，聊天里的卡片同步更新；
   - This Mac 页面在没装助手时给出安装提示。
   - 活动检查器里的截图缩略图没有 E2E 覆盖，只有路由和权限的集成测试。
-- `bun scripts/check-workstations.ts`：22/24 通过。没过的 2 项是 IPv6 地址判定问题，见下文，已修复，要重新运行 `--update-exec` 后才会生效。
+- `bun scripts/check-workstations.ts`：重新运行 `--update-exec` 后 24/24 通过。
+  - 包括：Chrome 以 `ws-1` 身份运行；能打开 IPv6 网站并读取页面结构；拒绝本机地址；Agent 的 shell 读不到浏览器状态。
+  - 第一次只有 22/24，原因是 IPv6 地址判定问题（见下文）。
+  - 另外 example.com 改版后正文里没有了 "Example Domain"，所以 snapshot 检查改为核对正文内容和元素编号。
+  - `ws-2` 补测：sudo 时保留调用者的 HOME，仍然能打开 example.com。
 - 真实数据库：迁移前已备份为 `hive-backup-p4-202610091352.db`，0005 已在 HiveWS 上执行。
 
 ## 开发中发现并修复的问题
@@ -76,5 +80,4 @@
 
 ## 待你操作
 
-1. 重新运行 `sudo zsh scripts/setup-workstations.sh --update-exec`，装上修复后的 hive-exec 和浏览器 daemon。之后自检应显示 "headless Chrome starts as ws-1/ws-2"，工作站检查应为 24/24。
-2. 在 系统设置 → 隐私与安全性 → 辅助功能 中打开 Hive Desktop，然后运行 `zsh scripts/install-desktop-helper.sh`。之后可以做桌面实测：截图、读取 TextEdit 的辅助功能树、点击。
+1. 在 系统设置 → 隐私与安全性 → 辅助功能 中打开 Hive Desktop，然后运行 `zsh scripts/install-desktop-helper.sh`。之后可以做桌面实测：截图、读取 TextEdit 的辅助功能树、点击。
