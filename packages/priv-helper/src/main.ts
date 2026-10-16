@@ -2,16 +2,21 @@
 // hive-exec: runs one workstation operation as the invoking OS user (reached via
 // `sudo -n -u ws-N`). The workstation root comes from the OS user, never from input.
 import { lstatSync } from "node:fs";
-import { userInfo } from "node:os";
 import { PRODUCTION_LAYOUT, WS_USER_PATTERN, type ExecEnv } from "./layout.ts";
 import { dispatch } from "./dispatch.ts";
+import { currentUser, type OsUser } from "./passwd.ts";
 import type { Request, Response } from "./protocol.ts";
 
 const MAX_REQUEST_BYTES = 4 * 1024 * 1024;
 
 async function main(): Promise<Response> {
   process.umask(0o027);
-  const me = userInfo();
+  let me: OsUser;
+  try {
+    me = currentUser();
+  } catch (error) {
+    return fail((error as Error).message);
+  }
   if (!WS_USER_PATTERN.test(me.username)) return fail(`hive-exec only runs as a workstation user, not ${me.username}`);
   const root = `${PRODUCTION_LAYOUT.wsRoot}/${me.username}`;
   let st;
@@ -30,7 +35,7 @@ async function main(): Promise<Response> {
   } catch {
     return fail("Request is not JSON");
   }
-  const env: ExecEnv = { user: me.username, home: me.homedir, root, layout: PRODUCTION_LAYOUT, sandbox: true };
+  const env: ExecEnv = { user: me.username, home: me.home, root, layout: PRODUCTION_LAYOUT, sandbox: true };
   return dispatch(env, request);
 }
 

@@ -15,7 +15,8 @@ describe("url guard", () => {
     ]) {
       expect(isBlockedAddress(ip)).toBe(true);
     }
-    for (const ip of ["93.184.215.14", "64:ff9b::8.8.8.8", "2002:0808:0808::1", "2606:4700:4700::1111"]) expect(isBlockedAddress(ip)).toBe(false);
+    for (const ip of ["93.184.215.14", "64:ff9b::8.8.8.8", "2002:0808:0808::1", "2606:4700:4700::1111", "[2606:4700:10::6814:179a]"]) expect(isBlockedAddress(ip)).toBe(false);
+    for (const ip of ["[::1]", "[fe80::1]", "[::ffff:127.0.0.1]", "[2606::1", "[]"]) expect(isBlockedAddress(ip)).toBe(true);
     expect(await checkUrl("file:///etc/passwd")).toMatchObject({ ok: false });
     expect(await checkUrl("http://localhost:4318/api")).toMatchObject({ ok: false });
     expect(await checkUrl("http://rebind.example/", async () => ["127.0.0.1"])).toMatchObject({ ok: false });

@@ -118,7 +118,7 @@ async function main(): Promise<void> {
 /** P5: the agent browser runs headless Chrome as the workstation user, inside the sandbox. */
 async function browserChecks(): Promise<void> {
   type Res = { ok: boolean; url?: string; title?: string; text?: string; image?: string; error?: string };
-  const call = (command: object) => backend.call<Res>("ws-1", { op: "browser", agent: "check_probe", request: { command, approvedHosts: [] } });
+  const call = (command: object) => backend.call<Res>("ws-1", { op: "browser", agent: "check_probe", request: { command, approvals: [] } });
   try {
     const opened = await call({ cmd: "open", url: "https://example.com/" });
     record("browser opens a public page", opened.ok && opened.title === "Example Domain", opened.error ?? opened.title ?? "");

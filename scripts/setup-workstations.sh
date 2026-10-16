@@ -148,10 +148,10 @@ layout_dirs() {
 
 verify() {
   local user="$1" out
-  out="$(print -r -- '{"op":"info"}' | sudo -u "$OWNER" sudo -n -u "$user" "$EXEC_BIN" 2>&1 || true)"
+  out="$(print -r -- '{"op":"info"}' | sudo -u "$OWNER" sudo -n -H -u "$user" "$EXEC_BIN" 2>&1 || true)"
   if [[ "$out" == *'"ok":true'* ]]; then say "Verified: ${OWNER} can run hive-exec as ${user}"; else die "Verification failed for ${user}: ${out}"; fi
-  out="$(print -r -- '{"op":"browser","agent":"setup_check","request":{"command":{"cmd":"ping"},"approvedHosts":[]}}' | sudo -u "$OWNER" sudo -n -u "$user" "$EXEC_BIN" 2>&1 || true)"
-  print -r -- '{"op":"browser.reset","agent":"setup_check"}' | sudo -u "$OWNER" sudo -n -u "$user" "$EXEC_BIN" >/dev/null 2>&1 || true
+  out="$(print -r -- '{"op":"browser","agent":"setup_check","request":{"command":{"cmd":"ping"},"approvals":[]}}' | sudo -u "$OWNER" sudo -n -H -u "$user" "$EXEC_BIN" 2>&1 || true)"
+  print -r -- '{"op":"browser.reset","agent":"setup_check"}' | sudo -u "$OWNER" sudo -n -H -u "$user" "$EXEC_BIN" >/dev/null 2>&1 || true
   if [[ "$out" == *'"ok":true'* ]]; then say "Verified: headless Chrome starts as ${user}"; else say "WARNING: the browser did not start as ${user}: ${out}"; fi
 }
 

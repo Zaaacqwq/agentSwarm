@@ -5,7 +5,9 @@ import { isIP } from "node:net";
  * Addresses an agent's browser must never reach: loopback, private, link-local, CGNAT, benchmark,
  * IETF-reserved, multicast, unspecified, and IPv6 forms that embed one of those (mapped, NAT64, 6to4).
  */
-export function isBlockedAddress(ip: string): boolean {
+export function isBlockedAddress(address: string): boolean {
+  // Chrome reports a response's IPv6 server address in URL form: [2606:4700::1]
+  const ip = /^\[[^\]]+\]$/.test(address) ? address.slice(1, -1) : address;
   const v = isIP(ip);
   if (v === 4) {
     const [a, b, c] = ip.split(".").map(Number) as [number, number, number];
