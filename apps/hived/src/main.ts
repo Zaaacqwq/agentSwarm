@@ -35,6 +35,7 @@ async function main(): Promise<void> {
     log,
   });
 
+  services.pool.resetLeases();
   const ws = await services.pool.sync();
   log("info", "workstations", { total: ws.length, unhealthy: ws.filter((w) => w.status === "unhealthy").map((w) => `${w.id}: ${w.lastError}`) });
   services.runs.recover();

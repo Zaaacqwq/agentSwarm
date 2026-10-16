@@ -246,14 +246,15 @@ export class RunService {
     if (signal.aborted) agent.abort();
 
     const counters = { turns: run.turns, tokensIn: run.tokensIn, tokensOut: run.tokensOut, costUsd: run.costUsd };
+    const base = { turns: run.turns, costUsd: run.costUsd };
     const stop = (reason: StopReason) => {
       active.reason ??= reason;
       agent.abort();
       active.controller.abort();
     };
-    const elapsed = run.startedAt ? Date.now() - run.startedAt : 0;
-    const deadline = setTimeout(() => stop("time"), Math.max(1000, run.limits.maxDurationMs - elapsed));
-    agent.subscribe((event) => this.onEvent(runId, event, counters, run.limits, stop, agent));
+    // Limits apply per execution (the first start or a follow-up), not to the run's whole lifetime.
+    const deadline = setTimeout(() => stop("time"), run.limits.maxDurationMs);
+    agent.subscribe((event) => this.onEvent(runId, event, counters, base, run.limits, stop, agent));
 
     let lastError: string | null = null;
     try {
@@ -277,7 +278,7 @@ export class RunService {
     return this.finish(runId, "succeeded", report ?? fallbackReport(agent.state.messages), null);
   }
 
-  private onEvent(runId: string, event: AgentEvent, c: { turns: number; tokensIn: number; tokensOut: number; costUsd: number }, limits: RunLimits, stop: (r: StopReason) => void, agent: Agent): void {
+  private onEvent(runId: string, event: AgentEvent, c: { turns: number; tokensIn: number; tokensOut: number; costUsd: number }, base: { turns: number; costUsd: number }, limits: RunLimits, stop: (r: StopReason) => void, agent: Agent): void {
     const { bus, db } = this.deps;
     switch (event.type) {
       case "message_end": {
@@ -291,7 +292,7 @@ export class RunService {
         if (text || m.errorMessage) bus.runEvent(runId, "assistant", { text, tools: calls, stopReason: m.stopReason, ...(m.errorMessage ? { error: m.errorMessage } : {}) });
         db.update(schema.runs).set({ tokensIn: c.tokensIn, tokensOut: c.tokensOut, costUsd: c.costUsd }).where(eq(schema.runs.id, runId)).run();
         this.emit(runId);
-        if (c.costUsd >= limits.maxCostUsd) stop("cost");
+        if (c.costUsd - base.costUsd >= limits.maxCostUsd) stop("cost");
         return;
       }
       case "tool_execution_start":
@@ -305,7 +306,7 @@ export class RunService {
         db.update(schema.runs).set({ turns: c.turns }).where(eq(schema.runs.id, runId)).run();
         this.saveSession(runId, agent.state.messages);
         this.emit(runId);
-        if (c.turns >= limits.maxTurns) stop("turns");
+        if (c.turns - base.turns >= limits.maxTurns) stop("turns");
         return;
       default:
     }

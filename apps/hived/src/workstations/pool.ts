@@ -29,10 +29,13 @@ export class WorkstationPool {
     for (const id of users) {
       if (!known.has(id)) this.db.insert(schema.workstations).values({ id, status: "free", runId: null, lastCheckAt: null, lastError: null, updatedAt: now }).run();
     }
-    // Leases do not survive a restart: no run is running yet.
-    this.db.update(schema.workstations).set({ status: "free", runId: null }).where(eq(schema.workstations.status, "busy")).run();
     await Promise.all(users.map((id) => this.check(id)));
     return this.list();
+  }
+
+  /** Startup only: leases do not survive a restart, since no run is running yet. */
+  resetLeases(): void {
+    this.db.update(schema.workstations).set({ status: "free", runId: null }).where(eq(schema.workstations.status, "busy")).run();
   }
 
   async check(id: string, now = Date.now()): Promise<WorkstationView> {
