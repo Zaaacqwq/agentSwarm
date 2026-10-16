@@ -1,0 +1,65 @@
+import { chmodSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { PRODUCTION_LAYOUT } from "@hive/ws-exec";
+import { loadConfig } from "./config.ts";
+import { openDatabase } from "./db/client.ts";
+import { SecretBox } from "./crypto/secret-box.ts";
+import { createServices, type Logger } from "./app/services.ts";
+import { buildApp } from "./http/app.ts";
+import { SudoBackend } from "./workstations/backend.ts";
+import { GitHubRest } from "./github/github-client.ts";
+import { createGitRunner } from "./github/git.ts";
+
+const log: Logger = (level, msg, extra) => {
+  process.stderr.write(`${JSON.stringify({ time: new Date().toISOString(), level, msg, ...extra })}\n`);
+};
+
+async function main(): Promise<void> {
+  if (process.getuid?.() === 0) throw new Error("hived must not run as root");
+  process.umask(0o077);
+  const config = loadConfig();
+  const production = config.dataDir.startsWith(`${PRODUCTION_LAYOUT.volume}/`);
+  mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
+  chmodSync(config.dataDir, 0o700);
+
+  const secrets = await SecretBox.fromKeyFile(join(config.dataDir, "master.key"));
+  const database = openDatabase(join(config.dataDir, "hive.db"));
+  const services = createServices({
+    db: database.db,
+    secrets,
+    backend: new SudoBackend(),
+    githubClient: new GitHubRest(),
+    git: createGitRunner({ askpassDir: config.dataDir, inboxGlob: `${PRODUCTION_LAYOUT.inbox}/*` }),
+    layout: PRODUCTION_LAYOUT,
+    maxConcurrentRuns: config.maxConcurrentRuns,
+    log,
+  });
+
+  const ws = await services.pool.sync();
+  log("info", "workstations", { total: ws.length, unhealthy: ws.filter((w) => w.status === "unhealthy").map((w) => `${w.id}: ${w.lastError}`) });
+  services.runs.recover();
+  services.auth.pruneExpired();
+  void services.github.verify().catch(() => undefined);
+
+  const app = await buildApp({ services, webDist: config.webDist, check: { dataDir: config.dataDir, volume: production ? PRODUCTION_LAYOUT.volume : null } });
+  await app.listen({ host: config.host, port: config.port });
+  log("info", "hived listening", { url: `http://${config.host}:${config.port}`, dataDir: config.dataDir });
+
+  let stopping = false;
+  const shutdown = async (signal: string) => {
+    if (stopping) return;
+    stopping = true;
+    log("info", "shutting down", { signal });
+    await services.runs.stopAll();
+    await app.close();
+    database.close();
+    process.exit(0);
+  };
+  process.on("SIGINT", () => void shutdown("SIGINT"));
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+}
+
+main().catch((error: Error) => {
+  log("error", "startup failed", { error: error.message });
+  process.exit(1);
+});
