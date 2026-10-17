@@ -34,6 +34,15 @@ declare module "fastify" {
   }
 }
 
+function sameSite(origin: string, hosts: ReadonlySet<string>): boolean {
+  try {
+    const u = new URL(origin);
+    return (u.protocol === "http:" || u.protocol === "https:") && hosts.has(u.host.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
 export async function buildApp(o: AppOptions): Promise<FastifyInstance> {
   const s = o.services;
   const app = Fastify({ logger: o.logger ?? false, bodyLimit: 1024 * 1024, trustProxy: false });
@@ -52,8 +61,9 @@ export async function buildApp(o: AppOptions): Promise<FastifyInstance> {
     // DNS rebinding and cross-site WebSockets: only known hosts, and only same-origin pages.
     const host = String(req.headers.host ?? "").toLowerCase();
     if (!hosts.has(host)) throw forbidden("Unknown host");
+    // Same origin only: a page served on one of the known hosts (over http, or https through Tailscale serve).
     const origin = req.headers.origin;
-    if (origin && origin.toLowerCase() !== `http://${host}`) throw forbidden("Cross-origin request refused");
+    if (origin && !sameSite(origin, hosts)) throw forbidden("Cross-origin request refused");
     // CSRF: state changes must be JSON (forms cannot send JSON cross-site).
     if (req.method !== "GET" && req.method !== "HEAD") {
       if (req.headers["content-length"] !== "0" && req.headers["content-length"] !== undefined && !String(req.headers["content-type"] ?? "").startsWith("application/json")) {
@@ -153,6 +163,7 @@ export async function buildApp(o: AppOptions): Promise<FastifyInstance> {
   }));
   app.get<{ Params: { id: string } }>("/api/runs/:id", async (req) => s.runs.view(req.params.id));
   app.get<{ Params: { id: string } }>("/api/trees/:id", async (req) => s.runs.tree(req.params.id));
+  app.get<{ Params: { id: string }; Querystring: { before?: string } }>("/api/trees/:id/events", async (req) => s.runs.treeEvents(req.params.id, Number(req.query.before ?? 0) || null));
   app.get<{ Params: { id: string }; Querystring: { after?: string } }>("/api/runs/:id/events", async (req) => s.runs.events(req.params.id, Number(req.query.after ?? 0) || 0));
   app.post<{ Params: { id: string }; Body: RunMessage }>("/api/runs/:id/messages", { schema: { body: RunMessage } }, async (req) => s.runs.message(actor(req), req.params.id, req.body.text));
   app.post<{ Params: { id: string } }>("/api/runs/:id/cancel", async (req) => s.runs.cancel(actor(req), req.params.id));

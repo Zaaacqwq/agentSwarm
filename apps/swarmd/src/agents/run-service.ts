@@ -1,5 +1,5 @@
 import { basename } from "node:path";
-import { and, asc, desc, eq, gt, isNotNull } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, lt } from "drizzle-orm";
 import { Agent, type AgentEvent, type AgentMessage, type AgentTool } from "@earendil-works/pi-agent-core";
 import type { CreateRun, RunEventView, RunReport, RunView, TreeView } from "@agentswarm/contracts";
 import type { Db } from "../db/client.ts";
@@ -150,6 +150,19 @@ export class RunService {
     const nodes = this.deps.db.select().from(schema.runs).where(eq(schema.runs.treeId, treeId)).orderBy(asc(schema.runs.createdAt)).limit(500).all();
     if (nodes.length === 0) throw notFound("No such tree");
     return { treeId, nodes: nodes.map((r) => this.toView(r)), totalCostUsd: nodes.reduce((sum, r) => sum + r.costUsd, 0) };
+  }
+
+  /**
+   * The latest events of a whole tree, oldest first (before: page further back), for one live view of
+   * everything its agents do.
+   */
+  treeEvents(treeId: string, before: number | null = null, limit = 400): RunEventView[] {
+    const ids = this.deps.db.select({ id: schema.runs.id }).from(schema.runs).where(eq(schema.runs.treeId, treeId)).all().map((r) => r.id);
+    if (!ids.length) throw notFound("No such tree");
+    return this.deps.db.select().from(schema.runEvents)
+      .where(and(inArray(schema.runEvents.runId, ids), before ? lt(schema.runEvents.id, before) : undefined))
+      .orderBy(desc(schema.runEvents.id)).limit(Math.min(limit, 1000)).all().reverse()
+      .map((r) => ({ id: r.id, runId: r.runId, type: r.type as RunEventView["type"], data: r.data, createdAt: r.createdAt }));
   }
 
   events(runId: string, after = 0, limit = 500): RunEventView[] {

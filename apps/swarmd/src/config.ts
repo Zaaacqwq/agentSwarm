@@ -9,6 +9,10 @@ export interface Config {
   readonly maxConcurrentRuns: number;
   /** Linear webhooks (R5): their own loopback port, the only one Tailscale Funnel exposes. */
   readonly linearPort: number;
+  /** Where people open the dashboard, for links in Linear and Discord (e.g. through Tailscale serve). */
+  readonly dashboardUrl: string | null;
+  /** More Host names the dashboard answers to (e.g. mac-mini.tailnet.ts.net:8444). */
+  readonly extraHosts: readonly string[];
 }
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
@@ -32,5 +36,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     webDist: env.SWARM_WEB_DIST === "" ? null : resolve(env.SWARM_WEB_DIST ?? join(repo, "apps/web/dist")),
     maxConcurrentRuns,
     linearPort,
+    dashboardUrl: env.SWARM_DASHBOARD_URL ? new URL(env.SWARM_DASHBOARD_URL).origin : null,
+    extraHosts: (env.SWARM_EXTRA_HOSTS ?? "").split(",").map((h) => h.trim().toLowerCase()).filter(Boolean),
   };
 }

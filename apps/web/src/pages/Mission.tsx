@@ -5,6 +5,7 @@ import { useLive, useReconnect, useResource } from "../live.ts";
 import { Badge, Field, Form, PageHead } from "../components/ui.tsx";
 import { STAGE_LABEL, StageRail } from "../components/StageRail.tsx";
 import { Tree } from "../components/Tree.tsx";
+import { TreeActivity } from "../components/Activity.tsx";
 import { Link } from "../router.tsx";
 
 export function MissionPage({ id }: { id: string }) {
@@ -68,6 +69,7 @@ export function MissionPage({ id }: { id: string }) {
         </aside>
       </div>
       <Tree treeId={m.treeId} current={m.rootRunId} />
+      <TreeActivity treeId={m.treeId} />
     </div>
   );
 }

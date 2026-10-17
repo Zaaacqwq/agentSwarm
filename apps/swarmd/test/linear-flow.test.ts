@@ -163,6 +163,7 @@ describe("Linear", () => {
     assert.match(pr.title, new RegExp(`^${issue.identifier} Fix square`));
     assert.match(pr.body, new RegExp(`Fixes ${issue.identifier}`));
     assert.match(merge.branch, /zac-2/i, "the branch carries the ticket key");
+    assert.ok(h.linear.in("s-bug").some((a) => a.content.type === "action" && a.content.action === "Opened pull request" && a.content.parameter === merge.prUrl));
     const urls = h.linear.sessionUpdates.filter((u) => u.sessionId === "s-bug").at(-1)!.externalUrls!;
     assert.ok(urls.some((u) => u.label === "Pull request" && u.url === merge.prUrl));
     assert.ok(urls.some((u) => u.label === "plan.md" && u.url.startsWith("https://github.com/")));
@@ -210,19 +211,32 @@ describe("Linear", () => {
 
   test("a sandbox experiment runs in a local repository, reports back in the ticket, and becomes a project on 立项", async () => {
     h = await harness();
-    await linearReady(h);
+    const { cookie } = await linearReady(h);
     h.scriptAgents({
       Lead: [
         call("stage_done", { summary: "Try a 2x faster square." }),
+        call("spawn_agent", { name: "Helper", role: "developer", brief: "Write bench2.js that prints ok, commit and push it." }),
+        call("wait_agents", {}),
         call("ws_write", { path: "bench.js", content: "console.log('ok');\n" }),
         writeDoc("results.md", "# Results\nThe fast square is 2x faster.\n"), ...commitPush("Experiment"),
         call("stage_done", { summary: "It works: 2x faster." }),
+      ],
+      Helper: [
+        call("ws_write", { path: "bench2.js", content: "console.log('ok');\n" }), ...commitPush("bench2"),
+        call("report", { summary: "Added bench2.js.\nIt prints ok.", tests: "node bench2.js: ok", unfinished: [] }),
       ],
     });
     const issue = h.linear.addIssue({ title: "Faster square", projectId: "lp-sandbox" });
     await send(h, created("s-exp", issue.id));
     const m = await stageOf(h, "s-exp", "done");
     assert.equal(m.kind, "experiment");
+    // The team's milestones show in the ticket as actions.
+    const actions = h.linear.in("s-exp").map((a) => a.content).filter((c) => c.type === "action") as { action: string; parameter: string; result?: string }[];
+    assert.ok(actions.some((a) => a.action === "Started" && /^Helper: Write bench2\.js/.test(a.parameter)), JSON.stringify(actions));
+    assert.ok(actions.some((a) => a.action === "Finished" && a.parameter === "Helper" && a.result === "Added bench2.js."), JSON.stringify(actions));
+    // One feed for the whole tree: the lead's events and the helper's.
+    const feed = (await h.api("GET", `/api/trees/${m.treeId}/events`, undefined, cookie)).body as { runId: string }[];
+    assert.ok(new Set(feed.map((e) => e.runId)).size >= 2);
     const project = h.services.projects.view(m.projectId);
     assert.equal(project.kind, "local");
     assert.equal(h.pullRequests.length, 0);

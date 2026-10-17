@@ -37,7 +37,7 @@ async function main(): Promise<void> {
     log,
     transport: new DiscordJsTransport(),
     linearPort: config.linearPort,
-    dashboardUrl: `http://${config.host === "::1" ? "[::1]" : config.host}:${config.port}`,
+    dashboardUrl: config.dashboardUrl ?? `http://${config.host === "::1" ? "[::1]" : config.host}:${config.port}`,
   });
 
   services.pool.resetLeases();
@@ -53,12 +53,13 @@ async function main(): Promise<void> {
   services.auth.pruneExpired();
   void services.github.verify().catch(() => undefined);
 
-  const dashboardUrl = `http://${config.host === "::1" ? "[::1]" : config.host}:${config.port}`;
+  // Linear's OAuth callback is registered at the local address: it stays the local one.
+  const localUrl = `http://${config.host === "::1" ? "[::1]" : config.host}:${config.port}`;
   const app = await buildApp({
-    services, webDist: config.webDist, dashboardUrl,
+    services, webDist: config.webDist, dashboardUrl: localUrl,
     check: { dataDir: config.dataDir, volume: production ? PRODUCTION_LAYOUT.volume : null },
     // The Vite dev server proxies with its own Host header.
-    allowedHosts: [`127.0.0.1:${config.port}`, `localhost:${config.port}`, `[::1]:${config.port}`, "localhost:5173", "127.0.0.1:5173"],
+    allowedHosts: [`127.0.0.1:${config.port}`, `localhost:${config.port}`, `[::1]:${config.port}`, "localhost:5173", "127.0.0.1:5173", ...config.extraHosts],
   });
   await app.listen({ host: config.host, port: config.port });
   log("info", "swarmd listening", { url: `http://${config.host}:${config.port}`, dataDir: config.dataDir });

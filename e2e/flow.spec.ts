@@ -36,7 +36,7 @@ test("set up agentSwarm, add a project and an agent, and watch a run fix a bug",
   await expect(page.getByRole("heading", { name: "Report" })).toBeVisible({ timeout: 30_000 });
   await expect(page.getByRole("region", { name: "Report" }).getByText("square now multiplies; the test passes.")).toBeVisible();
   const timeline = page.getByRole("region", { name: "Timeline" });
-  await expect(timeline.getByText("✓ ws_bash", { exact: false })).toBeVisible();
+  await expect(timeline.locator(".tool-card.ok", { hasText: "ws_bash" }).first()).toBeVisible();
   await expect(timeline.getByText("pushed", { exact: true })).toBeVisible();
   await expect(timeline.getByText("Sub-agents reported").first()).toBeVisible();
   await expect(page.getByText(/^Pull request: https:\/\/github\.com\/tester\/demo\/pull\/1$/)).toBeVisible();
@@ -96,6 +96,13 @@ test("start a mission on the dashboard, answer the lead, approve its plan, and g
   await expect(tree.getByRole("link", { name: "Builder", exact: true })).toBeVisible();
   await expect(tree.getByText("merged", { exact: true })).toBeVisible();
   await expect(chat.getByText("Yes, 8, and a new file is fine.")).toBeVisible();
+  // One live feed for the whole tree: the builder's tool calls, as cards that open.
+  const activity = page.getByRole("log", { name: "Agent activity" });
+  await expect(activity.locator(".agent-chip", { hasText: "Builder" }).first()).toBeVisible();
+  const card = activity.locator(".tool-card", { hasText: "cube.js" }).first();
+  await expect(card).toBeVisible();
+  await card.locator("summary").click();
+  await expect(card.getByText("export const cube")).toBeVisible();
   await page.screenshot({ path: `${SHOTS}/mission-1440.png`, fullPage: true });
   await page.setViewportSize({ width: 375, height: 812 });
   await page.screenshot({ path: `${SHOTS}/mission-375.png`, fullPage: true });

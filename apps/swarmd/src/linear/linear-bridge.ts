@@ -1,5 +1,5 @@
 import { and, asc, eq, inArray, isNull, lt, ne } from "drizzle-orm";
-import type { LiveMessage, MissionMessageView, MissionView } from "@agentswarm/contracts";
+import type { LiveMessage, MissionMessageView, MissionView, RunView } from "@agentswarm/contracts";
 import type { Db } from "../db/client.ts";
 import { schema } from "../db/client.ts";
 import type { MissionKind } from "../db/schema.ts";
@@ -68,6 +68,8 @@ export class LinearBridge {
   private readonly outbox = new Map<string, Promise<void>>();
   private readonly states = new Map<string, LinearState[]>();
   private readonly promoting = new Set<string>();
+  /** What each run of a Linear mission last looked like: only changes become actions in the ticket. */
+  private readonly seen = new Map<string, { status: string; merged: boolean; pr: boolean; verdict: string | null }>();
   private timer: NodeJS.Timeout | null = null;
 
   constructor(deps: LinearBridgeDeps) {
@@ -374,6 +376,42 @@ export class LinearBridge {
   private onLive(msg: LiveMessage): void {
     if (msg.kind === "mission_message") this.deliver(msg.message);
     if (msg.kind === "mission") this.sync(msg.mission);
+    if (msg.kind === "run") this.milestone(msg.run);
+  }
+
+  /**
+   * The team's milestones as actions in the ticket, so it shows who is doing what without opening the
+   * dashboard: a sub-agent starts or finishes, a review's verdict, a merge, the pull request.
+   * Best effort (not resent): the checklist and the dashboard hold the full record.
+   */
+  private milestone(run: RunView): void {
+    if (!run.missionId) return;
+    const row = this.byMission(run.missionId);
+    if (!row || row.status !== "active") return;
+    const verdict = run.review ? `${run.review.reviewRunId}:${run.review.approved}` : null;
+    const now = { status: run.status, merged: Boolean(run.mergedAt), pr: Boolean(run.prUrl), verdict };
+    const was = this.seen.get(run.id);
+    this.seen.set(run.id, now);
+    const who = `${run.agentName}${run.runtime === "claude_code" ? " (Claude Code)" : run.runtime === "codex" ? " (Codex)" : ""}`;
+    const first = (t: string | null | undefined) => (t ?? "").split("\n").find((l) => l.trim())?.trim().slice(0, 300) ?? "";
+    const actions: { action: string; parameter: string; result?: string }[] = [];
+    if (run.depth > 0 && run.kind === "task") {
+      // Only a fresh spawn (queued): after a restart, runs already at work are not announced again.
+      if (!was && run.status === "queued") actions.push({ action: "Started", parameter: `${who}: ${first(run.brief).slice(0, 160)}` });
+      if (was && was.status !== run.status && (run.status === "succeeded" || run.status === "failed")) {
+        actions.push(run.status === "succeeded"
+          ? { action: "Finished", parameter: who, result: first(run.report?.summary) }
+          : { action: "Failed", parameter: who, result: first(run.error) });
+      }
+      if (was && verdict && verdict !== was.verdict && run.review) {
+        actions.push({ action: run.review.approved ? "Review approved" : "Review: changes requested", parameter: who, result: first(run.review.comments) });
+      }
+      if (was && now.merged && !was.merged) actions.push({ action: "Merged", parameter: who });
+    }
+    if (run.depth === 0 && was && now.pr && !was.pr && run.prUrl) actions.push({ action: "Opened pull request", parameter: run.prUrl });
+    for (const a of actions) {
+      this.enqueue(row.sessionId, () => this.send(row.sessionId, { type: "action", action: a.action, parameter: a.parameter, ...(a.result ? { result: a.result } : {}) }));
+    }
   }
 
   /** One mission message into the ticket: chat as thoughts, questions and the plan as elicitations. */
