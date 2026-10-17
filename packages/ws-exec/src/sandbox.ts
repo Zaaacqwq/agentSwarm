@@ -25,6 +25,9 @@ export function sandboxProfile(env: ExecEnv, scope?: string): string {
     `(allow file-read* file-write* (subpath ${q(inbox)}))`,
     // Path lookups stat each parent; allow metadata (not listing) on exactly those.
     ...ancestors([env.root, env.home, inbox, ...(mirror ? [mirror] : [])]).map((d) => `(allow file-read-metadata (literal ${q(d)}))`),
+    // Second wall for GUI services (the first is ws-launch's per-user session): clipboard, screen, Apple Events.
+    `(deny appleevent-send)`,
+    `(deny mach-lookup (global-name "com.apple.pasteboard.1") (global-name-regex #"^com\\.apple\\.windowserver"))`,
     // The dashboard API is not for agents (logins, rate limits, run data).
     `(deny network-outbound (remote ip ${q(`localhost:${layout.hivedPort}`)}))`,
   ].join("\n");

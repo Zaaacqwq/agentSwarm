@@ -3,7 +3,7 @@ import { statSync, statfsSync } from "node:fs";
 import { homedir } from "node:os";
 import type { CheckItem } from "@hive/contracts";
 import type { Services } from "../app/services.ts";
-import { WS_EXEC_PATH } from "../workstations/backend.ts";
+import { WS_LAUNCH_PATH } from "../workstations/backend.ts";
 
 export interface CheckOptions {
   readonly dataDir: string;
@@ -28,9 +28,9 @@ export function systemCheck(s: Services, o: CheckOptions, now = Date.now()): Che
     add("HiveWS volume enforces ownership", /Owners:\s+Enabled/.test(info) && line !== "" && !line.includes("noowners"), line || `${o.volume} is not mounted`);
   }
 
-  const execPath = o.execPath ?? WS_EXEC_PATH;
+  const execPath = o.execPath ?? WS_LAUNCH_PATH;
   const exec = safe(() => statSync(execPath));
-  add("ws-exec is installed and root-owned", exec !== null && exec.uid === 0 && (exec.mode & 0o022) === 0, exec ? `${execPath} uid ${exec.uid} mode ${(exec.mode & 0o777).toString(8)}` : `${execPath} is missing; run scripts/setup.sh`);
+  add("ws-launch is installed and root-owned", exec !== null && exec.uid === 0 && (exec.mode & 0o022) === 0, exec ? `${execPath} uid ${exec.uid} mode ${(exec.mode & 0o777).toString(8)}` : `${execPath} is missing; run scripts/setup.sh`);
 
   const ws = s.pool.list();
   const healthy = ws.filter((w) => w.status !== "unhealthy");

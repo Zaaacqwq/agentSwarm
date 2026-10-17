@@ -2,7 +2,11 @@ import { spawn } from "node:child_process";
 import type { ExecEnv, Request, Response } from "@hive/ws-exec";
 import { WS_USER_PATTERN } from "@hive/ws-exec";
 
-export const WS_EXEC_PATH = "/usr/local/libexec/hive/ws-exec";
+/**
+ * Root-owned launcher: checks the workstation user, then runs ws-exec as that user inside the user's own
+ * launchd session. Plain `sudo -u` would keep the owner's GUI session (clipboard, Apple Events, screen).
+ */
+export const WS_LAUNCH_PATH = "/usr/local/libexec/hive/ws-launch";
 
 export class WorkstationError extends Error {
   readonly code: string;
@@ -25,17 +29,17 @@ export interface WorkstationBackend {
   listUsers(): Promise<string[]>;
 }
 
-/** Production: `sudo -n -H -u ws-N ws-exec`, allowed by the sudoers rule scripts/setup.sh writes. */
+/** Production: `sudo -n ws-launch ws-N`, allowed (for exactly those arguments) by the sudoers rule scripts/setup.sh writes. */
 export class SudoBackend implements WorkstationBackend {
-  private readonly execPath: string;
+  private readonly launchPath: string;
 
-  constructor(execPath = WS_EXEC_PATH) {
-    this.execPath = execPath;
+  constructor(launchPath = WS_LAUNCH_PATH) {
+    this.launchPath = launchPath;
   }
 
   call<T>(osUser: string, request: Request, opts: CallOptions = {}): Promise<T> {
     if (!WS_USER_PATTERN.test(osUser)) return Promise.reject(new WorkstationError("bad_request", `Not a workstation user: ${osUser}`));
-    return runJson<T>(["/usr/bin/sudo", "-n", "-H", "-u", osUser, this.execPath], { PATH: "/usr/bin:/bin" }, request, opts);
+    return runJson<T>(["/usr/bin/sudo", "-n", this.launchPath, osUser], { PATH: "/usr/bin:/bin" }, request, opts);
   }
 
   async listUsers(): Promise<string[]> {

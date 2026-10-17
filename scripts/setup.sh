@@ -6,7 +6,8 @@
 #
 # Creates: the HiveWS APFS volume (ownership on) next to /Volumes/Data, the hive-ws group, hidden users
 # ws-1..ws-N, their directories, Hive's own Node runtime, ws-exec, and one sudoers rule that lets you
-# (and nothing else) run ws-exec as those users. hived itself never runs as root.
+# (and nothing else) start ws-exec as those users, each inside its own launchd session (ws-launch).
+# hived itself never runs as root.
 set -euo pipefail
 
 COUNT=8
@@ -15,6 +16,7 @@ VOLUME="/Volumes/${VOLUME_NAME}"
 DATA_VOLUME="/Volumes/Data"
 LIBEXEC="/usr/local/libexec/hive"
 EXEC="${LIBEXEC}/ws-exec"
+LAUNCH="${LIBEXEC}/ws-launch"
 SUDOERS="/etc/sudoers.d/hive"
 GROUP="hive-ws"
 NODE_VERSION="24.22.0"
@@ -145,15 +147,31 @@ install_exec() {
 # Installed by agentswarm scripts/setup.sh. An empty environment: nothing from the caller reaches ws-exec.
 exec /usr/bin/env -i /usr/local/libexec/hive/node/bin/node --disable-warning=ExperimentalWarning ${dest}/main.ts
 EOF
-  chown -R root:wheel "$LIBEXEC" && chmod 0755 "$LIBEXEC" "$EXEC" "$dest" "${dest}/ops" && chmod 0644 "${dest}/package.json"
-  say "Installed ${EXEC}"
+  # ws-launch: the only thing sudo runs as root. It checks the user, then runs ws-exec as that user in the
+  # user's own launchd session; plain `sudo -u` would keep your GUI session (clipboard, Apple Events, screen).
+  cat > "$LAUNCH" <<LAUNCHER
+#!/bin/sh
+# Installed by agentswarm scripts/setup.sh.
+set -eu
+fail() { printf '{"ok":false,"code":"bad_request","error":"%s"}\n' "\$1"; exit 0; }
+user="\${1:-}"
+case "\$user" in ws-[0-9]|ws-[0-9][0-9]) ;; *) fail "not a workstation user" ;; esac
+/usr/bin/dscl . -read /Groups/${GROUP} GroupMembership 2>/dev/null | /usr/bin/grep -qw -- "\$user" || fail "\$user is not in ${GROUP}"
+uid="\$(/usr/bin/id -u "\$user")"
+exec /bin/launchctl asuser "\$uid" /usr/bin/sudo -n -H -u "\$user" ${EXEC}
+LAUNCHER
+  chown -R root:wheel "$LIBEXEC" && chmod 0755 "$LIBEXEC" "$EXEC" "$LAUNCH" "$dest" "${dest}/ops" && chmod 0644 "${dest}/package.json"
+  say "Installed ${EXEC} and ${LAUNCH}"
 }
 
 write_sudoers() {
-  local tmp
+  local tmp user
   tmp="$(mktemp)"
-  print -r -- "# Managed by agentswarm scripts/setup.sh
-${OWNER} ALL=(%${GROUP}) NOPASSWD: ${EXEC}" > "$tmp"
+  # One exact argument per workstation: ws-launch never sees anything else from you.
+  {
+    print -r -- "# Managed by agentswarm scripts/setup.sh"
+    for user in $(workstation_users); do print -r -- "${OWNER} ALL=(root) NOPASSWD: ${LAUNCH} ${user}"; done
+  } > "$tmp"
   visudo -cf "$tmp" >/dev/null || { rm -f "$tmp"; die "sudoers validation failed; nothing installed."; }
   install -o root -g wheel -m 0440 "$tmp" "$SUDOERS"
   rm -f "$tmp"
@@ -163,7 +181,7 @@ ${OWNER} ALL=(%${GROUP}) NOPASSWD: ${EXEC}" > "$tmp"
 
 verify() {
   local user="$1" out
-  out="$(print -r -- '{"op":"info"}' | sudo -u "$OWNER" sudo -n -H -u "$user" "$EXEC" 2>&1 || true)"
+  out="$(print -r -- '{"op":"info"}' | sudo -u "$OWNER" sudo -n "$LAUNCH" "$user" 2>&1 || true)"
   [[ "$out" == *"\"user\":\"${user}\""*'"sandbox":true'* ]] && say "Verified: ${OWNER} runs ws-exec as ${user}, sandboxed" || die "Verification failed for ${user}: ${out}"
 }
 

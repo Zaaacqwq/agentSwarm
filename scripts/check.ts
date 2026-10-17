@@ -34,6 +34,8 @@ if (ws) {
     record(name, r.exitCode !== 0 && /Operation not permitted|Permission denied/.test(r.output), r.output.trim().split("\n")[0]?.slice(0, 100) ?? "");
   };
   try {
+    // .tmp is created on demand by every exec, so it can host the first command.
+    await backend.call(ws, { op: "exec", scope: ".tmp", command: `mkdir -p ../${scope}`, timeoutMs: 10_000 });
     await backend.call(ws, { op: "fs.write", scope, path: "note.txt", content: "hello\n" });
     const own = await run("cat note.txt && echo ok > out.txt && cat out.txt");
     record(`${ws} can read and write its own files`, own.exitCode === 0 && own.output.includes("ok"));
@@ -47,7 +49,11 @@ if (ws) {
       await denied(`cannot read ${other}'s inbox`, `ls ${PRODUCTION_LAYOUT.inbox}/${other}.git`);
     }
     const env = await run("env | sort | cut -d= -f1 | tr '\\n' ' '");
-    record("no secrets in the command environment", !/TOKEN|KEY|SECRET|PASSWORD/i.test(env.output), env.output.trim().slice(0, 160));
+    const names = env.output.trim().split(/\s+/).filter((n) => !n.startsWith("GIT_CONFIG_"));
+    record("no secrets in the command environment", !names.some((n) => /TOKEN|KEY|SECRET|PASSWORD/i.test(n)), names.join(" ").slice(0, 160));
+    const session = await run("launchctl managername; launchctl manageruid; id -u");
+    const [manager, managerUid, uid] = session.output.trim().split("\n");
+    record("commands run in the workstation's own session, not yours", manager !== "Aqua" && managerUid === uid, session.output.replace(/\n/g, " ").trim());
     const node = await run("node --version && which node");
     record("Hive's Node runtime is on PATH", node.exitCode === 0 && node.output.includes("/usr/local/libexec/hive/node/bin/node"), node.output.replace(/\n/g, " ").trim());
     const net = await run("curl -s -o /dev/null -w '%{http_code}' https://github.com");

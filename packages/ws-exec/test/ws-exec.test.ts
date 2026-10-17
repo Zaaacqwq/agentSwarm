@@ -95,6 +95,18 @@ describe("commands (sandboxed)", () => {
     }
   });
 
+  test("cannot read the clipboard or capture the screen", async () => {
+    const f = fixture();
+    try {
+      mkdirSync(join(f.env.root, "work"));
+      const r = await call<{ output: string }>(f.env, { op: "exec", scope: "work", command: "pbpaste > /dev/null 2>&1; echo pbpaste=$?; screencapture -x shot.png 2>/dev/null; test -e shot.png && echo shot=yes || echo shot=no" });
+      assert.match(r.output, /pbpaste=[1-9]/);
+      assert.match(r.output, /shot=no/);
+    } finally {
+      f.cleanup();
+    }
+  });
+
   test("a timed-out command is killed with its children", async () => {
     const f = fixture();
     try {
