@@ -131,6 +131,7 @@ export async function buildApp(o: AppOptions): Promise<FastifyInstance> {
     ...(req.query.agentId ? { agentId: req.query.agentId } : {}), ...(req.query.projectId ? { projectId: req.query.projectId } : {}),
   }));
   app.get<{ Params: { id: string } }>("/api/runs/:id", async (req) => s.runs.view(req.params.id));
+  app.get<{ Params: { id: string } }>("/api/trees/:id", async (req) => s.runs.tree(req.params.id));
   app.get<{ Params: { id: string }; Querystring: { after?: string } }>("/api/runs/:id/events", async (req) => s.runs.events(req.params.id, Number(req.query.after ?? 0) || 0));
   app.post<{ Params: { id: string }; Body: RunMessage }>("/api/runs/:id/messages", { schema: { body: RunMessage } }, async (req) => s.runs.message(actor(req), req.params.id, req.body.text));
   app.post<{ Params: { id: string } }>("/api/runs/:id/cancel", async (req) => s.runs.cancel(actor(req), req.params.id));

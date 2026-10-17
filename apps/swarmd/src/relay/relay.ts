@@ -43,6 +43,7 @@ export class Relay {
   async push(run: RunRow, signal?: AbortSignal): Promise<PushOutcome> {
     const { backend, projects, git } = this.deps;
     if (!run.workstationId) return this.reject(run, null, "The run has no workstation");
+    if (run.kind === "review") return this.reject(run, null, "Reviewers do not push");
     const project = projects.get(run.projectId);
     if (!BRANCH_PATTERN.test(run.branch) || !run.branch.startsWith(`swarm/${project.slug}/`)) return this.reject(run, null, `Branch ${run.branch} is not a swarm/${project.slug}/… branch`);
     if (run.branch === project.defaultBranch) return this.reject(run, null, "Pushing the default branch is not allowed");
@@ -65,7 +66,10 @@ export class Relay {
         const ancestor = await git(["merge-base", "--is-ancestor", published.out.trim(), incoming], { cwd: mirror });
         if (ancestor.code !== 0) return this.reject(run, head, "The push would rewrite published history (force pushes are not allowed)");
       }
-      const problem = await this.checkContent(mirror, `refs/heads/${project.defaultBranch}`, incoming);
+      // New work is measured against what this branch was cut from (its parent's branch in a tree).
+      const base = run.baseBranch && (await git(["rev-parse", "--verify", "--quiet", `refs/heads/${run.baseBranch}`], { cwd: mirror })).code === 0
+        ? run.baseBranch : project.defaultBranch;
+      const problem = await this.checkContent(mirror, `refs/heads/${base}`, incoming);
       if (problem) return this.reject(run, head, problem);
       await gitOk(git, ["push", "--quiet", project.remoteUrl, `${incoming}:refs/heads/${run.branch}`], { cwd: mirror, timeoutMs: 300_000, ...withToken(await projects.tokenFor(project)) });
       await gitOk(git, ["update-ref", `refs/heads/${run.branch}`, head], { cwd: mirror });

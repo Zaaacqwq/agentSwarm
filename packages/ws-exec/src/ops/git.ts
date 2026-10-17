@@ -93,6 +93,25 @@ export async function pushInbox(env: ExecEnv, scope: string, branch: string) {
   return { branch, head, inbox };
 }
 
+/** Fetches `branch` from the mirror (origin) and merges it; on conflict, aborts and lists the files. */
+export async function merge(env: ExecEnv, scope: string, branch: string, message: string) {
+  if (!BRANCH_PATTERN.test(branch)) throw new OpError("bad_request", "Invalid branch");
+  if (!message.trim() || message.length > 2000) throw new OpError("bad_request", "Merge message must be 1-2000 chars");
+  const dir = worktreeDir(env, scope);
+  const dirty = ok(await git(env, dir, ["status", "--porcelain"], undefined, 120_000, scope), "status").output.trim();
+  if (dirty) throw new OpError("conflict", "Commit or discard your changes before merging");
+  ok(await git(env, dir, ["fetch", "--quiet", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`], undefined, 300_000, scope), "fetch");
+  const res = await git(env, dir, ["merge", "--no-ff", "--no-edit", "-m", message, `refs/remotes/origin/${branch}`], undefined, 300_000, scope);
+  if (res.exitCode === 0) {
+    const head = ok(await git(env, dir, ["rev-parse", "HEAD"], undefined, 30_000, scope), "rev-parse").output.trim();
+    return { merged: true, head, conflicts: [] as string[] };
+  }
+  const conflicts = (await git(env, dir, ["diff", "--name-only", "--diff-filter=U"], undefined, 30_000, scope)).output.split("\n").filter(Boolean);
+  await git(env, dir, ["merge", "--abort"], undefined, 30_000, scope);
+  if (conflicts.length === 0) throw new OpError("failed", `merge failed: ${res.output.trim().slice(-500)}`);
+  return { merged: false, head: null, conflicts };
+}
+
 export function remove(env: ExecEnv, scope: string) {
   const dir = worktreeDir(env, scope);
   rmSync(dir, { recursive: true, force: true });

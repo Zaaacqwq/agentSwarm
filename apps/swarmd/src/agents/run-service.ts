@@ -1,8 +1,7 @@
-import { randomBytes } from "node:crypto";
 import { basename } from "node:path";
 import { and, asc, desc, eq, gt } from "drizzle-orm";
 import { Agent, type AgentEvent, type AgentMessage } from "@earendil-works/pi-agent-core";
-import type { CreateRun, RunEventView, RunReport, RunView } from "@agentswarm/contracts";
+import type { CreateRun, RunEventView, RunReport, RunView, TreeView } from "@agentswarm/contracts";
 import type { Db } from "../db/client.ts";
 import { schema } from "../db/client.ts";
 import type { RunLimits } from "../db/schema.ts";
@@ -16,8 +15,10 @@ import type { ProjectService } from "../projects/project-service.ts";
 import type { ModelGateway } from "../models/model-gateway.ts";
 import type { Relay } from "../relay/relay.ts";
 import type { AgentService } from "./agent-service.ts";
-import { workstationTools } from "./tools.ts";
-import { systemPrompt } from "./prompts.ts";
+import { REVIEW_TOOL_NAMES, workstationTools } from "./tools.ts";
+import { reviewerPrompt, systemPrompt } from "./prompts.ts";
+import { TERMINAL, TREE_LIMITS, TreeError, type TreeService } from "./tree-service.ts";
+import { treeTools, verdictTool, type TreeToolOps } from "./tree-tools.ts";
 
 export type RunRow = typeof schema.runs.$inferSelect;
 
@@ -40,6 +41,7 @@ export interface RunDeps {
   readonly agents: AgentService;
   readonly gateway: ModelGateway;
   readonly relay: Relay;
+  readonly tree: TreeService;
   readonly maxConcurrent: number;
   readonly limits?: RunLimits;
   /** Fetch GitHub into the mirror before a run clones it (off in tests with local remotes). */
@@ -56,6 +58,8 @@ interface Active {
   done: Promise<void>;
   /** Messages that arrived while the agent was not taking input (starting up, or just finishing). */
   readonly inbox: string[];
+  /** Set by wait_agents or review_agent: suspend when this execution ends, until these runs finish. */
+  waitFor: string[] | null;
 }
 
 const STOP_TEXT: Record<Exclude<StopReason, "cancelled">, string> = {
@@ -77,7 +81,7 @@ export class RunService {
 
   list(filter: { agentId?: string; projectId?: string } = {}, limit = 50): RunView[] {
     const where = filter.agentId ? eq(schema.runs.agentId, filter.agentId) : filter.projectId ? eq(schema.runs.projectId, filter.projectId) : undefined;
-    return this.deps.db.select().from(schema.runs).where(where).orderBy(desc(schema.runs.createdAt)).limit(Math.min(limit, 200)).all().map(view);
+    return this.deps.db.select().from(schema.runs).where(where).orderBy(desc(schema.runs.createdAt)).limit(Math.min(limit, 200)).all().map((r) => this.toView(r));
   }
 
   get(id: string): RunRow {
@@ -87,7 +91,13 @@ export class RunService {
   }
 
   view(id: string): RunView {
-    return view(this.get(id));
+    return this.toView(this.get(id));
+  }
+
+  tree(treeId: string): TreeView {
+    const nodes = this.deps.db.select().from(schema.runs).where(eq(schema.runs.treeId, treeId)).orderBy(asc(schema.runs.createdAt)).limit(500).all();
+    if (nodes.length === 0) throw notFound("No such tree");
+    return { treeId, nodes: nodes.map((r) => this.toView(r)), totalCostUsd: nodes.reduce((sum, r) => sum + r.costUsd, 0) };
   }
 
   events(runId: string, after = 0, limit = 500): RunEventView[] {
@@ -103,20 +113,21 @@ export class RunService {
   create(actor: string, agentId: string, input: CreateRun, now = Date.now()): RunView {
     const agent = this.deps.agents.get(agentId);
     const project = this.deps.projects.get(agent.projectId);
-    const slug = input.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40).replace(/-+$/, "") || "task";
-    const leaf = `${slug}-${randomBytes(3).toString("hex")}`;
+    const names = this.deps.tree.rootNames(project, input.title);
     const row: RunRow = {
       id: newId("run"), agentId, projectId: project.id, title: input.title.trim(), brief: input.brief,
-      branch: `swarm/${project.slug}/${leaf}`, worktreeScope: `worktrees/${project.slug}/${leaf}`, workstationId: null,
+      branch: names.branch, worktreeScope: names.scope, workstationId: null,
       status: "queued", pendingMessage: input.brief, report: null, error: null, turns: 0, tokensIn: 0, tokensOut: 0, costUsd: 0,
       limits: this.deps.limits ?? DEFAULT_LIMITS, createdAt: now, startedAt: null, endedAt: null,
+      treeId: names.treeId, parentRunId: null, depth: 0, baseBranch: null, budgetUsd: input.budgetUsd ?? TREE_LIMITS.defaultRootBudgetUsd,
+      kind: "task", reviewOf: null, review: null, mergedAt: null, prUrl: null, waitingFor: null,
     };
     this.deps.db.insert(schema.runs).values(row).run();
     audit(this.deps.db, actor, "run.create", row.id, { agentId, branch: row.branch }, now);
     this.deps.bus.runEvent(row.id, "user", { text: input.brief }, now);
     this.emit(row.id);
     this.schedule();
-    return view(row);
+    return this.toView(row);
   }
 
   /** While running, steers the agent; afterwards, queues a follow-up on the same worktree. */
@@ -130,7 +141,7 @@ export class RunService {
       active.inbox.push(text);
     } else {
       const pending = run.status === "queued" && run.pendingMessage ? `${run.pendingMessage}\n\n${text}` : text;
-      this.deps.db.update(schema.runs).set({ status: "queued", pendingMessage: pending, error: null, endedAt: null }).where(eq(schema.runs.id, runId)).run();
+      this.deps.db.update(schema.runs).set({ status: "queued", pendingMessage: pending, error: null, endedAt: null, waitingFor: null }).where(eq(schema.runs.id, runId)).run();
       this.emit(runId);
       this.schedule();
     }
@@ -138,27 +149,38 @@ export class RunService {
     return this.view(runId);
   }
 
+  /** Cancels the run and everything it spawned. */
   cancel(actor: string, runId: string, now = Date.now()): RunView {
     const run = this.get(runId);
-    const active = this.active.get(runId);
-    if (active) {
-      active.reason = "cancelled";
-      active.controller.abort();
-      active.agent?.abort();
-      if (run.workstationId) void this.deps.pool.reap(run.workstationId).catch(() => undefined);
-    } else if (run.status === "queued") {
-      this.finish(runId, "cancelled", null, null, now);
-    } else {
-      throw conflict(`The run is already ${run.status}`);
-    }
-    audit(this.deps.db, actor, "run.cancel", runId, {}, now);
+    const live = [run, ...this.deps.tree.descendants(runId)].filter((r) => !TERMINAL.has(r.status));
+    if (live.length === 0) throw conflict(`The run is already ${run.status}`);
+    this.cancelTree(runId, now);
+    audit(this.deps.db, actor, "run.cancel", runId, { runs: live.length }, now);
     return this.view(runId);
+  }
+
+  private cancelTree(runId: string, now = Date.now()): void {
+    // Children first, so a parent is never resumed by its own children's cancellation.
+    for (const r of [...this.deps.tree.descendants(runId).reverse(), this.get(runId)]) {
+      if (TERMINAL.has(r.status)) continue;
+      const active = this.active.get(r.id);
+      if (active) {
+        active.reason = "cancelled";
+        active.controller.abort();
+        active.agent?.abort();
+        if (r.workstationId) void this.deps.pool.reap(r.workstationId).catch(() => undefined);
+      } else {
+        this.finish(r.id, "cancelled", r.report, null, now);
+      }
+    }
   }
 
   /** After a restart nothing is running: interrupted runs become failed and can be resumed with a message. */
   recover(now = Date.now()): void {
     const stale = this.deps.db.select().from(schema.runs).where(eq(schema.runs.status, "running")).all();
-    for (const run of stale) this.finish(run.id, "failed", null, "Interrupted by a agentSwarm restart; send a message to continue", now);
+    for (const run of stale) this.finish(run.id, "failed", null, "Interrupted by an agentSwarm restart; send a message to continue", now);
+    const trees = new Set(this.deps.db.select({ t: schema.runs.treeId }).from(schema.runs).where(eq(schema.runs.status, "waiting")).all().map((r) => r.t));
+    for (const t of trees) this.resumeWaiters(t);
     this.schedule();
   }
 
@@ -173,10 +195,16 @@ export class RunService {
     await Promise.all([...this.active.values()].map((a) => a.done));
   }
 
-  /** Resolves when the run is no longer running (tests). */
-  async settled(runId: string): Promise<RunView> {
-    await this.active.get(runId)?.done;
-    return this.view(runId);
+  /** Resolves when the run has finished for good (tests and scripts); a waiting run is not finished. */
+  async settled(runId: string, timeoutMs = 120_000): Promise<RunView> {
+    const end = Date.now() + timeoutMs;
+    for (;;) {
+      await this.active.get(runId)?.done;
+      const v = this.view(runId);
+      if (TERMINAL.has(v.status)) return v;
+      if (Date.now() > end) throw new Error(`run ${runId} still ${v.status}`);
+      await new Promise((r) => setTimeout(r, 25));
+    }
   }
 
   // ---- scheduling -----------------------------------------------------------------------
@@ -203,9 +231,9 @@ export class RunService {
   }
 
   private start(run: RunRow, ws: string, now = Date.now()): void {
-    const active: Active = { controller: new AbortController(), agent: null, reason: null, done: Promise.resolve(), inbox: [] };
+    const active: Active = { controller: new AbortController(), agent: null, reason: null, done: Promise.resolve(), inbox: [], waitFor: null };
     this.active.set(run.id, active);
-    this.deps.db.update(schema.runs).set({ status: "running", workstationId: ws, startedAt: run.startedAt ?? now, error: null, endedAt: null }).where(eq(schema.runs.id, run.id)).run();
+    this.deps.db.update(schema.runs).set({ status: "running", workstationId: ws, startedAt: run.startedAt ?? now, error: null, endedAt: null, waitingFor: null }).where(eq(schema.runs.id, run.id)).run();
     this.deps.bus.runEvent(run.id, "status", { status: "running", workstation: ws }, now);
     this.emit(run.id);
     active.done = this.execute(run.id, ws, active)
@@ -243,19 +271,36 @@ export class RunService {
       if (this.deps.refreshMirror) {
         await projects.refresh(project.id).catch((e: Error) => bus.runEvent(runId, "error", { message: `Could not refresh from GitHub, using the last mirror: ${e.message}` }));
       }
-      await backend.call(ws, { op: "git.clone", scope: run.worktreeScope, mirror: basename(project.mirrorPath), branch: run.branch, base: project.defaultBranch }, { signal });
-      bus.runEvent(runId, "status", { status: "worktree", branch: run.branch, base: project.defaultBranch });
+      const base = run.baseBranch ?? project.defaultBranch;
+      await backend.call(ws, { op: "git.clone", scope: run.worktreeScope, mirror: basename(project.mirrorPath), branch: run.branch, base }, { signal });
+      bus.runEvent(runId, "status", { status: "worktree", branch: run.branch, base });
     }
 
     let report: RunReport | null = null;
-    const tools = workstationTools({
+    let verdict = false;
+    const wsTools = workstationTools({
       backend, workstation: ws, scope: run.worktreeScope,
       push: (s) => relay.push(this.get(runId), s),
       report: (r) => (report = r),
     });
+    const isReview = run.kind === "review";
+    const canSpawn = !isReview && run.depth < TREE_LIMITS.maxDepth;
+    const tools = isReview
+      ? [...wsTools.filter((t) => REVIEW_TOOL_NAMES.has(t.name)), verdictTool((approved, comments) => {
+        this.deps.tree.recordVerdict(this.get(runId), approved, comments);
+        verdict = true;
+        report = { summary: `${approved ? "Approved" : "Changes requested"}: ${comments}`, tests: "", unfinished: [] };
+      })]
+      : [...wsTools, ...treeTools(this.treeOps(runId, active), { canSpawn, isRoot: run.depth === 0 })];
+    const prompt = isReview
+      ? reviewerPrompt({ name: agentRow.name, repo: project.githubRepo, branch: run.branch })
+      : systemPrompt({
+        name: agentRow.name, role: agentRow.role, instructions: agentRow.instructions, repo: project.githubRepo, defaultBranch: project.defaultBranch, branch: run.branch,
+        tree: { canSpawn, isRoot: run.depth === 0, depth: run.depth },
+      });
     const agent = new Agent({
       initialState: {
-        systemPrompt: systemPrompt({ name: agentRow.name, role: agentRow.role, instructions: agentRow.instructions, repo: project.githubRepo, defaultBranch: project.defaultBranch, branch: run.branch }),
+        systemPrompt: prompt,
         model,
         tools,
         messages: (session?.messages ?? []) as AgentMessage[],
@@ -302,6 +347,8 @@ export class RunService {
     if (active.reason === "cancelled") return this.finish(runId, "cancelled", report, null);
     if (active.reason) return this.finish(runId, "failed", report, STOP_TEXT[active.reason]);
     if (lastError) return this.finish(runId, "failed", report, `Model request failed: ${lastError}`);
+    if (active.waitFor && !report) return this.suspend(runId, active.waitFor);
+    if (isReview && !verdict) this.deps.tree.recordVerdict(this.get(runId), false, `The reviewer finished without a verdict: ${fallbackReport(agent.state.messages).summary}`);
     return this.finish(runId, "succeeded", report ?? fallbackReport(agent.state.messages), null);
   }
 
@@ -319,7 +366,8 @@ export class RunService {
         if (text || m.errorMessage) bus.runEvent(runId, "assistant", { text, tools: calls, stopReason: m.stopReason, ...(m.errorMessage ? { error: m.errorMessage } : {}) });
         db.update(schema.runs).set({ tokensIn: c.tokensIn, tokensOut: c.tokensOut, costUsd: c.costUsd }).where(eq(schema.runs.id, runId)).run();
         this.emit(runId);
-        if (c.costUsd - base.costUsd >= limits.maxCostUsd) stop("cost");
+        const cap = this.deps.tree.ownCap(this.get(runId));
+        if (cap !== null ? c.costUsd >= cap : c.costUsd - base.costUsd >= limits.maxCostUsd) stop("cost");
         return;
       }
       case "tool_execution_start":
@@ -340,7 +388,7 @@ export class RunService {
   }
 
   private requeue(runId: string, text: string): void {
-    this.deps.db.update(schema.runs).set({ status: "queued", pendingMessage: text, error: null, endedAt: null }).where(eq(schema.runs.id, runId)).run();
+    this.deps.db.update(schema.runs).set({ status: "queued", pendingMessage: text, error: null, endedAt: null, waitingFor: null }).where(eq(schema.runs.id, runId)).run();
     this.emit(runId);
   }
 
@@ -350,9 +398,97 @@ export class RunService {
   }
 
   private finish(runId: string, status: RunRow["status"], report: RunReport | null, error: string | null, now = Date.now()): void {
-    this.deps.db.update(schema.runs).set({ status, report, error, endedAt: now }).where(eq(schema.runs.id, runId)).run();
+    this.deps.db.update(schema.runs).set({ status, report, error, endedAt: now, waitingFor: null }).where(eq(schema.runs.id, runId)).run();
     this.deps.bus.runEvent(runId, "status", { status, ...(error ? { error } : {}) }, now);
     this.emit(runId);
+    this.resumeWaiters(this.get(runId).treeId);
+  }
+
+  /** Ends this execution without finishing: the workstation is freed until the awaited runs are done. */
+  private suspend(runId: string, ids: string[], now = Date.now()): void {
+    this.deps.db.update(schema.runs).set({ status: "waiting", waitingFor: ids, endedAt: null }).where(eq(schema.runs.id, runId)).run();
+    this.deps.bus.runEvent(runId, "status", { status: "waiting", for: ids }, now);
+    this.emit(runId);
+    this.resumeWaiters(this.get(runId).treeId);
+  }
+
+  /** Waiting runs whose awaited runs have all finished get their results and go back in the queue. */
+  private resumeWaiters(treeId: string | null): void {
+    if (!treeId) return;
+    const waiting = this.deps.db.select().from(schema.runs).where(and(eq(schema.runs.treeId, treeId), eq(schema.runs.status, "waiting"))).all();
+    for (const run of waiting) {
+      const ids = run.waitingFor ?? [];
+      if (!ids.every((id) => TERMINAL.has(this.deps.tree.run(id).status))) continue;
+      const text = this.deps.tree.resultsMessage(ids);
+      this.deps.bus.runEvent(run.id, "results", { text, runs: ids });
+      this.requeue(run.id, text);
+    }
+  }
+
+  /** The tree tools, bound to one run and its current execution. */
+  private treeOps(runId: string, active: Active): TreeToolOps {
+    const { tree, bus } = this.deps;
+    return {
+      spawn: async (input) => {
+        const child = await tree.spawn(this.get(runId), input);
+        bus.runEvent(child.id, "user", { text: child.pendingMessage ?? child.brief });
+        bus.runEvent(runId, "status", { status: "spawned", child: child.id, name: child.title, branch: child.branch });
+        this.emit(child.id);
+        this.schedule();
+        return { id: child.id, branch: child.branch, budgetUsd: child.budgetUsd ?? 0 };
+      },
+      wait: (ids) => {
+        const children = tree.children(runId);
+        for (const id of ids ?? []) if (!children.some((c) => c.id === id)) throw new TreeError(`${id} is not one of your sub-agents`);
+        const target = ids?.length ? ids : children.filter((c) => !TERMINAL.has(c.status)).map((c) => c.id);
+        if (target.length === 0) {
+          const done = children.filter((c) => c.kind === "task").map((c) => c.id);
+          return done.length ? tree.resultsMessage(done) : "You have no sub-agents.";
+        }
+        if (target.every((id) => TERMINAL.has(tree.run(id).status))) return tree.resultsMessage(target);
+        active.waitFor = target;
+        return null;
+      },
+      message: (id, text) => {
+        tree.child(this.get(runId), id);
+        this.message(this.get(runId).agentId, id, text);
+      },
+      cancel: (id) => {
+        tree.child(this.get(runId), id);
+        this.cancelTree(id);
+      },
+      review: async (id) => {
+        const review = await tree.startReview(this.get(runId), id);
+        active.waitFor = [review.id];
+        bus.runEvent(review.id, "user", { text: review.pendingMessage ?? review.brief });
+        this.emit(review.id);
+        this.schedule();
+        return review.id;
+      },
+      merge: async (id, signal) => {
+        const out = await tree.merge(this.get(runId), id, signal);
+        this.emit(id);
+        return out;
+      },
+      openPullRequest: async (title, body) => {
+        const url = await tree.openPullRequest(this.get(runId), title, body);
+        bus.runEvent(runId, "status", { status: "pull_request", url });
+        this.emit(runId);
+        return url;
+      },
+    };
+  }
+
+  private toView(row: RunRow): RunView {
+    const agent = this.deps.db.select({ name: schema.agents.name, role: schema.agents.role }).from(schema.agents).where(eq(schema.agents.id, row.agentId)).get();
+    return {
+      id: row.id, agentId: row.agentId, projectId: row.projectId, title: row.title, brief: row.brief, branch: row.branch,
+      workstationId: row.workstationId, status: row.status, report: row.report, error: row.error, turns: row.turns,
+      tokensIn: row.tokensIn, tokensOut: row.tokensOut, costUsd: row.costUsd, createdAt: row.createdAt, startedAt: row.startedAt, endedAt: row.endedAt,
+      agentName: agent?.name ?? "?", agentRole: agent?.role ?? "?", treeId: row.treeId, parentRunId: row.parentRunId, depth: row.depth,
+      kind: row.kind, baseBranch: row.baseBranch, budgetUsd: row.budgetUsd, review: row.review, reviewOf: row.reviewOf,
+      mergedAt: row.mergedAt, prUrl: row.prUrl, waitingFor: row.waitingFor,
+    };
   }
 
   private emit(runId: string): void {
@@ -381,10 +517,3 @@ function fallbackReport(messages: AgentMessage[]): RunReport {
   return { summary: text || "(the agent finished without a report)", tests: "(not reported)", unfinished: [] };
 }
 
-function view(row: RunRow): RunView {
-  return {
-    id: row.id, agentId: row.agentId, projectId: row.projectId, title: row.title, brief: row.brief, branch: row.branch,
-    workstationId: row.workstationId, status: row.status, report: row.report, error: row.error, turns: row.turns,
-    tokensIn: row.tokensIn, tokensOut: row.tokensOut, costUsd: row.costUsd, createdAt: row.createdAt, startedAt: row.startedAt, endedAt: row.endedAt,
-  };
-}

@@ -163,3 +163,40 @@ describe("identity and profile", () => {
     }
   });
 });
+
+describe("git merge (sandboxed)", () => {
+  test("merges another branch from the mirror, and reports conflicts without leaving a half merge", async () => {
+    const f = fixture();
+    try {
+      const child = "worktrees/demo/t1--child";
+      const parent = "worktrees/demo/t1--root";
+      await call(f.env, { op: "git.clone", scope: child, mirror: "demo.git", branch: "swarm/demo/t1/child", base: "main" });
+      writeFileSync(join(f.env.root, child, "child.txt"), "from child\n");
+      await call(f.env, { op: "git.commit", scope: child, message: "child work" });
+      // What the Relay does after a push: the child's branch lands in the mirror.
+      const { execFileSync } = await import("node:child_process");
+      const head = execFileSync("/usr/bin/git", ["-C", join(f.env.root, child), "rev-parse", "HEAD"]).toString().trim();
+      execFileSync("/usr/bin/git", ["-C", join(f.layout.mirrors, "demo.git"), "fetch", "-q", join(f.env.root, child), `+HEAD:refs/heads/swarm/demo/t1/child`]);
+      await call(f.env, { op: "git.clone", scope: parent, mirror: "demo.git", branch: "swarm/demo/t1/root", base: "main" });
+      const merged = await call<{ merged: boolean; head: string }>(f.env, { op: "git.merge", scope: parent, branch: "swarm/demo/t1/child", message: "Merge child" });
+      assert.equal(merged.merged, true);
+      assert.equal(readFileSync(join(f.env.root, parent, "child.txt"), "utf8"), "from child\n");
+      assert.notEqual(merged.head, head);
+
+      // A conflicting change on both sides.
+      writeFileSync(join(f.env.root, child, "README.md"), "child says\n");
+      await call(f.env, { op: "git.commit", scope: child, message: "child readme" });
+      execFileSync("/usr/bin/git", ["-C", join(f.layout.mirrors, "demo.git"), "fetch", "-q", join(f.env.root, child), `+HEAD:refs/heads/swarm/demo/t1/child`]);
+      writeFileSync(join(f.env.root, parent, "README.md"), "parent says\n");
+      await call(f.env, { op: "git.commit", scope: parent, message: "parent readme" });
+      const conflict = await call<{ merged: boolean; conflicts: string[] }>(f.env, { op: "git.merge", scope: parent, branch: "swarm/demo/t1/child", message: "Merge child again" });
+      assert.equal(conflict.merged, false);
+      assert.deepEqual(conflict.conflicts, ["README.md"]);
+      assert.equal(readFileSync(join(f.env.root, parent, "README.md"), "utf8"), "parent says\n");
+      const status = await call<{ status: string }>(f.env, { op: "git.status", scope: parent });
+      assert.doesNotMatch(status.status, /UU|AA/);
+    } finally {
+      f.cleanup();
+    }
+  });
+});

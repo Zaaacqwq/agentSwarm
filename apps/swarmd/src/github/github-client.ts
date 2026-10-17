@@ -19,6 +19,8 @@ export interface GitHubClient {
   isProtected(token: string, fullName: string, branch: string): Promise<boolean>;
   /** main: pull requests only (no approval required, so you can merge agentSwarm's PRs), admins included, no force pushes or deletion. */
   protect(token: string, fullName: string, branch: string): Promise<void>;
+  /** Opens (or finds the open) pull request from `head` into `base`; returns its URL. Never merges. */
+  createPullRequest(token: string, fullName: string, input: { head: string; base: string; title: string; body: string }): Promise<string>;
 }
 
 export class GitHubError extends Error {
@@ -72,6 +74,19 @@ export class GitHubRest implements GitHubClient {
       allow_force_pushes: false,
       allow_deletions: false,
     });
+  }
+
+  async createPullRequest(token: string, fullName: string, input: { head: string; base: string; title: string; body: string }): Promise<string> {
+    try {
+      const created = (await (await this.call(token, "POST", `/repos/${fullName}/pulls`, input)).json()) as { html_url: string };
+      return created.html_url;
+    } catch (error) {
+      if (!(error instanceof GitHubError) || error.status !== 422) throw error;
+      const owner = fullName.split("/")[0];
+      const open = (await (await this.call(token, "GET", `/repos/${fullName}/pulls?state=open&head=${encodeURIComponent(`${owner}:${input.head}`)}`)).json()) as { html_url: string }[];
+      if (open[0]) return open[0].html_url;
+      throw error;
+    }
   }
 
   private async call(token: string, method: string, path: string, body?: unknown): Promise<Response> {
