@@ -24,6 +24,8 @@ export interface GitHubClient {
   pullRequestState(token: string, fullName: string, number: number): Promise<PullRequestState>;
   /** Deletes a swarm/… branch; false if it was already gone. */
   deleteBranch(token: string, fullName: string, branch: string): Promise<boolean>;
+  /** A new, empty, private repository under the token's user (R5: an idea becomes a project). */
+  createRepo(token: string, name: string, description: string): Promise<{ fullName: string }>;
 }
 
 export type PullRequestState = "open" | "merged" | "closed";
@@ -98,6 +100,11 @@ export class GitHubRest implements GitHubClient {
       if (open[0]) return open[0].html_url;
       throw error;
     }
+  }
+
+  async createRepo(token: string, name: string, description: string): Promise<{ fullName: string }> {
+    const created = (await (await this.call(token, "POST", "/user/repos", { name, description: description.slice(0, 300), private: true, auto_init: false })).json()) as { full_name: string };
+    return { fullName: created.full_name };
   }
 
   async pullRequestState(token: string, fullName: string, number: number): Promise<PullRequestState> {

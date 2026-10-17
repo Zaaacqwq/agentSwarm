@@ -7,7 +7,8 @@ export type Request =
   | { op: "fs.edit"; scope: string; path: string; oldText: string; newText: string; replaceAll?: boolean }
   | { op: "fs.grep"; scope: string; pattern: string; path?: string; glob?: string; maxResults?: number }
   | { op: "exec"; scope: string; command: string; timeoutMs?: number }
-  | { op: "git.clone"; scope: string; mirror: string; branch: string; base: string }
+  /** `files`: the project's local files (not in git) written into the worktree and excluded from commits (R5). */
+  | { op: "git.clone"; scope: string; mirror: string; branch: string; base: string; files?: readonly { path: string; content: string }[] }
   | { op: "git.status"; scope: string }
   | { op: "git.commit"; scope: string; message: string }
   | { op: "git.pushInbox"; scope: string; branch: string }
@@ -15,7 +16,7 @@ export type Request =
   /** Merge another hive branch from the mirror into this worktree (no fast-forward); aborts on conflict. */
   | { op: "git.merge"; scope: string; branch: string; sha: string; message: string }
   /** Run a CLI worker in a worktree; streams its events as `{"event": …}` lines before the response (R4). */
-  | { op: "cli.run"; scope: string; runtime: CliRuntime; prompt: string; resume?: string; model?: string; maxTurns: number; timeoutMs: number; credential?: string }
+  | { op: "cli.run"; scope: string; runtime: CliRuntime; prompt: string; resume?: string; model?: string; maxTurns: number; timeoutMs: number; credential?: string; output?: "report" | "review" }
   /** Codex device-code sign-in for this workstation; streams the lines Codex prints (the URL and code). */
   | { op: "cli.login"; runtime: "codex" }
   | { op: "cli.logout"; runtime: "codex" }

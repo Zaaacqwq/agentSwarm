@@ -1,7 +1,9 @@
-import { chmodSync, existsSync, lstatSync, readdirSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { eq } from "drizzle-orm";
-import type { CreateProject, ProjectView } from "@agentswarm/contracts";
+import { and, eq } from "drizzle-orm";
+import type { CreateProject, ProjectView, PutProjectFile, SetProjectProfile } from "@agentswarm/contracts";
+import type { SecretBox } from "../crypto/secret-box.ts";
 import type { Db } from "../db/client.ts";
 import { schema } from "../db/client.ts";
 import { newId } from "../crypto/tokens.ts";
@@ -20,7 +22,12 @@ export interface ProjectDeps {
   readonly mirrorsDir: string;
   /** Tests point this at a local bare repository; production uses GitHub over HTTPS. */
   readonly remoteUrl?: (fullName: string) => string;
+  /** Seals the projects' local files (R5). */
+  readonly secrets: SecretBox;
 }
+
+/** Local files written into every worktree: a project may need a few, never many or large ones. */
+export const PROJECT_FILE_LIMITS = { count: 20, bytes: 256 * 1024 } as const;
 
 export class ProjectService {
   private readonly deps: ProjectDeps;
@@ -30,7 +37,7 @@ export class ProjectService {
   }
 
   list(): ProjectView[] {
-    return this.deps.db.select().from(schema.projects).all().map(view);
+    return this.deps.db.select().from(schema.projects).all().map((r) => this.toView(r));
   }
 
   get(id: string): ProjectRow {
@@ -40,7 +47,107 @@ export class ProjectService {
   }
 
   view(id: string): ProjectView {
-    return view(this.get(id));
+    return this.toView(this.get(id));
+  }
+
+  byLinearProject(linearProjectId: string): ProjectRow | null {
+    return this.deps.db.select().from(schema.projects).where(eq(schema.projects.linearProjectId, linearProjectId)).get() ?? null;
+  }
+
+  /**
+   * A project that lives only on this Mac (R5): a sandbox experiment or an idea. Its mirror starts with
+   * one commit; agents work on it as on any project, but the Relay never pushes it anywhere.
+   */
+  async createLocal(actor: string, name: string, now = Date.now()): Promise<ProjectView> {
+    const { db, git } = this.deps;
+    const slug = this.uniqueSlug(`local-${name}`);
+    const mirrorPath = join(this.deps.mirrorsDir, `${slug}.git`);
+    const work = mkdtempSync(join(tmpdir(), "agentswarm-local-"));
+    try {
+      writeFileSync(join(work, "README.md"), `# ${name}\n\nA local agentSwarm project (sandbox or idea). It lives only on this Mac.\n`);
+      const g = (args: string[], cwd = work) => gitOk(git, ["-c", "user.name=agentSwarm", "-c", "user.email=agentswarm@localhost", ...args], { cwd });
+      await g(["init", "--quiet", "-b", "main"]);
+      await g(["add", "-A"]);
+      await g(["commit", "--quiet", "-m", "Start"]);
+      await gitOk(git, ["clone", "--quiet", "--bare", "--config", "core.sharedRepository=0644", work, mirrorPath], { cwd: this.deps.mirrorsDir });
+      await gitOk(git, ["remote", "remove", "origin"], { cwd: mirrorPath });
+      shareReadOnly(mirrorPath);
+    } catch (error) {
+      rmSync(mirrorPath, { recursive: true, force: true });
+      throw error;
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+    const row: ProjectRow = {
+      id: newId("prj"), slug, name, githubRepo: `local/${slug}`, remoteUrl: "", defaultBranch: "main", mirrorPath,
+      protectedAt: null, lastFetchedAt: now, createdAt: now, kind: "local", profile: null, linearProjectId: null,
+    };
+    db.insert(schema.projects).values(row).run();
+    audit(db, actor, "project.create_local", row.id, { name }, now);
+    return this.view(row.id);
+  }
+
+  setProfile(actor: string, id: string, input: SetProjectProfile, now = Date.now()): ProjectView {
+    this.get(id);
+    if (input.linearProjectId) {
+      const other = this.byLinearProject(input.linearProjectId);
+      if (other && other.id !== id) throw conflict(`That Linear project already goes to ${other.name}`);
+    }
+    this.deps.db.update(schema.projects).set({ profile: input.profile, ...(input.linearProjectId !== undefined ? { linearProjectId: input.linearProjectId } : {}) })
+      .where(eq(schema.projects.id, id)).run();
+    audit(this.deps.db, actor, "project.profile", id, { linearProjectId: input.linearProjectId ?? null }, now);
+    return this.view(id);
+  }
+
+  async putFile(actor: string, id: string, input: PutProjectFile, now = Date.now()): Promise<ProjectView> {
+    this.get(id);
+    const existing = this.fileRows(id);
+    if (!existing.some((f) => f.path === input.path) && existing.length >= PROJECT_FILE_LIMITS.count) throw badRequest(`At most ${PROJECT_FILE_LIMITS.count} files per project`);
+    if (Buffer.byteLength(input.content) > PROJECT_FILE_LIMITS.bytes) throw badRequest("The file is too large (256 KB at most)");
+    const values = { contentSealed: await this.deps.secrets.seal(input.content), updatedAt: now };
+    this.deps.db.insert(schema.projectFiles).values({ projectId: id, path: input.path, ...values })
+      .onConflictDoUpdate({ target: [schema.projectFiles.projectId, schema.projectFiles.path], set: values }).run();
+    audit(this.deps.db, actor, "project.file_put", id, { path: input.path }, now);
+    return this.view(id);
+  }
+
+  deleteFile(actor: string, id: string, path: string, now = Date.now()): ProjectView {
+    this.deps.db.delete(schema.projectFiles).where(and(eq(schema.projectFiles.projectId, id), eq(schema.projectFiles.path, path))).run();
+    audit(this.deps.db, actor, "project.file_delete", id, { path }, now);
+    return this.view(id);
+  }
+
+  /** The files' contents, opened only to write them into a worktree. */
+  async files(id: string): Promise<{ path: string; content: string }[]> {
+    return Promise.all(this.fileRows(id).map(async (f) => ({ path: f.path, content: await this.deps.secrets.open(f.contentSealed) })));
+  }
+
+  /** A file from a branch of the mirror (local projects' documents have no GitHub page). */
+  async blob(id: string, ref: string, path: string): Promise<string> {
+    const row = this.get(id);
+    if (!/^[A-Za-z0-9._/-]{1,200}$/.test(ref) || ref.includes("..")) throw badRequest("Invalid ref");
+    if (!/^[A-Za-z0-9._@+ /-]{1,300}$/.test(path) || path.split("/").includes("..")) throw badRequest("Invalid path");
+    const res = await this.deps.git(["show", `refs/heads/${ref}:${path}`], { cwd: row.mirrorPath });
+    if (res.code !== 0) throw notFound(`No ${path} on ${ref}`);
+    return res.out.slice(0, 1024 * 1024);
+  }
+
+  /** Paths a push must never contain (the local files are secrets, or at least not the repository's). */
+  protectedPaths(id: string): string[] {
+    return this.fileRows(id).map((f) => f.path);
+  }
+
+  private fileRows(id: string) {
+    return this.deps.db.select().from(schema.projectFiles).where(eq(schema.projectFiles.projectId, id)).all();
+  }
+
+  private toView(row: ProjectRow): ProjectView {
+    return {
+      id: row.id, slug: row.slug, name: row.name, githubRepo: row.githubRepo, defaultBranch: row.defaultBranch,
+      protectedAt: row.protectedAt, lastFetchedAt: row.lastFetchedAt, createdAt: row.createdAt,
+      kind: row.kind, profile: row.profile ?? {}, linearProjectId: row.linearProjectId,
+      files: this.fileRows(row.id).map((f) => ({ path: f.path, updatedAt: f.updatedAt })),
+    };
   }
 
   /** Registers a GitHub repository: checks access, mirrors it, and protects its default branch. */
@@ -53,7 +160,7 @@ export class ProjectService {
     });
     const slug = this.uniqueSlug(info.fullName.split("/")[1] ?? "project");
     const mirrorPath = join(this.deps.mirrorsDir, `${slug}.git`);
-    const remoteUrl = this.deps.remoteUrl?.(info.fullName) ?? `https://github.com/${info.fullName}.git`;
+    const remoteUrl = this.remoteUrlFor(info.fullName);
     if (existsSync(mirrorPath)) rmSync(mirrorPath, { recursive: true, force: true });
     try {
       await gitOk(git, ["clone", "--quiet", "--bare", "--config", "core.sharedRepository=0644", remoteUrl, mirrorPath], { token, timeoutMs: 600_000 });
@@ -66,6 +173,7 @@ export class ProjectService {
     const row: ProjectRow = {
       id: newId("prj"), slug, name: input.name ?? info.fullName.split("/")[1] ?? slug, githubRepo: info.fullName, remoteUrl,
       defaultBranch: info.defaultBranch, mirrorPath, protectedAt: null, lastFetchedAt: now, createdAt: now,
+      kind: "github", profile: null, linearProjectId: null,
     };
     db.insert(schema.projects).values(row).run();
     audit(db, actor, "project.create", row.id, { repo: row.githubRepo }, now);
@@ -76,6 +184,7 @@ export class ProjectService {
   /** Fetches GitHub into the mirror (heads only; Relay's refs/swarm-incoming/* stay). */
   async refresh(id: string, now = Date.now()): Promise<ProjectView> {
     const row = this.get(id);
+    if (row.kind === "local") return this.view(id);
     await gitOk(this.deps.git, ["fetch", "--quiet", "--prune", "origin"], { cwd: row.mirrorPath, token: await this.tokenFor(row), timeoutMs: 600_000 });
     shareReadOnly(row.mirrorPath);
     this.deps.db.update(schema.projects).set({ lastFetchedAt: now }).where(eq(schema.projects.id, id)).run();
@@ -85,6 +194,7 @@ export class ProjectService {
   /** Turns on default-branch protection if it is off; records when it was last confirmed. */
   async ensureProtected(id: string, now = Date.now()): Promise<boolean> {
     const row = this.get(id);
+    if (row.kind === "local") return false;
     const token = await this.deps.github.token();
     const client = this.deps.github.client;
     let ok = await client.isProtected(token, row.githubRepo, row.defaultBranch);
@@ -95,6 +205,11 @@ export class ProjectService {
     this.deps.db.update(schema.projects).set({ protectedAt: ok ? now : null }).where(eq(schema.projects.id, id)).run();
     if (ok) audit(this.deps.db, "system", "project.protected", id, { branch: row.defaultBranch }, now);
     return ok;
+  }
+
+  /** Where a GitHub repository is pushed to and cloned from. */
+  remoteUrlFor(fullName: string): string {
+    return this.deps.remoteUrl?.(fullName) ?? `https://github.com/${fullName}.git`;
   }
 
   /** Local test remotes need no token. */
@@ -122,9 +237,4 @@ export function shareReadOnly(dir: string): void {
   }
 }
 
-function view(row: ProjectRow): ProjectView {
-  return {
-    id: row.id, slug: row.slug, name: row.name, githubRepo: row.githubRepo, defaultBranch: row.defaultBranch,
-    protectedAt: row.protectedAt, lastFetchedAt: row.lastFetchedAt, createdAt: row.createdAt,
-  };
-}
+

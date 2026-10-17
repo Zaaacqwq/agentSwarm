@@ -69,9 +69,12 @@ export class Relay {
       // New work is measured against what this branch was cut from (its parent's branch in a tree).
       const base = run.baseBranch && (await git(["rev-parse", "--verify", "--quiet", `refs/heads/${run.baseBranch}`], { cwd: mirror })).code === 0
         ? run.baseBranch : project.defaultBranch;
-      const problem = await this.checkContent(mirror, `refs/heads/${base}`, incoming);
+      const problem = await this.checkContent(mirror, `refs/heads/${base}`, incoming, projects.protectedPaths(project.id));
       if (problem) return this.reject(run, head, problem);
-      await gitOk(git, ["push", "--quiet", project.remoteUrl, `${incoming}:refs/heads/${run.branch}`], { cwd: mirror, timeoutMs: 300_000, ...withToken(await projects.tokenFor(project)) });
+      // Local projects (sandbox, ideas) end here: the mirror is the only copy.
+      if (project.kind !== "local") {
+        await gitOk(git, ["push", "--quiet", project.remoteUrl, `${incoming}:refs/heads/${run.branch}`], { cwd: mirror, timeoutMs: 300_000, ...withToken(await projects.tokenFor(project)) });
+      }
       await gitOk(git, ["update-ref", `refs/heads/${run.branch}`, head], { cwd: mirror });
     } catch (error) {
       return this.record(run, head, "failed", (error as Error).message.slice(0, 400));
@@ -84,7 +87,7 @@ export class Relay {
     return this.deps.db.select().from(schema.gitPushes).where(eq(schema.gitPushes.projectId, projectId)).orderBy(desc(schema.gitPushes.id)).limit(limit).all().map(view);
   }
 
-  private async checkContent(mirror: string, base: string, incoming: string): Promise<string | null> {
+  private async checkContent(mirror: string, base: string, incoming: string, protectedPaths: readonly string[] = []): Promise<string | null> {
     const { git } = this.deps;
     const commits = Number((await gitOk(git, ["rev-list", "--count", `${base}..${incoming}`], { cwd: mirror })).trim());
     if (commits === 0) return "Nothing new to push compared with the default branch; commit first";
@@ -98,6 +101,12 @@ export class Relay {
     if (lines > RELAY_LIMITS.maxChangedLines) return `Change too large (${lines} lines > ${RELAY_LIMITS.maxChangedLines})`;
     const forbidden = rows.map((r) => r.split("\t")[2] ?? "").filter((path) => FORBIDDEN_PATHS.test(path));
     if (forbidden.length) return `Changes under .github/ are not allowed (${forbidden.slice(0, 3).join(", ")})`;
+    // The project's local files (secrets, local config) never leave this Mac, in any commit.
+    if (protectedPaths.length) {
+      const touched = (await gitOk(git, ["log", "--format=", "--name-only", `${base}..${incoming}`], { cwd: mirror })).split("\n").filter(Boolean);
+      const hit = [...new Set(touched.filter((p) => protectedPaths.includes(p)))];
+      if (hit.length) return `The project's local files must not be committed (${hit.slice(0, 3).join(", ")}); remove them from every commit (rewrite the branch) before pushing`;
+    }
     // Binary files count as 0 lines above; cap what the push would actually upload.
     const bytes = Number((await gitOk(git, ["rev-list", "--objects", "--disk-usage", `${base}..${incoming}`], { cwd: mirror })).trim());
     if (bytes > RELAY_LIMITS.maxNewBytes) return `Push too large (${Math.round(bytes / 1024 / 1024)} MB of new objects > ${RELAY_LIMITS.maxNewBytes / 1024 / 1024} MB)`;

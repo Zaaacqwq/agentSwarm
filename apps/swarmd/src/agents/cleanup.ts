@@ -62,12 +62,16 @@ export class TreeCleanup {
         }
       }
       const prefix = `swarm/${project.slug}/${treeId}/`;
-      const branches = [...new Set(nodes.filter((n) => n.kind === "task" && n.branch.startsWith(prefix)).map((n) => n.branch))];
+      // A local project keeps its root branch: it is the only record of what the experiment or idea produced.
+      const keep = project.kind === "local" ? new Set(nodes.filter((n) => n.depth === 0).map((n) => n.branch)) : new Set<string>();
+      const branches = [...new Set(nodes.filter((n) => n.kind === "task" && n.branch.startsWith(prefix) && !keep.has(n.branch)).map((n) => n.branch))];
       const token = await projects.tokenFor(project);
       let deleted = 0;
       for (const branch of branches) {
         try {
-          if (token) {
+          if (project.kind === "local") {
+            deleted++;
+          } else if (token) {
             if (await github.client.deleteBranch(token, project.githubRepo, branch)) deleted++;
           } else {
             // A local remote (tests): delete it there directly.

@@ -16,7 +16,7 @@ import type { ModelGateway } from "../models/model-gateway.ts";
 import type { Relay } from "../relay/relay.ts";
 import type { AgentService } from "./agent-service.ts";
 import { REVIEW_TOOL_NAMES, workstationTools } from "./tools.ts";
-import { reviewerPrompt, systemPrompt } from "./prompts.ts";
+import { projectLines, reviewerPrompt, systemPrompt } from "./prompts.ts";
 import { TERMINAL, TREE_LIMITS, TreeError, type TreeService } from "./tree-service.ts";
 import { treeTools, verdictTool, type TreeToolOps } from "./tree-tools.ts";
 import type { CliRuntimeName } from "@agentswarm/contracts";
@@ -48,6 +48,8 @@ export interface RunHooks {
   prompt(run: RunRow): { section: string[]; finish: string } | null;
   /** An execution ended: the run finished, failed, was cancelled, or is waiting. */
   ended(run: RunRow): void;
+  /** The pull request a root opens: what the extension adds (a Linear ticket key, "Fixes ZAC-42"). */
+  pullRequest?(run: RunRow, title: string, body: string): { title: string; body: string };
 }
 
 export const DEFAULT_LIMITS: RunLimits = { maxTurns: 80, maxDurationMs: 30 * 60_000, maxCostUsd: 1 };
@@ -392,7 +394,7 @@ export class RunService {
         await projects.refresh(project.id).catch((e: Error) => bus.runEvent(runId, "error", { message: `Could not refresh from GitHub, using the last mirror: ${e.message}` }));
       }
       const base = run.baseBranch ?? project.defaultBranch;
-      await backend.call(ws, { op: "git.clone", scope: run.worktreeScope, mirror: basename(project.mirrorPath), branch: run.branch, base }, { signal });
+      await backend.call(ws, { op: "git.clone", scope: run.worktreeScope, mirror: basename(project.mirrorPath), branch: run.branch, base, files: await projects.files(project.id) }, { signal });
       bus.runEvent(runId, "status", { status: "worktree", branch: run.branch, base });
     }
 
@@ -425,9 +427,10 @@ export class RunService {
     if (extension) tools.splice(0, tools.length, ...tools.filter((t) => extension.keep?.(t.name) ?? true), ...extension.add);
     const missionPrompt = isReview ? null : this.hooks?.prompt(run) ?? null;
     const prompt = isReview
-      ? reviewerPrompt({ name: agentRow.name, repo: project.githubRepo, branch: run.branch })
+      ? reviewerPrompt({ name: agentRow.name, repo: project.githubRepo, branch: run.branch, project: projectLines(project.profile) })
       : systemPrompt({
         name: agentRow.name, role: agentRow.role, instructions: agentRow.instructions, repo: project.githubRepo, defaultBranch: project.defaultBranch, branch: run.branch,
+        project: projectLines(project.profile),
         tree: { canSpawn, isRoot: run.depth === 0, depth: run.depth },
         ...(missionPrompt ? { extra: missionPrompt.section, finish: missionPrompt.finish } : {}),
       });
@@ -508,7 +511,7 @@ export class RunService {
     }
     // Idempotent: a follow-up finds its worktree as it left it.
     const base = run.baseBranch ?? project.defaultBranch;
-    const cloned = await backend.call<{ resumed: boolean }>(ws, { op: "git.clone", scope: run.worktreeScope, mirror: basename(project.mirrorPath), branch: run.branch, base }, { signal });
+    const cloned = await backend.call<{ resumed: boolean }>(ws, { op: "git.clone", scope: run.worktreeScope, mirror: basename(project.mirrorPath), branch: run.branch, base, files: await projects.files(project.id) }, { signal });
     if (!run.cliSession) bus.runEvent(run.id, "status", { status: "worktree", branch: run.branch, base, ...(cloned.resumed ? { resumed: true } : {}) });
 
     const stopReason = () => active.reason;
@@ -517,7 +520,7 @@ export class RunService {
       active.controller.abort();
     }, run.limits.maxDurationMs);
     const x: CliExecution = {
-      run, runtime, name: agentRow.name, role: agentRow.role, repo: project.githubRepo, defaultBranch: project.defaultBranch,
+      run, runtime, name: agentRow.name, role: agentRow.role, repo: project.githubRepo, defaultBranch: project.defaultBranch, project: projectLines(project.profile),
       model: agentRow.modelId === CLI_DEFAULT_MODEL ? null : agentRow.modelId, workstation: ws, signal, message,
       event: (type, data) => bus.runEvent(run.id, type, data),
       progress: (p) => {
@@ -550,8 +553,13 @@ export class RunService {
     }
     const reason = stopReason();
     if (reason === "cancelled") return this.finish(run.id, "cancelled", outcome.report, null);
+    if (run.kind === "review") {
+      // Like a native reviewer that ends without review_verdict: no verdict is a rejection.
+      const v = outcome.verdict ?? { approved: false, comments: `The reviewer gave no verdict: ${outcome.error ?? outcome.report.summary}` };
+      this.deps.tree.recordVerdict(this.get(run.id), v.approved, v.comments);
+    }
     if (reason) return this.finish(run.id, "failed", outcome.report, STOP_TEXT[reason]);
-    return this.finish(run.id, outcome.error ? "failed" : "succeeded", outcome.report, outcome.error);
+    return this.finish(run.id, outcome.error && run.kind !== "review" ? "failed" : "succeeded", outcome.report, run.kind === "review" ? null : outcome.error);
   }
 
   /** Runs held back by a used-up quota: look again in a few minutes (nothing else may wake the scheduler). */
@@ -731,7 +739,12 @@ export class RunService {
         this.cancelTree(id);
       },
       review: async (id) => {
-        const review = await tree.startReview(this.get(runId), id);
+        const parent = this.get(runId);
+        const wanted = this.deps.projects.get(parent.projectId).profile?.reviewRuntime ?? "native";
+        // The project's choice of reviewer, when that CLI can take it now; otherwise a native one.
+        const runtime = wanted !== "native" && this.deps.cli.availability(wanted).ok ? wanted : "native";
+        if (runtime !== wanted) bus.runEvent(runId, "error", { message: `The ${wanted} reviewer is not available now; using a native reviewer` });
+        const review = await tree.startReview(parent, id, Date.now(), runtime);
         active.waitFor = [...(active.waitFor ?? []), review.id];
         bus.runEvent(review.id, "user", { text: review.pendingMessage ?? review.brief });
         this.emit(review.id);
@@ -744,7 +757,8 @@ export class RunService {
         return out;
       },
       openPullRequest: async (title, body) => {
-        const url = await tree.openPullRequest(this.get(runId), title, body);
+        const pr = this.hooks?.pullRequest?.(this.get(runId), title, body) ?? { title, body };
+        const url = await tree.openPullRequest(this.get(runId), pr.title, pr.body);
         bus.runEvent(runId, "status", { status: "pull_request", url });
         this.emit(runId);
         return url;

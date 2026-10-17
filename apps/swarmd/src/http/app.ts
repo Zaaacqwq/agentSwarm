@@ -4,7 +4,7 @@ import cookie from "@fastify/cookie";
 import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import {
-  CreateAgent, CreateEndpoint, CreateMission, CreateProject, CreateRun, Credentials, MissionBudget, MissionReply, RunMessage, SetCli, SetDiscord, SetGitHubToken, type Me,
+  CreateAgent, CreateEndpoint, CreateMission, CreateProject, CreateRun, Credentials, MissionBudget, MissionReply, RunMessage, SetCli, SetDiscord, SetLinear, SetGitHubToken, SetProjectProfile, PutProjectFile, CreateLocalProject, MachineSettings, type Me,
 } from "@agentswarm/contracts";
 import type { Services } from "../app/services.ts";
 import { RateLimiter } from "../auth/rate-limit.ts";
@@ -13,7 +13,9 @@ import { HttpError, forbidden, unauthorized } from "../errors.ts";
 import { systemCheck, type CheckOptions } from "../system/system-check.ts";
 
 export const SESSION_COOKIE = "swarm_session";
-const PUBLIC = new Set(["/api/health", "/api/setup", "/api/auth/login"]);
+// The Linear OAuth callback arrives as a cross-site navigation (no SameSite=Strict cookie); its one-time
+// state, issued only to a signed-in session, is what authorises it.
+const PUBLIC = new Set(["/api/health", "/api/setup", "/api/auth/login", "/api/linear/callback"]);
 
 export interface AppOptions {
   readonly services: Services;
@@ -22,6 +24,8 @@ export interface AppOptions {
   /** Host headers the dashboard answers to (DNS rebinding); Origins must match one of them. */
   readonly allowedHosts: readonly string[];
   readonly logger?: boolean;
+  /** The dashboard's own address; Linear's OAuth callback comes back to it. */
+  readonly dashboardUrl?: string;
 }
 
 declare module "fastify" {
@@ -116,6 +120,18 @@ export async function buildApp(o: AppOptions): Promise<FastifyInstance> {
   app.post<{ Params: { id: string } }>("/api/projects/:id/refresh", async (req) => s.projects.refresh(req.params.id));
   app.post<{ Params: { id: string } }>("/api/projects/:id/protect", async (req) => ({ protected: await s.projects.ensureProtected(req.params.id) }));
   app.get<{ Params: { id: string } }>("/api/projects/:id/pushes", async (req) => s.relay.history(req.params.id));
+  // R5: local projects, profiles, local files, documents of local projects.
+  app.post<{ Body: CreateLocalProject }>("/api/projects/local", { schema: { body: CreateLocalProject } }, async (req) => s.projects.createLocal(actor(req), req.body.name));
+  app.put<{ Params: { id: string }; Body: SetProjectProfile }>("/api/projects/:id/profile", { schema: { body: SetProjectProfile } }, async (req) => s.projects.setProfile(actor(req), req.params.id, req.body));
+  app.put<{ Params: { id: string }; Body: PutProjectFile }>("/api/projects/:id/files", { schema: { body: PutProjectFile } }, async (req) => s.projects.putFile(actor(req), req.params.id, req.body));
+  app.delete<{ Params: { id: string }; Querystring: { path?: string } }>("/api/projects/:id/files", async (req) => s.projects.deleteFile(actor(req), req.params.id, String(req.query.path ?? "")));
+  app.get<{ Params: { id: string }; Querystring: { ref?: string; path?: string } }>("/api/projects/:id/blob", async (req, reply) => {
+    const text = await s.projects.blob(req.params.id, String(req.query.ref ?? ""), String(req.query.path ?? ""));
+    // Shown as text, never rendered: an agent wrote it.
+    return reply.type("text/plain; charset=utf-8").header("x-content-type-options", "nosniff").header("content-security-policy", "default-src 'none'; sandbox").send(text);
+  });
+  app.get("/api/machine", async () => s.machine.get());
+  app.put<{ Body: MachineSettings }>("/api/machine", { schema: { body: MachineSettings } }, async (req) => s.machine.set(actor(req), req.body));
 
   // ---- workstations and system --------------------------------------------------------------
   app.get("/api/workstations", async () => s.pool.list());
@@ -168,6 +184,31 @@ export async function buildApp(o: AppOptions): Promise<FastifyInstance> {
     return s.cli.status();
   });
   app.post<{ Params: { ws: string } }>("/api/cli/codex/:ws/logout", { schema: { params: WS_ID } }, async (req) => s.cli.codexLogout(actor(req), req.params.ws));
+
+  // ---- Linear (R5) --------------------------------------------------------------------------
+  const linearCallback = `${o.dashboardUrl ?? "http://127.0.0.1:4318"}/api/linear/callback`;
+  app.get("/api/linear", async () => ({ ...(await s.linear.status()), redirectUri: linearCallback }));
+  app.put<{ Body: SetLinear }>("/api/linear", { schema: { body: SetLinear } }, async (req) => {
+    const v = await s.linear.configure(actor(req), req.body);
+    // A new owner or more room may let queued tickets start.
+    void s.linearBridge.pump().catch(() => undefined);
+    return { ...v, redirectUri: linearCallback };
+  });
+  app.get("/api/linear/options", async () => s.linear.options());
+  app.get("/api/linear/connect", async () => ({ url: s.linear.connectUrl(linearCallback) }));
+  app.post("/api/linear/disconnect", async (req) => s.linear.disconnect(actor(req)));
+  app.get<{ Querystring: { code?: string; state?: string; error?: string } }>("/api/linear/callback", async (req, reply) => {
+    let message = "Linear is connected.";
+    try {
+      if (req.query.error) throw new Error(req.query.error);
+      await s.linear.callback("linear-oauth", String(req.query.code ?? ""), String(req.query.state ?? ""), linearCallback);
+    } catch (error) {
+      message = `Linear was not connected: ${(error as Error).message}`;
+    }
+    const safe = message.replace(/[<>&"]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" })[c]!);
+    // A page of our own, so the way back to the settings is a same-site navigation (the session cookie is Strict).
+    return reply.type("text/html; charset=utf-8").send(`<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="2;url=/settings"><title>agentSwarm</title><p>${safe}</p><p><a href="/settings">Back to the settings</a></p>`);
+  });
 
   // ---- live updates -------------------------------------------------------------------------
   app.get("/api/ws", { websocket: true }, (socket) => {

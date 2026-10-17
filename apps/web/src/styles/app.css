@@ -198,3 +198,5 @@ ul.plain { list-style: none; padding: 0; margin: var(--space-1) 0 0; display: fl
 .cli-ws { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: var(--space-2) var(--space-4); align-items: center; }
 @media (prefers-reduced-motion: reduce) { .meter-bar > span { transition: none; } }
 td .mono { overflow-wrap: anywhere; }
+.card .mono, .card li { overflow-wrap: anywhere; }
+select { max-width: 100%; }

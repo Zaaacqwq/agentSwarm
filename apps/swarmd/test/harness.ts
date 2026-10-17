@@ -18,6 +18,8 @@ import type { WebAccess } from "../src/web/web-access.ts";
 import { FakeDiscord } from "./fake-discord.ts";
 import type { RunLimits } from "../src/db/schema.ts";
 import { installFakeCli, type FakeCli } from "../../../packages/ws-exec/test/fake-cli.ts";
+import { FakeLinear } from "./fake-linear.ts";
+import { buildLinearWebhook } from "../src/linear/linear-webhook.ts";
 
 const LOCAL_MAIN = fileURLToPath(new URL("../../../packages/ws-exec/src/local-main.ts", import.meta.url));
 export const ADMIN = { username: "admin", password: "correct horse battery staple" };
@@ -36,6 +38,9 @@ export interface Harness {
   readonly discord: FakeDiscord;
   /** Fake `claude` and `codex` the CLI runs use (R4). */
   readonly cli: FakeCli;
+  /** Fake Linear (R5), and agentSwarm's webhook app that it posts to. */
+  readonly linear: FakeLinear;
+  readonly linearWebhook: FastifyInstance;
   /** Pages web_fetch can read, by URL; web_search answers with `searchResult`. */
   readonly web: { pages: Map<string, string>; searches: string[]; searchResult: string };
   /** Scripted model replies, consumed one per model request. */
@@ -87,12 +92,15 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
   writeFileSync(join(layout.wsRoot, "ws-2", "secret.txt"), "ws-2 only\n");
   const remote = makeRemote(base);
   const cli = installFakeCli(layout.cliDir);
+  // "GitHub" repositories by full name; new ones appear when a test creates them (R5: ideas become projects).
+  const remotes = new Map<string, string>([["tester/demo", remote]]);
 
   const faux = createFauxCore({ models: [{ id: "fake-model", input: ["text", "image"] }] });
   const protectedBranches = new Set<string>();
   const pullRequests: { repo: string; head: string; base: string; title: string; body: string }[] = [];
   const prStates = new Map<number, PullRequestState>();
   const discord = new FakeDiscord();
+  const linear = new FakeLinear();
   const webState = { pages: new Map<string, string>(), searches: [] as string[], searchResult: "Results:\n1. Example\n   https://example.com/csv\n   CSV parsing notes" };
   const web: WebAccess = {
     fetch: async (url) => {
@@ -107,7 +115,17 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
   };
   const github: GitHubClient = {
     whoami: async () => ({ login: "tester", expiresAt: null }),
-    repo: async (_t, fullName) => ({ fullName, defaultBranch: "main", private: true, canAdmin: true, cloneUrl: remote }),
+    repo: async (_t, fullName) => {
+      if (!remotes.has(fullName) && fullName !== "tester/demo") throw new Error(`no repository ${fullName}`);
+      return { fullName, defaultBranch: "main", private: true, canAdmin: true, cloneUrl: remotes.get(fullName) ?? remote };
+    },
+    createRepo: async (_t, name) => {
+      const fullName = `tester/${name}`;
+      const path = join(base, "github", `${name}.git`);
+      execFileSync("/usr/bin/git", ["init", "-q", "--bare", "-b", "main", path]);
+      remotes.set(fullName, path);
+      return { fullName };
+    },
     isProtected: async (_t, fullName, branch) => protectedBranches.has(`${fullName}:${branch}`),
     protect: async (_t, fullName, branch) => void protectedBranches.add(`${fullName}:${branch}`),
     createPullRequest: async (_t, fullName, input) => {
@@ -133,15 +151,17 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
       listModels: async () => [{ id: "fake-model", name: "Fake", vision: true, contextWindow: 100_000, inputPerMTok: 0, outputPerMTok: 0 }],
       resolve: async () => ({ model: faux.getModel(), streamFn: faux.streamSimple }),
     }),
-    remoteUrl: () => remote,
+    remoteUrl: (fullName) => remotes.get(fullName) ?? remote,
     refreshMirror: false,
     ...(opts.limits ? { limits: opts.limits } : {}),
     web: () => web,
     transport: discord,
     dashboardUrl: "http://127.0.0.1:4399",
     ...(opts.prPollMs ? { prPollMs: opts.prPollMs } : {}),
+    linearApi: linear,
   });
   await services.pool.sync();
+  const linearWebhook = buildLinearWebhook({ db: db.db, linear: services.linear, received: () => services.linearBridge.drain(), log: () => {} });
   const app = await buildApp({ services, webDist: opts.webDist ?? null, check: { dataDir: layout.swarmdData, volume: null }, allowedHosts: ["localhost:80", "127.0.0.1:4399"] });
 
   const api: Harness["api"] = async (method, url, body, cookie) => {
@@ -162,7 +182,7 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
   };
 
   return {
-    base, layout, remote, services, app, db, protectedBranches, pullRequests, prStates, discord, cli, web: webState,
+    base, layout, remote, services, app, db, protectedBranches, pullRequests, prStates, discord, cli, linear, linearWebhook, web: webState,
     script: (steps) => faux.setResponses(steps),
     scriptAgents(scripts) {
       const queues = new Map(Object.entries(scripts).map(([k, v]) => [k, [...v]]));
@@ -193,6 +213,8 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
     remoteBranches: () => execFileSync("/usr/bin/git", ["for-each-ref", "--format=%(refname:short)", "refs/heads"], { cwd: remote }).toString().trim().split("\n"),
     async close() {
       services.watcher.stop();
+      services.linearBridge.stop();
+      await linearWebhook.close();
       await services.discord.stop();
       await services.runs.stopAll();
       await app.close();

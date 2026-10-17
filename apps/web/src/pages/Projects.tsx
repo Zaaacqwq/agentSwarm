@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { GitHubStatus, ProjectView, PushView } from "@agentswarm/contracts";
+import type { GitHubStatus, LinearOptionsView, LinearStatusView, ProjectProfile, ProjectView, PushView } from "@agentswarm/contracts";
 import { api, ago } from "../api.ts";
 import { useResource } from "../live.ts";
 import { Badge, Empty, Field, Form, PageHead } from "../components/ui.tsx";
@@ -10,7 +10,7 @@ export function ProjectsPage() {
   const [repo, setRepo] = useState("");
   return (
     <div className="stack">
-      <PageHead title="Projects" sub="A project is a GitHub repository. agentSwarm mirrors it and protects its default branch." />
+      <PageHead title="Projects" sub="A project is a GitHub repository (or a local one for experiments). agentSwarm mirrors it and protects its default branch." />
       {github.data && !github.data.configured && <div className="card">Add a GitHub token in Settings first.</div>}
       <section className="card">
         <Form submit="Add project" onSubmit={async () => {
@@ -29,19 +29,24 @@ export function ProjectsPage() {
 
 function Project({ p, onChange }: { p: ProjectView; onChange: () => void }) {
   const pushes = useResource<PushView[]>(`/projects/${p.id}/pushes`);
+  const [open, setOpen] = useState(false);
   return (
     <section className="card stack">
       <div className="row" style={{ justifyContent: "space-between" }}>
         <div>
           <h2>{p.name}</h2>
-          <div className="faint"><span className="mono">{p.githubRepo}</span> · default <span className="mono">{p.defaultBranch}</span> · fetched {ago(p.lastFetchedAt)}</div>
+          <div className="faint"><span className="mono">{p.githubRepo}</span> · default <span className="mono">{p.defaultBranch}</span>{p.kind === "github" && <> · fetched {ago(p.lastFetchedAt)}</>}</div>
         </div>
         <div className="row">
-          <Badge status={p.protectedAt ? "ok" : "bad"}>{p.protectedAt ? `${p.defaultBranch} protected` : `${p.defaultBranch} not protected`}</Badge>
-          {!p.protectedAt && <button className="btn" onClick={() => api("POST", `/projects/${p.id}/protect`, {}).then(onChange).catch((e: Error) => alert(e.message))}>Protect</button>}
-          <button className="btn ghost" onClick={() => api("POST", `/projects/${p.id}/refresh`, {}).then(onChange).catch((e: Error) => alert(e.message))}>Fetch</button>
+          {p.kind === "local"
+            ? <Badge status="cancelled">local only</Badge>
+            : <Badge status={p.protectedAt ? "ok" : "bad"}>{p.protectedAt ? `${p.defaultBranch} protected` : `${p.defaultBranch} not protected`}</Badge>}
+          {p.kind === "github" && !p.protectedAt && <button className="btn" onClick={() => api("POST", `/projects/${p.id}/protect`, {}).then(onChange).catch((e: Error) => alert(e.message))}>Protect</button>}
+          {p.kind === "github" && <button className="btn ghost" onClick={() => api("POST", `/projects/${p.id}/refresh`, {}).then(onChange).catch((e: Error) => alert(e.message))}>Fetch</button>}
+          <button className="btn ghost" aria-expanded={open} onClick={() => setOpen((o) => !o)}>{open ? "Close" : "Profile and files"}</button>
         </div>
       </div>
+      {open && <ProjectSetup p={p} onChange={onChange} />}
       {!!pushes.data?.length && (
         <table>
           <thead><tr><th>Pushed branch</th><th>Result</th><th>When</th></tr></thead>
@@ -51,5 +56,82 @@ function Project({ p, onChange }: { p: ProjectView; onChange: () => void }) {
         </table>
       )}
     </section>
+  );
+}
+
+/** What agents should know about the project, which Linear project feeds it, and its local files (R5). */
+function ProjectSetup({ p, onChange }: { p: ProjectView; onChange: () => void }) {
+  const linear = useResource<LinearStatusView>("/linear");
+  const options = useResource<LinearOptionsView>(linear.data?.connected ? "/linear/options" : null);
+  const [profile, setProfile] = useState<ProjectProfile>(p.profile);
+  const [linearProjectId, setLinearProjectId] = useState(p.linearProjectId ?? "");
+  const [path, setPath] = useState("");
+  const [content, setContent] = useState("");
+  const field = (key: keyof ProjectProfile) => (e: { target: { value: string } }) => setProfile((x) => ({ ...x, [key]: e.target.value || undefined }));
+  return (
+    <div className="stack">
+      <Form submit="Save profile" onSubmit={async () => {
+        await api("PUT", `/projects/${p.id}/profile`, { profile, linearProjectId: linearProjectId || null });
+        onChange();
+      }}>
+        <div className="grid">
+          <Field label="Platform"><input value={profile.platform ?? ""} onChange={field("platform")} placeholder="iOS (SwiftUI), Next.js, Node…" /></Field>
+          <Field label="Install dependencies"><input className="mono" value={profile.setup ?? ""} onChange={field("setup")} placeholder="npm ci" /></Field>
+          <Field label="Build"><input className="mono" value={profile.build ?? ""} onChange={field("build")} placeholder="xcodebuild -scheme App build" /></Field>
+          <Field label="Test"><input className="mono" value={profile.test ?? ""} onChange={field("test")} placeholder="npm test" /></Field>
+        </div>
+        <Field label="Known failures" hint="Tests that already fail; agents leave them alone unless asked."><input value={profile.knownFailures ?? ""} onChange={field("knownFailures")} /></Field>
+        <Field label="Rules" hint="What agents must know or never do here, e.g. production runs on this Mac: never deploy, only open pull requests.">
+          <textarea value={profile.rules ?? ""} onChange={field("rules")} style={{ minHeight: 70 }} />
+        </Field>
+        <div className="grid">
+          <Field label="Reviewer">
+            <select value={profile.reviewRuntime ?? "native"} onChange={(e) => setProfile((x) => ({ ...x, reviewRuntime: e.target.value as ProjectProfile["reviewRuntime"] }))}>
+              <option value="native">Native model</option>
+              <option value="claude_code">Claude Code</option>
+              <option value="codex">Codex</option>
+            </select>
+          </Field>
+          {p.kind === "github" && (
+            <Field label="Linear project" hint={linear.data?.connected ? "Tickets in it come here." : "Connect Linear in Settings first."}>
+              <select value={linearProjectId} onChange={(e) => setLinearProjectId(e.target.value)} disabled={!options.data}>
+                <option value="">None</option>
+                {options.data?.projects.map((lp) => <option key={lp.id} value={lp.id}>{lp.name}</option>)}
+              </select>
+            </Field>
+          )}
+        </div>
+        <label className="row"><input type="checkbox" checked={profile.autoApproveBugs ?? false} onChange={(e) => setProfile((x) => ({ ...x, autoApproveBugs: e.target.checked }))} /> Bug fixes go ahead without asking me to approve the plan (I still merge the pull request)</label>
+      </Form>
+      <div className="stack">
+        <h3>Local files</h3>
+        <p className="faint">Files this project needs that are not in git (Local.xcconfig, Secrets.plist, .env). They are encrypted here, written into every worktree, and refused in any push. Agents can read them: prefer development keys.</p>
+        {p.files.length > 0 && (
+          <table>
+            <tbody>{p.files.map((f) => (
+              <tr key={f.path}><td className="mono">{f.path}</td><td className="faint">{ago(f.updatedAt)}</td>
+                <td><button className="btn ghost" onClick={() => api("DELETE", `/projects/${p.id}/files?path=${encodeURIComponent(f.path)}`).then(onChange).catch((e: Error) => alert(e.message))}>Remove</button></td></tr>
+            ))}</tbody>
+          </table>
+        )}
+        <Form submit="Save file" onSubmit={async () => {
+          await api("PUT", `/projects/${p.id}/files`, { path: path.trim(), content });
+          setPath("");
+          setContent("");
+          onChange();
+        }}>
+          <div className="grid">
+            <Field label="Path in the repository"><input className="mono" value={path} onChange={(e) => setPath(e.target.value)} placeholder="Local.xcconfig" required /></Field>
+            <Field label="Or pick a file"><input type="file" onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (!file) return;
+              if (!path) setPath(file.name);
+              void file.text().then(setContent);
+            }} /></Field>
+          </div>
+          <Field label="Content"><textarea className="mono" value={content} onChange={(e) => setContent(e.target.value)} style={{ minHeight: 90 }} required /></Field>
+        </Form>
+      </div>
+    </div>
   );
 }

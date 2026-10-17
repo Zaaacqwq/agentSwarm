@@ -3,7 +3,7 @@ import { and, asc, desc, eq, gt, inArray } from "drizzle-orm";
 import type { CreateMission, MissionMessageView, MissionView } from "@agentswarm/contracts";
 import type { Db } from "../db/client.ts";
 import { schema } from "../db/client.ts";
-import type { MissionStage } from "../db/schema.ts";
+import type { MissionKind, MissionStage } from "../db/schema.ts";
 import { newId } from "../crypto/tokens.ts";
 import { audit } from "../audit.ts";
 import { badRequest, conflict, notFound } from "../errors.ts";
@@ -19,11 +19,22 @@ import { pageWindow, type WebAccess } from "../web/web-access.ts";
 import { FetchError } from "../web/web-fetch.ts";
 import { MISSION_FINISH, changesBrief, intakeBrief, missionPromptSection, stageBrief, type BriefContext } from "./briefs.ts";
 import { missionTools, webTools, type WebToolOps } from "./mission-tools.ts";
-import { ENDED, GATES, STAGE_LABEL, WORKING, afterStageDone, canMove, requiredDocs, stageTools, DOC_NAMES, type Actor } from "./stages.ts";
+import { ENDED, GATES, STAGE_LABEL, WORKING, afterStageDone, canMove, requiredDocs, stageTools, DOC_NAMES, type Actor, type Flow } from "./stages.ts";
 
 export type MissionRow = typeof schema.missions.$inferSelect;
 type MessageRow = typeof schema.missionMessages.$inferSelect;
 type Source = MessageRow["source"];
+
+/** How a mission was started, beyond what you asked (R5). */
+export interface CreateOptions {
+  readonly origin?: MissionRow["origin"];
+  /** A title instead of the idea's first line (Linear: "ZAC-42 the ticket's title"). */
+  readonly title?: string;
+}
+
+const flowOf = (m: Pick<MissionRow, "kind" | "fast">): Flow => ({ kind: m.kind, fast: m.fast });
+/** Which kinds each kind of project can run: local projects never reach GitHub, so no pull requests. */
+const KINDS_FOR: Record<"github" | "local", readonly MissionKind[]> = { github: ["feature", "bug", "research"], local: ["research", "experiment"] };
 
 export const DEFAULT_MISSION_BUDGET_USD = 3;
 const TREE_TOOLS = new Set(["spawn_agent", "wait_agents", "message_agent", "cancel_agent", "review_agent", "merge_agent"]);
@@ -98,23 +109,26 @@ export class MissionService implements RunHooks {
 
   // ---- what the person does -------------------------------------------------------------
 
-  create(actor: string, input: CreateMission, source: Source = "dashboard", now = Date.now()): MissionView {
+  create(actor: string, input: CreateMission, source: Source = "dashboard", now = Date.now(), opts: CreateOptions = {}): MissionView {
     const project = this.deps.projects.get(input.projectId);
+    const kind = input.kind ?? (project.kind === "local" ? "experiment" : "feature");
+    if (!KINDS_FOR[project.kind].includes(kind)) throw badRequest(`A ${kind} cannot run in ${project.kind === "local" ? "a local project" : "a GitHub project"}`);
     const lead = this.pickLead(project.id, input.agentId);
     const idea = input.idea.trim();
-    const title = (idea.split("\n")[0] ?? idea).slice(0, 80).trim() || "Mission";
+    const title = (opts.title ?? (idea.split("\n")[0] ?? idea)).slice(0, 80).trim() || "Mission";
     const id = newId("msn");
     const docsPath = `docs/agentswarm/${slug(title, 32) || "mission"}-${randomBytes(3).toString("hex")}`;
-    const fast = input.fast ?? false;
-    const brief = intakeBrief({ intent: idea, docs: docsPath, fast, defaultBranch: project.defaultBranch });
+    // Bugs take the short path: reproduce and plan, then the gate.
+    const fast = kind === "bug" ? true : input.fast ?? false;
+    const brief = intakeBrief({ intent: idea, docs: docsPath, fast, defaultBranch: project.defaultBranch, kind });
     // The run cannot reach a hook before the mission row exists: it starts executing only after an await.
     const run = this.deps.runs.create(actor, lead.id, { title, brief, budgetUsd: input.budgetUsd ?? DEFAULT_MISSION_BUDGET_USD }, now, id);
     this.deps.db.insert(schema.missions).values({
       id, projectId: project.id, title, intent: idea, stage: "intake", fast, leadAgentId: lead.id, rootRunId: run.id, treeId: run.treeId!,
       docsPath, pendingStage: null, stageSummary: null, retro: null, docs: [], discordThreadId: null, error: null,
-      createdAt: now, updatedAt: now, endedAt: null,
+      createdAt: now, updatedAt: now, endedAt: null, kind, origin: opts.origin ?? (source === "discord" ? "discord" : source === "linear" ? "linear" : "dashboard"),
     }).run();
-    audit(this.deps.db, actor, "mission.create", id, { projectId: project.id, fast, source }, now);
+    audit(this.deps.db, actor, "mission.create", id, { projectId: project.id, fast, kind, source }, now);
     this.emit(id);
     this.post(id, "user", "text", idea, source, null, now);
     return this.view(id);
@@ -213,7 +227,7 @@ export class MissionService implements RunHooks {
 
   /** Moves the mission if `by` may, then does what entering the stage means. */
   private move(m: MissionRow, to: MissionStage, by: Actor, ctx: { comment?: string; prUrl?: string } = {}, now = Date.now()): boolean {
-    if (!canMove(m.stage, to, by, m.fast)) {
+    if (!canMove(m.stage, to, by, flowOf(m))) {
       this.deps.log("mission move refused", { missionId: m.id, from: m.stage, to, by });
       return false;
     }
@@ -259,7 +273,7 @@ export class MissionService implements RunHooks {
 
   private briefContext(m: MissionRow): BriefContext {
     const project = this.deps.projects.get(m.projectId);
-    return { intent: m.intent, docs: m.docsPath, fast: m.fast, defaultBranch: project.defaultBranch };
+    return { intent: m.intent, docs: m.docsPath, fast: m.fast, defaultBranch: project.defaultBranch, kind: m.kind };
   }
 
   // ---- run hooks ------------------------------------------------------------------------
@@ -267,7 +281,20 @@ export class MissionService implements RunHooks {
   prompt(run: RunRow): { section: string[]; finish: string } | null {
     const m = this.missionOf(run);
     if (!m || m.rootRunId !== run.id) return null;
-    return { section: missionPromptSection(m.docsPath), finish: MISSION_FINISH };
+    const key = this.linearKey(m.id);
+    const section = missionPromptSection(m.docsPath);
+    return { section: key ? [...section, `- This mission is Linear ticket ${key}: start every commit message with "${key}: ".`] : section, finish: MISSION_FINISH };
+  }
+
+  pullRequest(run: RunRow, title: string, body: string): { title: string; body: string } {
+    const m = this.missionOf(run);
+    const key = m && m.rootRunId === run.id ? this.linearKey(m.id) : null;
+    if (!key) return { title, body };
+    return { title: title.startsWith(key) ? title : `${key} ${title}`, body: `${body.trim()}\n\nFixes ${key}` };
+  }
+
+  private linearKey(missionId: string): string | null {
+    return this.deps.db.select({ key: schema.linearSessions.issueKey }).from(schema.linearSessions).where(eq(schema.linearSessions.missionId, missionId)).get()?.key ?? null;
   }
 
   tools(run: RunRow, binding: RunBinding): ReturnType<RunHooks["tools"]> {
@@ -315,7 +342,7 @@ export class MissionService implements RunHooks {
     if (run.status !== "succeeded") return;
     if (m.pendingStage) {
       const to = m.pendingStage;
-      if (!canMove(m.stage, to, "lead", m.fast)) {
+      if (!canMove(m.stage, to, "lead", flowOf(m))) {
         // The mission moved on meanwhile (you stopped it, or the pull request closed): drop the request.
         this.deps.db.update(schema.missions).set({ pendingStage: null }).where(eq(schema.missions.id, m.id)).run();
         return this.emit(m.id);
@@ -323,6 +350,12 @@ export class MissionService implements RunHooks {
       if (to === "done") this.deps.db.update(schema.missions).set({ retro: m.stageSummary }).where(eq(schema.missions.id, m.id)).run();
       this.post(m.id, "lead", to === "awaiting_approval" ? "approval" : "stage", m.stageSummary ?? "(no summary)", "agentswarm");
       this.move(this.row(m.id), to, "lead");
+      // A standing decision of the person: this project's bug fixes go ahead without asking each time.
+      if (to === "awaiting_approval" && m.kind === "bug" && this.deps.projects.get(m.projectId).profile?.autoApproveBugs) {
+        audit(this.deps.db, "system", "mission.auto_approve", m.id, { reason: "project setting" });
+        this.post(m.id, "system", "text", "Approved automatically: this project lets bug fixes go ahead without asking. The pull request still waits for you.", "agentswarm");
+        this.move(this.row(m.id), "building", "person");
+      }
     } else if (WORKING.has(m.stage)) {
       const summary = run.report?.summary ?? "";
       this.post(m.id, "lead", "text", `${summary}\n\n(The lead stopped without finishing this stage. Reply to tell it how to go on.)`.trim(), "agentswarm");
@@ -335,13 +368,13 @@ export class MissionService implements RunHooks {
   /** stage_done and request_approval: checks, then records where the mission goes when this execution ends. */
   private async finishStage(id: string, summary: string, approval: boolean): Promise<string> {
     const m = this.row(id);
-    const next = approval ? (m.stage === "planning" ? "awaiting_approval" : null) : afterStageDone(m.stage, m.fast);
+    const next = approval ? (m.stage === "planning" ? "awaiting_approval" : null) : afterStageDone(m.stage, flowOf(m));
     if (!next) throw new TreeError(approval ? "request_approval is only for the planning stage" : `The ${STAGE_LABEL[m.stage].toLowerCase()} stage does not end with stage_done`);
     const root = this.deps.tree.run(m.rootRunId);
     const live = this.deps.tree.descendants(root.id).filter((r) => !TERMINAL.has(r.status));
     if (live.length) throw new TreeError(`Sub-agents are still working (${live.map((r) => r.title).join(", ")}); wait for them first`);
     const found = await this.docsOnBranch(m, root.branch);
-    const missing = requiredDocs(m.stage).filter((d) => !found.includes(d));
+    const missing = requiredDocs(m.stage, m.kind).filter((d) => !found.includes(d));
     if (missing.length) throw new TreeError(`Commit and git_push ${missing.map((d) => `${m.docsPath}/${d}`).join(", ")} first`);
     if (m.stage === "verifying" && !root.prUrl) throw new TreeError("Open the pull request first (open_pull_request)");
     this.deps.db.update(schema.missions).set({ pendingStage: next, stageSummary: summary, docs: [...new Set([...m.docs, ...found])], updatedAt: Date.now() }).where(eq(schema.missions.id, id)).run();
@@ -415,16 +448,23 @@ export class MissionService implements RunHooks {
     const project = projects.get(m.projectId);
     const root = tree.run(m.rootRunId);
     const ref = root.prState === "merged" ? project.defaultBranch : root.branch;
+    // Local projects have no GitHub: their documents open in the dashboard.
+    const docUrl = (name: string) => project.kind === "local"
+      ? `/api/projects/${project.id}/blob?ref=${encodeURIComponent(root.branch)}&path=${encodeURIComponent(`${m.docsPath}/${name}`)}`
+      : `https://github.com/${project.githubRepo}/blob/${ref}/${m.docsPath}/${name}`;
+    const link = this.deps.db.select({ key: schema.linearSessions.issueKey, url: schema.linearSessions.issueUrl }).from(schema.linearSessions)
+      .where(eq(schema.linearSessions.missionId, m.id)).get();
     const waitingForYou = GATES.has(m.stage)
       || (root.status === "waiting" && (root.waitingFor ?? []).includes(WAIT_FOR_USER))
       || (WORKING.has(m.stage) && TERMINAL.has(root.status) && !m.pendingStage && !this.deps.runs.isActive(root.id));
     return {
       id: m.id, projectId: m.projectId, projectName: project.name, githubRepo: project.githubRepo, title: m.title, intent: m.intent,
       stage: m.stage, fast: m.fast, leadAgentId: m.leadAgentId, rootRunId: m.rootRunId, treeId: m.treeId, branch: root.branch, docsPath: m.docsPath,
-      docs: m.docs.map((name) => ({ name, url: `https://github.com/${project.githubRepo}/blob/${ref}/${m.docsPath}/${name}` })),
+      docs: m.docs.map((name) => ({ name, url: docUrl(name) })),
       budgetUsd: root.budgetUsd ?? 0, costUsd: tree.subtreeCost(root), leadStatus: root.status, waitingForYou: waitingForYou && !ENDED.has(m.stage),
       stageSummary: m.stageSummary, prUrl: root.prUrl, prState: root.prState, retro: m.retro, discordThreadId: m.discordThreadId, error: m.error,
       createdAt: m.createdAt, updatedAt: m.updatedAt, endedAt: m.endedAt,
+      kind: m.kind, origin: m.origin, linear: link ? { key: link.key, url: link.url } : null,
     };
   }
 }

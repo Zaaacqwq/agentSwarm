@@ -215,6 +215,8 @@ export class DiscordBridge {
     const sent = this.deps.db.select({ d: schema.missionMessages.discordMessageId }).from(schema.missionMessages).where(eq(schema.missionMessages.id, message.id)).get();
     if (sent?.d) return;
     const m = this.deps.missions.row(message.missionId);
+    // Linear missions talk in their ticket (R5): Discord only says when the person is needed.
+    if (m.origin === "linear") return this.notify(message, m);
     // The idea itself opens the thread.
     if (message.author === "user" && message.text === m.intent && message.createdAt === m.createdAt) {
       this.deps.missions.markDelivered(message.id, await this.ensureThread(m.id));
@@ -340,6 +342,19 @@ export class DiscordBridge {
     const found = projects.find((p) => p.id === value || p.githubRepo.toLowerCase() === v || p.slug === v || p.name.toLowerCase() === v || p.githubRepo.toLowerCase().endsWith(`/${v}`));
     if (!found) throw new Error(`No project ${value}`);
     return found;
+  }
+
+  private async notify(message: MissionMessageView, m: { id: string; title: string; stage: string }): Promise<void> {
+    const s = this.stored();
+    const needsYou = message.kind === "question" || message.kind === "approval" || message.kind === "error"
+      || (message.author === "system" && /pull request is ready/i.test(message.text));
+    let id = "linear";
+    if (s && needsYou) {
+      const link = this.deps.db.select({ url: schema.linearSessions.issueUrl }).from(schema.linearSessions).where(eq(schema.linearSessions.missionId, m.id)).get()?.url;
+      const what = message.kind === "question" ? "has a question" : message.kind === "approval" ? "has a plan for you to approve" : message.kind === "error" ? "stopped and needs you" : "has a pull request for you to merge";
+      id = await this.deps.transport.send(s.channelId, { content: `**${m.title}** ${what}.${link ? ` ${link}` : ""}` });
+    }
+    this.deps.missions.markDelivered(message.id, id);
   }
 
   private stored(): Stored | null {

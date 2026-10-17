@@ -165,7 +165,7 @@ export class TreeService {
   }
 
   /** A reviewer for a finished child: it checks out the child's branch read-only and gets the diff. */
-  async startReview(parent: RunRow, childId: string, now = Date.now()): Promise<RunRow> {
+  async startReview(parent: RunRow, childId: string, now = Date.now(), runtime: AgentRuntime = "native"): Promise<RunRow> {
     const { db, agents, projects } = this.deps;
     const child = this.child(parent, childId);
     if (child.kind !== "task") throw new TreeError("Only task agents can be reviewed");
@@ -177,7 +177,9 @@ export class TreeService {
     // The review is for exactly this commit; a later push needs a new review.
     const sha = (await gitOk(this.deps.git, ["rev-parse", `refs/heads/${child.branch}`], { cwd: project.mirrorPath })).trim();
     const diff = await this.diff(project, `refs/heads/${base}`, sha);
-    const reviewer = agents.createEphemeral(agents.get(parent.agentId), { name: `${child.title}-review`.slice(0, 30), role: "reviewer" }, now);
+    const reviewer = agents.createEphemeral(agents.get(parent.agentId), {
+      name: `${child.title}-review`.slice(0, 30), role: "reviewer", runtime, ...(runtime === "native" ? {} : { modelId: CLI_DEFAULT_MODEL }),
+    }, now);
     const n = this.children(parent.id).filter((r) => r.kind === "review" && r.reviewOf === child.id).length + 1;
     const childNode = child.branch.split("/").pop()!;
     const row: RunRow = {
@@ -186,7 +188,7 @@ export class TreeService {
       workstationId: null, status: "queued", pendingMessage: reviewBrief(child, base, diff),
       report: null, error: null, turns: 0, tokensIn: 0, tokensOut: 0, costUsd: 0, limits: this.deps.limits,
       createdAt: now, startedAt: null, endedAt: null, treeId: parent.treeId, parentRunId: parent.id, depth: parent.depth + 1,
-      baseBranch: base, budgetUsd: this.carve(parent, TREE_LIMITS.reviewBudgetUsd, true), kind: "review", reviewOf: child.id,
+      baseBranch: base, budgetUsd: runtime === "native" ? this.carve(parent, TREE_LIMITS.reviewBudgetUsd, true) : 0, kind: "review", reviewOf: child.id,
       review: null, mergedAt: null, prUrl: null, waitingFor: null, reviewSha: sha,
       missionId: parent.missionId, prState: null, cleanedAt: null, cliSession: null, estimatedUsd: 0,
     };

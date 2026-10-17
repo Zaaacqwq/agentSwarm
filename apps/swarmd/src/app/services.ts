@@ -23,6 +23,10 @@ import { createWebAccess, type WebAccess } from "../web/web-access.ts";
 import { DiscordBridge } from "../discord/bridge.ts";
 import type { ChatTransport } from "../discord/transport.ts";
 import { CliService } from "../cli/cli-service.ts";
+import { MachineService } from "../system/machine.ts";
+import { LinearService } from "../linear/linear-service.ts";
+import { LinearBridge } from "../linear/linear-bridge.ts";
+import { LinearGraphql, type LinearApi } from "../linear/linear-client.ts";
 
 export type Logger = (level: "info" | "warn" | "error", msg: string, extra?: Record<string, unknown>) => void;
 
@@ -46,6 +50,8 @@ export interface ServiceDeps {
   /** Links in Discord messages point here. */
   readonly dashboardUrl: string;
   readonly prPollMs?: number;
+  /** Tests fake Linear; production talks to api.linear.app. */
+  readonly linearApi?: LinearApi;
 }
 
 export interface Services {
@@ -65,6 +71,9 @@ export interface Services {
   readonly watcher: PullRequestWatcher;
   readonly discord: DiscordBridge;
   readonly cli: CliService;
+  readonly machine: MachineService;
+  readonly linear: LinearService;
+  readonly linearBridge: LinearBridge;
 }
 
 export function createServices(d: ServiceDeps): Services {
@@ -72,7 +81,7 @@ export function createServices(d: ServiceDeps): Services {
   const endpoints = new EndpointService(d.db, d.secrets);
   const gateway = d.gateway?.(endpoints) ?? new PiModelGateway(endpoints);
   const github = new GitHubService(d.db, d.secrets, d.githubClient);
-  const projects = new ProjectService({ db: d.db, github, git: d.git, mirrorsDir: d.layout.mirrors, ...(d.remoteUrl ? { remoteUrl: d.remoteUrl } : {}) });
+  const projects = new ProjectService({ db: d.db, github, git: d.git, mirrorsDir: d.layout.mirrors, secrets: d.secrets, ...(d.remoteUrl ? { remoteUrl: d.remoteUrl } : {}) });
   const pool = new WorkstationPool(d.db, d.backend, (workstation) => bus.publish({ kind: "workstation", workstation }));
   const agents = new AgentService(d.db);
   const relay = new Relay({ db: d.db, backend: d.backend, projects, git: d.git, bus, layout: d.layout });
@@ -101,5 +110,7 @@ export function createServices(d: ServiceDeps): Services {
     },
   });
   const discord = new DiscordBridge({ db: d.db, secrets: d.secrets, bus, missions, projects, transport: d.transport, dashboardUrl: d.dashboardUrl, log: warn, quota: () => cli.quota() });
-  return { bus, auth: new AuthService(d.db), endpoints, gateway, github, projects, pool, agents, relay, runs, tree, cleanup, missions, watcher, discord, cli };
+  const linear = new LinearService({ db: d.db, secrets: d.secrets, api: d.linearApi ?? new LinearGraphql(), log: warn });
+  const linearBridge = new LinearBridge({ db: d.db, bus, linear, missions, projects, agents, tree, github, git: d.git, dashboardUrl: d.dashboardUrl, log: warn });
+  return { bus, auth: new AuthService(d.db), endpoints, gateway, github, projects, pool, agents, relay, runs, tree, cleanup, missions, watcher, discord, cli, machine: new MachineService(d.db, d.layout.mirrors), linear, linearBridge };
 }

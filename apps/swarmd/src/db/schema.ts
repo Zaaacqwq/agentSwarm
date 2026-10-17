@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { index, integer, real, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { index, integer, primaryKey, real, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 const json = <T>(name: string) => text(name, { mode: "json" }).$type<T>();
 
@@ -59,7 +59,37 @@ export const projects = sqliteTable("projects", {
   protectedAt: integer("protected_at"),
   lastFetchedAt: integer("last_fetched_at"),
   createdAt: integer("created_at").notNull(),
+  // R5: projects beyond GitHub, and what agents should know about them.
+  /** "github": a repository on GitHub. "local": only on this Mac (sandbox experiments, ideas); nothing is pushed anywhere. */
+  kind: text("kind", { enum: ["github", "local"] }).notNull().default("github"),
+  /** The project's profile (platform, commands, rules); shown to every agent working in it. */
+  profile: json<ProjectProfile>("profile"),
+  /** The Linear project whose tickets come here. */
+  linearProjectId: text("linear_project_id"),
 }, (t) => [uniqueIndex("projects_slug_uq").on(t.slug), uniqueIndex("projects_repo_uq").on(t.githubRepo)]);
+
+export interface ProjectProfile {
+  readonly platform?: string;
+  readonly setup?: string;
+  readonly build?: string;
+  readonly test?: string;
+  /** Tests known to fail that are not the agents' business. */
+  readonly knownFailures?: string;
+  /** Free-form rules, e.g. "production runs on this Mac: never deploy". */
+  readonly rules?: string;
+  /** Who reviews sub-agents' work in this project. */
+  readonly reviewRuntime?: "native" | "claude_code" | "codex";
+  /** Bug tickets skip plan approval (the merge gate stays). */
+  readonly autoApproveBugs?: boolean;
+}
+
+/** Local files a project needs that are not in git (Local.xcconfig, .env): written into every worktree, never committed. */
+export const projectFiles = sqliteTable("project_files", {
+  projectId: text("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  path: text("path").notNull(),
+  contentSealed: text("content_sealed").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+}, (t) => [primaryKey({ columns: [t.projectId, t.path] })]);
 
 export const workstations = sqliteTable("workstations", {
   id: text("id").primaryKey(),
@@ -188,6 +218,8 @@ export const MISSION_STAGES = [
   "intake", "research", "discussion", "planning", "awaiting_approval", "building", "verifying", "awaiting_merge", "retro", "done", "cancelled",
 ] as const;
 export type MissionStage = (typeof MISSION_STAGES)[number];
+export const MISSION_KINDS = ["feature", "bug", "research", "experiment"] as const;
+export type MissionKind = (typeof MISSION_KINDS)[number];
 
 /** One idea pursued in one project, from your first sentence to a merged pull request (R3). */
 export const missions = sqliteTable("missions", {
@@ -215,6 +247,11 @@ export const missions = sqliteTable("missions", {
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
   endedAt: integer("ended_at"),
+  // R5
+  /** Which flow it follows (missions/stages.ts). */
+  kind: text("kind", { enum: MISSION_KINDS }).notNull().default("feature"),
+  /** Where it was started; Linear missions talk in their ticket, Discord only notifies. */
+  origin: text("origin", { enum: ["dashboard", "discord", "linear"] }).notNull().default("dashboard"),
 }, (t) => [index("missions_project_idx").on(t.projectId, t.createdAt), index("missions_stage_idx").on(t.stage)]);
 
 export const missionMessages = sqliteTable("mission_messages", {
@@ -224,11 +261,43 @@ export const missionMessages = sqliteTable("mission_messages", {
   /** question: the lead waits for an answer; approval: the plan waits for yours. */
   kind: text("kind", { enum: ["text", "question", "stage", "approval", "error"] }).notNull(),
   text: text("text").notNull(),
-  /** Where you wrote it (user messages): dashboard or discord. */
-  source: text("source", { enum: ["dashboard", "discord", "agentswarm"] }).notNull(),
+  /** Where you wrote it (user messages): dashboard, discord or linear. */
+  source: text("source", { enum: ["dashboard", "discord", "agentswarm", "linear"] }).notNull(),
   discordMessageId: text("discord_message_id"),
   createdAt: integer("created_at").notNull(),
+  /** R5: when it was posted to the mission's Linear session (null: not yet, or not a Linear mission). */
+  linearDeliveredAt: integer("linear_delivered_at"),
 }, (t) => [index("mission_messages_idx").on(t.missionId, t.id)]);
+
+/** R5: Linear webhook deliveries, stored before they are answered and handled after (5-second limit). */
+export const linearEvents = sqliteTable("linear_events", {
+  deliveryId: text("delivery_id").primaryKey(),
+  event: text("event").notNull(),
+  payload: json<Record<string, unknown>>("payload").notNull(),
+  receivedAt: integer("received_at").notNull(),
+  processedAt: integer("processed_at"),
+  error: text("error"),
+}, (t) => [index("linear_events_pending_idx").on(t.processedAt, t.receivedAt)]);
+
+/** R5: one Linear agent session (a ticket given to agentSwarm) and the mission it became. */
+export const linearSessions = sqliteTable("linear_sessions", {
+  sessionId: text("session_id").primaryKey(),
+  issueId: text("issue_id").notNull(),
+  /** e.g. ZAC-42 */
+  issueKey: text("issue_key").notNull(),
+  issueUrl: text("issue_url").notNull(),
+  title: text("title").notNull(),
+  /** Linear priority: 1 urgent … 4 low, 0 none. */
+  priority: integer("priority").notNull(),
+  status: text("status", { enum: ["queued", "active", "ended", "refused"] }).notNull(),
+  missionId: text("mission_id"),
+  /** What to start with once it leaves the queue. */
+  request: json<{ kind: MissionKind; text: string; linearProjectId: string | null; teamId: string | null }>("request").notNull(),
+  /** Sent stage checklist, to avoid resending the same. */
+  planDigest: text("plan_digest"),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+}, (t) => [index("linear_sessions_status_idx").on(t.status, t.priority, t.createdAt), index("linear_sessions_mission_idx").on(t.missionId)]);
 
 /** Small settings rows (id "discord": the bot). Secrets are sealed. */
 export const settings = sqliteTable("settings", {

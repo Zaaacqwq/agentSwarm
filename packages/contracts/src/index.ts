@@ -71,7 +71,46 @@ export interface ProjectView {
   readonly protectedAt: number | null;
   readonly lastFetchedAt: number | null;
   readonly createdAt: number;
+  /** R5: "local" projects live only on this Mac (sandbox experiments, ideas). */
+  readonly kind: "github" | "local";
+  readonly profile: ProjectProfile;
+  readonly linearProjectId: string | null;
+  /** Paths of the local files (not their contents) written into every worktree. */
+  readonly files: readonly { readonly path: string; readonly updatedAt: number }[];
 }
+
+// ---- project profile and files (R5) -------------------------------------------------------
+export const ProjectProfile = Type.Object({
+  platform: Type.Optional(Type.String({ maxLength: 80 })),
+  setup: Type.Optional(Type.String({ maxLength: 1000 })),
+  build: Type.Optional(Type.String({ maxLength: 1000 })),
+  test: Type.Optional(Type.String({ maxLength: 1000 })),
+  knownFailures: Type.Optional(Type.String({ maxLength: 2000 })),
+  rules: Type.Optional(Type.String({ maxLength: 4000 })),
+  reviewRuntime: Type.Optional(Type.Union([Type.Literal("native"), Type.Literal("claude_code"), Type.Literal("codex")])),
+  autoApproveBugs: Type.Optional(Type.Boolean()),
+});
+export type ProjectProfile = Static<typeof ProjectProfile>;
+
+export const SetProjectProfile = Type.Object({
+  profile: ProjectProfile,
+  linearProjectId: Type.Optional(Type.Union([Type.String({ minLength: 1, maxLength: 64 }), Type.Null()])),
+});
+export type SetProjectProfile = Static<typeof SetProjectProfile>;
+
+/** A file path inside the worktree: relative, no "..", not in .git. */
+export const PROJECT_FILE_PATH = "^(?!\\.git(/|$))(?!.*(^|/)\\.\\.(/|$))[A-Za-z0-9._@+-][A-Za-z0-9._@+ /-]{0,199}$";
+export const PutProjectFile = Type.Object({
+  path: Type.String({ pattern: PROJECT_FILE_PATH }),
+  content: Type.String({ maxLength: 256 * 1024 }),
+});
+export type PutProjectFile = Static<typeof PutProjectFile>;
+
+export const CreateLocalProject = Type.Object({ name: Type.String({ minLength: 1, maxLength: 60, pattern: "^[A-Za-z0-9][A-Za-z0-9 ._-]*$" }) });
+export type CreateLocalProject = Static<typeof CreateLocalProject>;
+
+export const MachineSettings = Type.Object({ denyPorts: Type.Array(Type.Integer({ minimum: 1, maximum: 65535 }), { maxItems: 200 }) });
+export type MachineSettings = Static<typeof MachineSettings>;
 
 export interface PushView {
   readonly id: number;
@@ -223,8 +262,11 @@ export const CreateMission = Type.Object({
   budgetUsd: Type.Optional(Type.Number({ minimum: 0.1, maximum: 50 })),
   /** The lead; default: the project's agent named Lead, else its newest agent. */
   agentId: Type.Optional(Type.String()),
+  /** R5: which flow (default feature). */
+  kind: Type.Optional(Type.Union([Type.Literal("feature"), Type.Literal("bug"), Type.Literal("research"), Type.Literal("experiment")])),
 });
 export type CreateMission = Static<typeof CreateMission>;
+export type MissionKind = "feature" | "bug" | "research" | "experiment";
 
 export const MissionReply = Type.Object({ text: Type.String({ minLength: 1, maxLength: 8000 }) });
 export type MissionReply = Static<typeof MissionReply>;
@@ -262,6 +304,10 @@ export interface MissionView {
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly endedAt: number | null;
+  readonly kind: MissionKind;
+  readonly origin: "dashboard" | "discord" | "linear";
+  /** The Linear ticket it came from. */
+  readonly linear: { readonly key: string; readonly url: string } | null;
 }
 
 export interface MissionMessageView {
@@ -270,7 +316,7 @@ export interface MissionMessageView {
   readonly author: "user" | "lead" | "system";
   readonly kind: "text" | "question" | "stage" | "approval" | "error";
   readonly text: string;
-  readonly source: "dashboard" | "discord" | "agentswarm";
+  readonly source: "dashboard" | "discord" | "agentswarm" | "linear";
   readonly createdAt: number;
 }
 
@@ -365,6 +411,45 @@ export interface CliTestResult {
   readonly ok: boolean;
   readonly detail: string;
   readonly workstationId: string | null;
+}
+
+// ---- Linear (R5) --------------------------------------------------------------------------
+export const SetLinear = Type.Object({
+  /** From the Linear application you created; omit secrets to keep the stored ones. */
+  clientId: Type.Optional(Type.String({ minLength: 8, maxLength: 200 })),
+  clientSecret: Type.Optional(Type.String({ minLength: 8, maxLength: 500 })),
+  webhookSecret: Type.Optional(Type.String({ minLength: 8, maxLength: 500 })),
+  /** The only Linear user whose tickets agentSwarm takes. */
+  ownerUserId: Type.Optional(Type.Union([Type.String({ minLength: 1, maxLength: 64 }), Type.Null()])),
+  /** Linear projects that are not a repository: throwaway experiments, and ideas without a repository yet. */
+  sandboxProjectId: Type.Optional(Type.Union([Type.String({ minLength: 1, maxLength: 64 }), Type.Null()])),
+  ideasProjectId: Type.Optional(Type.Union([Type.String({ minLength: 1, maxLength: 64 }), Type.Null()])),
+  /** Tickets worked on at once; the rest wait, by priority. */
+  maxActive: Type.Optional(Type.Integer({ minimum: 1, maximum: 8 })),
+});
+export type SetLinear = Static<typeof SetLinear>;
+
+export interface LinearStatusView {
+  readonly configured: boolean;
+  readonly connected: boolean;
+  readonly organization: string | null;
+  readonly appUser: string | null;
+  readonly clientId: string | null;
+  readonly hasWebhookSecret: boolean;
+  readonly ownerUserId: string | null;
+  readonly sandboxProjectId: string | null;
+  readonly ideasProjectId: string | null;
+  readonly maxActive: number;
+  /** Where Linear must send webhooks (set in the Linear application). */
+  readonly webhookPath: string;
+  readonly lastEventAt: number | null;
+  readonly error: string | null;
+  readonly queue: readonly { readonly key: string; readonly title: string; readonly status: string; readonly url: string; readonly missionId: string | null }[];
+}
+
+export interface LinearOptionsView {
+  readonly users: readonly { readonly id: string; readonly name: string; readonly email: string }[];
+  readonly projects: readonly { readonly id: string; readonly name: string }[];
 }
 
 // ---- system check ------------------------------------------------------------------------

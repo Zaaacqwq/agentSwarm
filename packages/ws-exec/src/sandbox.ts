@@ -1,5 +1,20 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { ExecEnv } from "./layout.ts";
 import { space } from "./space.ts";
+
+/** Where swarmd lists the local ports agents must not reach (production services on this Mac; R5). */
+export const denyPortsFile = (env: ExecEnv) => join(env.layout.mirrors, ".agentswarm", "deny-ports.json");
+
+/** Read on every profile: a change in the dashboard applies to the next command. A broken file denies nothing extra. */
+export function deniedPorts(env: ExecEnv): number[] {
+  try {
+    const raw = JSON.parse(readFileSync(denyPortsFile(env), "utf8")) as unknown;
+    return Array.isArray(raw) ? [...new Set(raw.filter((p): p is number => Number.isInteger(p) && p >= 1 && p <= 65535))].slice(0, 200) : [];
+  } catch {
+    return [];
+  }
+}
 
 /**
  * Seatbelt profile for every command an agent runs. In SBPL the last matching rule wins:
@@ -31,8 +46,8 @@ export function sandboxProfile(env: ExecEnv, scope: string, extraWritable: reado
     // Second wall for GUI services (the first is ws-launch's per-user session): clipboard, screen, Apple Events.
     `(deny appleevent-send)`,
     `(deny mach-lookup (global-name "com.apple.pasteboard.1") (global-name-regex #"^com\\.apple\\.windowserver"))`,
-    // The dashboard API is not for agents (logins, rate limits, run data).
-    `(deny network-outbound (remote ip ${q(`localhost:${layout.swarmdPort}`)}))`,
+    // The dashboard API is not for agents (logins, rate limits, run data); nor are the person's own services.
+    ...[layout.swarmdPort, ...deniedPorts(env)].map((port) => `(deny network-outbound (remote ip ${q(`localhost:${port}`)}))`),
   ].join("\n");
 }
 

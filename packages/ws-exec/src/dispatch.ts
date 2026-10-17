@@ -51,7 +51,7 @@ function run(env: ExecEnv, r: Request, emit: cli.Emit): unknown {
     case "fs.edit": return fs.edit(env, r.scope, r.path, r.oldText, r.newText, r.replaceAll);
     case "fs.grep": return fs.grep(env, r.scope, r.pattern, r.path, r.glob, r.maxResults);
     case "exec": return exec(env, r.scope, r.command, r.timeoutMs);
-    case "git.clone": return git.clone(env, r.scope, r.mirror, r.branch, r.base);
+    case "git.clone": return git.clone(env, r.scope, r.mirror, r.branch, r.base, undefined, r.files);
     case "git.status": return git.status(env, r.scope);
     case "git.commit": return git.commit(env, r.scope, r.message);
     case "git.pushInbox": return git.pushInbox(env, r.scope, r.branch);

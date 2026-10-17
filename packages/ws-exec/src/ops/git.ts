@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import type { ExecEnv } from "../layout.ts";
 import { OpError } from "../protocol.ts";
-import { resolveScope } from "../paths.ts";
+import { resolveInScope, resolveScope } from "../paths.ts";
 import { prepareSpace, space } from "../space.ts";
 import { runProcess } from "../process.ts";
 import { sandboxed } from "../sandbox.ts";
@@ -28,7 +28,34 @@ function inboxPath(env: ExecEnv): string {
   return `${env.layout.inbox}/${env.user}.git`;
 }
 
-export async function clone(env: ExecEnv, scope: string, mirror: string, branch: string, base: string, author = AUTHOR) {
+const FILE_PATH = /^(?!\.git(\/|$))(?!.*(^|\/)\.\.(\/|$))[A-Za-z0-9._@+-][A-Za-z0-9._@+ /-]{0,199}$/;
+const MAX_FILES = 20;
+
+/**
+ * The project's local files (Local.xcconfig, .env): written into the worktree and listed in
+ * .git/info/exclude so `git add -A` never picks them up. The Relay refuses them in a push too.
+ */
+function placeFiles(dir: string, files: readonly { path: string; content: string }[] | undefined): number {
+  if (!files?.length) return 0;
+  if (files.length > MAX_FILES) throw new OpError("bad_request", `At most ${MAX_FILES} files`);
+  const excludeFile = join(dir, ".git", "info", "exclude");
+  mkdirSync(dirname(excludeFile), { recursive: true });
+  const excluded = new Set((existsSync(excludeFile) ? readFileSync(excludeFile, "utf8") : "").split("\n"));
+  for (const f of files) {
+    if (typeof f.path !== "string" || !FILE_PATH.test(f.path) || typeof f.content !== "string") throw new OpError("bad_request", `Invalid file ${String(f.path)}`);
+    const target = resolveInScope(dir, f.path);
+    mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
+    writeFileSync(target, f.content, { mode: 0o600 });
+    const line = `/${f.path}`;
+    if (!excluded.has(line)) {
+      appendFileSync(excludeFile, `${line}\n`);
+      excluded.add(line);
+    }
+  }
+  return files.length;
+}
+
+export async function clone(env: ExecEnv, scope: string, mirror: string, branch: string, base: string, author = AUTHOR, files?: readonly { path: string; content: string }[]) {
   if (!WORKTREE_SCOPE.test(scope)) throw new OpError("bad_request", "Worktrees live at worktrees/<repo>/<name>");
   if (!BRANCH_PATTERN.test(branch)) throw new OpError("bad_request", `Branch must look like swarm/<project>/<part>: ${branch}`);
   if (!BASE_PATTERN.test(base) || base.includes("..")) throw new OpError("bad_request", "Invalid base branch");
@@ -41,7 +68,7 @@ export async function clone(env: ExecEnv, scope: string, mirror: string, branch:
     const current = await git(env, dir, ["rev-parse", "--abbrev-ref", "HEAD"], undefined, 30_000, scope);
     if (existsSync(join(dir, ".git")) && current.exitCode === 0 && current.output.trim() === branch) {
       const head = ok(await git(env, dir, ["rev-parse", "HEAD"], undefined, 30_000, scope), "rev-parse").output.trim();
-      return { scope, branch, head, resumed: true };
+      return { scope, branch, head, resumed: true, files: placeFiles(dir, files) };
     }
     throw new OpError("conflict", `Worktree ${scope} already exists on another branch`);
   }
@@ -58,7 +85,7 @@ export async function clone(env: ExecEnv, scope: string, mirror: string, branch:
     ok(await git(env, dir, ["checkout", "--quiet", "-b", branch], undefined, 120_000, scope), "checkout");
   }
   const head = ok(await git(env, dir, ["rev-parse", "HEAD"], undefined, 120_000, scope), "rev-parse").output.trim();
-  return { scope, branch, head, resumed: remoteBranch.exitCode === 0 };
+  return { scope, branch, head, resumed: remoteBranch.exitCode === 0, files: placeFiles(dir, files) };
 }
 
 export async function status(env: ExecEnv, scope: string) {

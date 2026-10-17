@@ -11,7 +11,7 @@ export type CliEvent =
   | { readonly kind: "turn" }
   | { readonly kind: "usage"; readonly tokensIn: number; readonly tokensOut: number; readonly estimatedUsd: number | null; readonly turns: number | null }
   | { readonly kind: "quota"; readonly quota: CliQuota }
-  | { readonly kind: "result"; readonly report: RunReport | null; readonly text: string; readonly isError: boolean; readonly error: string | null }
+  | { readonly kind: "result"; readonly report: RunReport | null; readonly text: string; readonly isError: boolean; readonly error: string | null; readonly verdict?: Verdict | null }
   | { readonly kind: "error"; readonly message: string };
 
 /** Claude's subscription windows: share used (0–1) and when each resets (ms). */
@@ -22,6 +22,26 @@ export interface CliQuota {
   readonly sevenDayResetsAt: number | null;
   readonly status: string;
   readonly at: number;
+}
+
+export interface Verdict {
+  readonly approved: boolean;
+  readonly comments: string;
+}
+
+/** `{approved, comments}` from a CLI reviewer's structured output (an object or its JSON text), or null. */
+export function toVerdict(value: unknown): Verdict | null {
+  let v = value;
+  if (typeof v === "string") {
+    try {
+      v = JSON.parse(v.trim());
+    } catch {
+      return null;
+    }
+  }
+  const o = obj(v);
+  if (typeof o.approved !== "boolean" || typeof o.comments !== "string" || !o.comments.trim()) return null;
+  return { approved: o.approved, comments: o.comments.trim().slice(0, 8000) };
 }
 
 export interface CliParser {
@@ -134,7 +154,7 @@ export class ClaudeParser implements CliParser {
         const isError = e.is_error === true || e.subtype !== "success";
         const report = toReport(e.structured_output) ?? toReport(e.result);
         const error = isError ? claudeError(e) : null;
-        return [usage, { kind: "result", report, text: str(e.result), isError, error }];
+        return [usage, { kind: "result", report, text: str(e.result), isError, error, verdict: toVerdict(e.structured_output) ?? toVerdict(e.result) }];
       }
       default:
         return [];
@@ -177,8 +197,8 @@ export class CodexParser implements CliParser {
         const type = str(item.type);
         if (type === "agent_message") {
           this.lastMessage = str(item.text);
-          // The last message is the structured report; it is shown as the result, not as chat.
-          return toReport(this.lastMessage) ? [] : [{ kind: "text", text: this.lastMessage }];
+          // The last message is the structured report or verdict; it is shown as the result, not as chat.
+          return toReport(this.lastMessage) || toVerdict(this.lastMessage) ? [] : [{ kind: "text", text: this.lastMessage }];
         }
         if (type === "error") return [{ kind: "error", message: str(item.message).slice(0, 500) }];
         const name = CODEX_TOOL[type];
@@ -194,7 +214,7 @@ export class CodexParser implements CliParser {
         const u = obj(e.usage);
         return [
           { kind: "usage", tokensIn: num(u.input_tokens), tokensOut: num(u.output_tokens) + num(u.reasoning_output_tokens), estimatedUsd: null, turns: this.turns },
-          { kind: "result", report: toReport(this.lastMessage), text: this.lastMessage, isError: false, error: null },
+          { kind: "result", report: toReport(this.lastMessage), text: this.lastMessage, isError: false, error: null, verdict: toVerdict(this.lastMessage) },
         ];
       }
       case "turn.failed": {
