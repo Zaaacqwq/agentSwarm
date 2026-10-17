@@ -6,6 +6,8 @@ import { checkUrl, decodeEntities, fetchPage, htmlToText, isPublicAddress } from
 import { formatSearch, pageWindow } from "../src/web/web-access.ts";
 import { splitMessage } from "../src/discord/transport.ts";
 import { parsePullRequestUrl } from "../src/github/github-client.ts";
+import { Type, validateToolArguments } from "@earendil-works/pi-ai";
+import { clipToSchema } from "../src/agents/clip.ts";
 
 describe("mission stages", () => {
   test("the lead moves through the working stages, the fast track skips research and discussion", () => {
@@ -131,5 +133,22 @@ describe("discord and github helpers", () => {
     assert.deepEqual(parsePullRequestUrl("https://github.com/Zaaacqwq/agentswarm-playground/pull/12"), { repo: "Zaaacqwq/agentswarm-playground", number: 12 });
     assert.equal(parsePullRequestUrl("https://github.com/a/b/issues/1"), null);
     assert.equal(parsePullRequestUrl("https://evil.example/a/b/pull/1"), null);
+  });
+
+  test("over-long tool text is cut to the schema limit instead of rejected (no resend loop)", () => {
+    const schema = Type.Object({ summary: Type.String({ minLength: 1, maxLength: 400 }), notes: Type.Array(Type.String({ maxLength: 20 })), other: Type.Optional(Type.String({ maxLength: 10 })) });
+    const clip = clipToSchema(schema);
+    const ok = { summary: "short", notes: ["a"] };
+    assert.equal(clip(ok), ok, "untouched arguments are returned as they are");
+    const long = { summary: "s".repeat(1000), notes: ["n".repeat(50), "fine"], other: "o".repeat(30) };
+    const out = clip(long);
+    assert.equal(out.summary.length, 400);
+    assert.match(out.summary, /600 characters cut/);
+    assert.equal(out.notes[0].length, 20);
+    assert.equal(out.notes[1], "fine");
+    assert.equal(out.other.length, 10);
+    assert.equal(long.summary.length, 1000, "the original is not changed");
+    const args = validateToolArguments({ name: "report", description: "", parameters: schema } as any, { type: "toolCall", id: "1", name: "report", arguments: out } as any);
+    assert.equal((args as any).summary.length, 400);
   });
 });

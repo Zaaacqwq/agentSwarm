@@ -6,6 +6,7 @@ import { fauxAssistantMessage, fauxToolCall, type FauxResponseFactory, type Tran
 import type { MissionView } from "@agentswarm/contracts";
 import { harness, type Harness } from "./harness.ts";
 import { CHANNEL, OWNER, STRANGER, until } from "./fake-discord.ts";
+import { MISSION_LEAD_TURNS } from "../src/agents/run-service.ts";
 
 type Args = Parameters<typeof fauxToolCall>[1];
 const call = (name: string, args: Args) => fauxAssistantMessage([fauxToolCall(name, args)], { stopReason: "toolUse" });
@@ -179,6 +180,7 @@ describe("a mission", () => {
     assert.match(done.retro ?? "", /Went well: small plan/);
     await until(() => h.services.runs.view(done.rootRunId).cleanedAt !== null);
     assert.deepEqual(h.remoteBranches(), ["main"]);
+    assert.equal(h.services.runs.get(done.rootRunId).limits.maxTurns, MISSION_LEAD_TURNS, "the lead gets a whole stage's worth of turns");
     for (const n of h.services.runs.tree(done.treeId).nodes) {
       if (n.workstationId) assert.ok(!existsSync(join(h.layout.wsRoot, n.workstationId, h.services.tree.run(n.id).worktreeScope)), `${n.agentName}'s worktree is gone`);
     }

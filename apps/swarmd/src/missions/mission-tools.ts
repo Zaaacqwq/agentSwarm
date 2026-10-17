@@ -1,5 +1,6 @@
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
+import { clipToSchema } from "../agents/clip.ts";
 import type { StageTools } from "./stages.ts";
 
 const text = (t: string, terminate = false): AgentToolResult<undefined> & { terminate?: boolean } => ({ content: [{ type: "text", text: t }], details: undefined, ...(terminate ? { terminate: true } : {}) });
@@ -60,7 +61,8 @@ export function missionTools(ops: MissionToolOps, t: StageTools): AgentTool<any,
       execute: async (_id, p: any) => text(await ops.requestApproval(p.summary), true),
     });
   }
-  return tools.map((tool) => ({ ...tool, executionMode: "sequential" as const }));
+  // Text for the person: cut an over-long message rather than have the lead resend it again and again.
+  return tools.map((tool) => ({ ...tool, prepareArguments: clipToSchema(tool.parameters), executionMode: "sequential" as const }));
 }
 
 /** Research on the web, done by swarmd (workstations stay offline). */

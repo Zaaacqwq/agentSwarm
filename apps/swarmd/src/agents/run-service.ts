@@ -44,7 +44,9 @@ export interface RunHooks {
   ended(run: RunRow): void;
 }
 
-export const DEFAULT_LIMITS: RunLimits = { maxTurns: 40, maxDurationMs: 30 * 60_000, maxCostUsd: 1 };
+export const DEFAULT_LIMITS: RunLimits = { maxTurns: 80, maxDurationMs: 30 * 60_000, maxCostUsd: 1 };
+/** A mission lead runs a whole stage per execution (spawning, waiting, reviewing, merging): more turns. */
+export const MISSION_LEAD_TURNS = 150;
 /** A failed model request is retried this many times before the run fails. */
 export const MODEL_RETRIES = 2;
 const RETRY_DELAY_MS = 2_000;
@@ -146,6 +148,11 @@ export class RunService {
 
   // ---- commands -------------------------------------------------------------------------
 
+  private limitsFor(missionId: string | null): RunLimits {
+    const limits = this.deps.limits ?? DEFAULT_LIMITS;
+    return missionId ? { ...limits, maxTurns: Math.max(limits.maxTurns, MISSION_LEAD_TURNS) } : limits;
+  }
+
   create(actor: string, agentId: string, input: CreateRun, now = Date.now(), missionId: string | null = null): RunView {
     const agent = this.deps.agents.get(agentId);
     const project = this.deps.projects.get(agent.projectId);
@@ -154,7 +161,7 @@ export class RunService {
       id: newId("run"), agentId, projectId: project.id, title: input.title.trim(), brief: input.brief,
       branch: names.branch, worktreeScope: names.scope, workstationId: null,
       status: "queued", pendingMessage: input.brief, report: null, error: null, turns: 0, tokensIn: 0, tokensOut: 0, costUsd: 0,
-      limits: this.deps.limits ?? DEFAULT_LIMITS, createdAt: now, startedAt: null, endedAt: null,
+      limits: this.limitsFor(missionId), createdAt: now, startedAt: null, endedAt: null,
       treeId: names.treeId, parentRunId: null, depth: 0, baseBranch: null, budgetUsd: input.budgetUsd ?? TREE_LIMITS.defaultRootBudgetUsd,
       kind: "task", reviewOf: null, review: null, mergedAt: null, prUrl: null, waitingFor: null, reviewSha: null,
       missionId, prState: null, cleanedAt: null,
@@ -475,6 +482,10 @@ export class RunService {
         db.update(schema.runs).set({ turns: c.turns }).where(eq(schema.runs.id, runId)).run();
         this.saveSession(runId, agent.state.messages);
         this.emit(runId);
+        return;
+      case "turn_start":
+        // Checked before the next model request, not after the last turn: a run whose final allowed
+        // turn finishes it (report, stage_done) ends normally instead of failing on the limit.
         if (c.turns - base.turns >= limits.maxTurns) stop("turns");
         return;
       default:
