@@ -30,6 +30,7 @@ CLAUDE_TEAM="Q6L2SF6YDW"   # Anthropic PBC
 CODEX_VERSION="0.163.0"
 CODEX_SHA256="8813367285524ac798dd96d1b071aea30d58708c7226fd236cd275cf1cfdee31"
 CODEX_RG_SHA256="27d09e29c478fddbfc750a2cb5fd06965bad0ea223e776f8667160a0de63c6e4"
+CODEX_HOST_SHA256="79f123a85dbc61e8f5d0f0c050dfc3f4b81a8305d33a32b41e008b7f6e035698"   # codex-code-mode-host, next to codex
 CODEX_TEAM="2DC432GLL2"    # OpenAI OpCo, LLC
 CODEX_VENDOR="/opt/homebrew/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin"
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
@@ -209,6 +210,7 @@ install_cli() {
   fi
   mkdir -p "${stage}/codex/bin" "${stage}/codex/codex-path"
   if pinned_copy "${CODEX_VENDOR}/bin/codex" "${stage}/codex/bin/codex" "$CODEX_SHA256" "$CODEX_TEAM" \
+    && pinned_copy "${CODEX_VENDOR}/bin/codex-code-mode-host" "${stage}/codex/bin/codex-code-mode-host" "$CODEX_HOST_SHA256" "$CODEX_TEAM" \
     && pinned_copy "${CODEX_VENDOR}/codex-path/rg" "${stage}/codex/codex-path/rg" "$CODEX_RG_SHA256" "$CODEX_TEAM"; then
     rm -rf "${dest}/codex" && mv "${stage}/codex" "${dest}/codex"
     say "Installed Codex ${CODEX_VERSION} in ${dest}/codex"

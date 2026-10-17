@@ -299,7 +299,7 @@ export class CliService {
             if (ev.kind === "quota") this.recordQuota(ev.quota);
             if (ev.kind === "text") text = ev.text;
             if (ev.kind === "result") {
-              text = ev.text || text;
+              text = ev.report?.summary ?? (ev.text || text);
               if (ev.isError) error = ev.error;
             }
             if (ev.kind === "error") error = ev.message;
