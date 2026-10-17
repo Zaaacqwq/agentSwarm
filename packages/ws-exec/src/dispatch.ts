@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import type { ExecEnv } from "./layout.ts";
 import { OpError, type Request, type Response } from "./protocol.ts";
 import * as fs from "./ops/fs.ts";
@@ -14,15 +15,29 @@ export async function dispatch(env: ExecEnv, request: Request): Promise<Response
   }
 }
 
-/** kill(-1) signals every process this user may signal, except the caller (BSD semantics). */
-function reap(env: ExecEnv): { reaped: boolean } {
-  if (!env.reapAll) return { reaped: false };
-  try {
-    process.kill(-1, "SIGKILL");
-  } catch {
-    // ESRCH: nothing else was running.
+/**
+ * Kills every other process of this user. Not kill(-1): on macOS that also kills the caller, so the
+ * result would never be reported. A few rounds catch processes forked while the first ones die.
+ */
+function reap(env: ExecEnv): { reaped: number } {
+  if (!env.reapAll) return { reaped: 0 };
+  const uid = process.getuid?.();
+  if (uid === undefined) return { reaped: 0 };
+  let reaped = 0;
+  for (let round = 0; round < 5; round++) {
+    const out = execFileSync("/bin/ps", ["-U", String(uid), "-o", "pid="], { env: {}, stdio: ["ignore", "pipe", "ignore"] }).toString();
+    const pids = out.split("\n").map((l) => Number(l.trim())).filter((pid) => pid > 1 && pid !== process.pid);
+    if (pids.length === 0) break;
+    for (const pid of pids) {
+      try {
+        process.kill(pid, "SIGKILL");
+        reaped++;
+      } catch {
+        // Already gone.
+      }
+    }
   }
-  return { reaped: true };
+  return { reaped };
 }
 
 function run(env: ExecEnv, r: Request): unknown {
