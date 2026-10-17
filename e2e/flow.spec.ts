@@ -38,11 +38,21 @@ test("set up agentSwarm, add a project and an agent, and watch a run fix a bug",
   const timeline = page.getByRole("region", { name: "Timeline" });
   await expect(timeline.getByText("✓ ws_bash", { exact: false })).toBeVisible();
   await expect(timeline.getByText("pushed", { exact: true })).toBeVisible();
+  await expect(timeline.getByText("Sub-agents reported").first()).toBeVisible();
+  await expect(page.getByText(/^Pull request: https:\/\/github\.com\/tester\/demo\/pull\/1$/)).toBeVisible();
+  const tree = page.getByRole("region", { name: "Agent tree" });
+  await expect(tree.getByRole("link", { name: "Helper", exact: true })).toBeVisible();
+  await expect(tree.getByText("approved", { exact: true })).toBeVisible();
+  await expect(tree.getByText("merged", { exact: true })).toBeVisible();
   await page.screenshot({ path: `${SHOTS}/run-1440.png`, fullPage: true });
   await page.setViewportSize({ width: 375, height: 812 });
   await page.screenshot({ path: `${SHOTS}/run-375.png`, fullPage: true });
 
   await page.setViewportSize({ width: 1440, height: 900 });
+  await tree.getByRole("link", { name: "Helper", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Helper" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Report" }).getByText("Fixed square.")).toBeVisible();
+  await page.screenshot({ path: `${SHOTS}/child-1440.png`, fullPage: true });
   await page.getByRole("link", { name: "Projects" }).click();
   await expect(page.getByText("pushed", { exact: true }).first()).toBeVisible();
   await page.getByRole("link", { name: "Workstations" }).click();

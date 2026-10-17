@@ -3,6 +3,7 @@ import type { RunEventView, RunView } from "@agentswarm/contracts";
 import { api, money, when } from "../api.ts";
 import { useLive, useReconnect, useResource } from "../live.ts";
 import { Badge, Field, Form, PageHead } from "../components/ui.tsx";
+import { Tree } from "../components/Tree.tsx";
 
 export function RunPage({ id }: { id: string }) {
   const run = useResource<RunView>(`/runs/${id}`);
@@ -18,7 +19,7 @@ export function RunPage({ id }: { id: string }) {
   });
   if (!run.data) return run.error ? <p className="error">{run.error}</p> : null;
   const r = run.data;
-  const live = r.status === "running" || r.status === "queued";
+  const live = r.status === "running" || r.status === "queued" || r.status === "waiting";
   return (
     <div className="stack">
       <PageHead title={r.title} sub={<><Badge status={r.status} /> <span className="mono">{r.branch}</span>{r.workstationId && <> · {r.workstationId}</>}</>}
@@ -30,6 +31,8 @@ export function RunPage({ id }: { id: string }) {
         <div className="stat"><b>{when(r.startedAt)}</b><span>Started</span></div>
       </div>
       {r.error && <div className="card error" role="alert">{r.error}</div>}
+      {r.prUrl && <div className="card">Pull request: <a href={r.prUrl} target="_blank" rel="noreferrer">{r.prUrl}</a></div>}
+      {r.treeId && <Tree treeId={r.treeId} current={r.id} />}
       {r.report && (
         <section className="card" aria-labelledby="report">
           <h2 id="report">Report</h2>
@@ -88,6 +91,8 @@ function Event({ e }: { e: RunEventView }) {
       return <div className={`event assistant${d.error ? " error" : ""}`}><div className="who">Agent</div><pre>{d.text || d.error}</pre></div>;
     case "push":
       return <div className={`event push${d.status === "pushed" ? "" : " error"}`}><div className="who">Relay · <Badge status={d.status} /></div><pre>{d.branch}{d.headSha ? ` @ ${String(d.headSha).slice(0, 10)}` : ""}{d.reason ? `\n${d.reason}` : ""}</pre></div>;
+    case "results":
+      return <div className="event results"><div className="who">Sub-agents reported</div><pre>{d.text}</pre></div>;
     case "error":
       return <div className="event error"><div className="who">Problem</div><pre>{d.message}</pre></div>;
     default:
@@ -98,6 +103,9 @@ function Event({ e }: { e: RunEventView }) {
 function statusText(d: Record<string, any>): string {
   if (d.status === "running") return `Started on ${d.workstation}`;
   if (d.status === "worktree") return `Worktree ready: ${d.branch} from ${d.base}`;
+  if (d.status === "spawned") return `Spawned ${d.name} on ${d.branch}`;
+  if (d.status === "waiting") return `Waiting for ${d.for?.length ?? 0} sub-agent${d.for?.length === 1 ? "" : "s"}; workstation released`;
+  if (d.status === "pull_request") return `Opened pull request ${d.url}`;
   return `Run ${d.status}${d.error ? `: ${d.error}` : ""}`;
 }
 
