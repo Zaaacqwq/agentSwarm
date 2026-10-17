@@ -24,6 +24,12 @@ export type RunRow = typeof schema.runs.$inferSelect;
 export const DEFAULT_LIMITS: RunLimits = { maxTurns: 40, maxDurationMs: 30 * 60_000, maxCostUsd: 1 };
 /** A failed model request is retried this many times before the run fails. */
 export const MODEL_RETRIES = 2;
+const RETRY_DELAY_MS = 2_000;
+
+const sleep = (ms: number, signal: AbortSignal) => new Promise<void>((resolve) => {
+  const t = setTimeout(resolve, ms);
+  signal.addEventListener("abort", () => (clearTimeout(t), resolve()), { once: true });
+});
 
 export interface RunDeps {
   readonly db: Db;
@@ -48,6 +54,8 @@ interface Active {
   agent: Agent | null;
   reason: StopReason | null;
   done: Promise<void>;
+  /** Messages that arrived while the agent was not taking input (starting up, or just finishing). */
+  readonly inbox: string[];
 }
 
 const STOP_TEXT: Record<Exclude<StopReason, "cancelled">, string> = {
@@ -96,7 +104,7 @@ export class RunService {
     const agent = this.deps.agents.get(agentId);
     const project = this.deps.projects.get(agent.projectId);
     const slug = input.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40).replace(/-+$/, "") || "task";
-    const leaf = `${slug}-${randomBytes(2).toString("hex")}`;
+    const leaf = `${slug}-${randomBytes(3).toString("hex")}`;
     const row: RunRow = {
       id: newId("run"), agentId, projectId: project.id, title: input.title.trim(), brief: input.brief,
       branch: `hive/${project.slug}/${leaf}`, worktreeScope: `worktrees/${project.slug}/${leaf}`, workstationId: null,
@@ -116,8 +124,10 @@ export class RunService {
     const run = this.get(runId);
     this.deps.bus.runEvent(runId, "user", { text }, now);
     const active = this.active.get(runId);
-    if (run.status === "running" && active?.agent) {
+    if (active?.agent?.state.isStreaming) {
       active.agent.steer({ role: "user", content: text, timestamp: now });
+    } else if (active) {
+      active.inbox.push(text);
     } else {
       const pending = run.status === "queued" && run.pendingMessage ? `${run.pendingMessage}\n\n${text}` : text;
       this.deps.db.update(schema.runs).set({ status: "queued", pendingMessage: pending, error: null, endedAt: null }).where(eq(schema.runs.id, runId)).run();
@@ -135,6 +145,7 @@ export class RunService {
       active.reason = "cancelled";
       active.controller.abort();
       active.agent?.abort();
+      if (run.workstationId) void this.deps.pool.reap(run.workstationId).catch(() => undefined);
     } else if (run.status === "queued") {
       this.finish(runId, "cancelled", null, null, now);
     } else {
@@ -175,8 +186,14 @@ export class RunService {
     this.scheduling = true;
     try {
       const queued = this.deps.db.select().from(schema.runs).where(eq(schema.runs.status, "queued")).orderBy(asc(schema.runs.createdAt)).all();
+      const workstations = new Map(this.deps.pool.list().map((w) => [w.id, w.status]));
       for (const run of queued) {
         if (this.active.size >= this.deps.maxConcurrent) break;
+        // A follow-up needs the workstation that holds its worktree.
+        if (run.workstationId && (workstations.get(run.workstationId) ?? "unhealthy") === "unhealthy") {
+          this.finish(run.id, "failed", run.report, `Its workstation ${run.workstationId} is unavailable; start a new run`);
+          continue;
+        }
         const ws = this.deps.pool.acquire(run.id, run.workstationId);
         if (ws) this.start(run, ws);
       }
@@ -186,7 +203,7 @@ export class RunService {
   }
 
   private start(run: RunRow, ws: string, now = Date.now()): void {
-    const active: Active = { controller: new AbortController(), agent: null, reason: null, done: Promise.resolve() };
+    const active: Active = { controller: new AbortController(), agent: null, reason: null, done: Promise.resolve(), inbox: [] };
     this.active.set(run.id, active);
     this.deps.db.update(schema.runs).set({ status: "running", workstationId: ws, startedAt: run.startedAt ?? now, error: null, endedAt: null }).where(eq(schema.runs.id, run.id)).run();
     this.deps.bus.runEvent(run.id, "status", { status: "running", workstation: ws }, now);
@@ -197,9 +214,13 @@ export class RunService {
         this.deps.log("run failed", { runId: run.id, error: error.message });
         this.finish(run.id, "failed", null, error.message.slice(0, 500));
       })
-      .finally(() => {
+      .finally(async () => {
+        // Whatever the agent left running (servers, setsid loops) dies with the run.
+        await this.deps.pool.reap(ws).catch((e: Error) => this.deps.log("reap failed", { ws, error: e.message }));
         this.deps.pool.release(ws, run.id);
         this.active.delete(run.id);
+        // A message that arrived as the run ended starts a follow-up.
+        if (active.inbox.length && active.reason !== "cancelled") this.requeue(run.id, active.inbox.splice(0).join("\n\n"));
         this.schedule();
       });
   }
@@ -215,6 +236,8 @@ export class RunService {
     const message = run.pendingMessage ?? "Continue.";
     db.update(schema.runs).set({ pendingMessage: null }).where(eq(schema.runs.id, runId)).run();
 
+    // Resolve the model first: a bad model id should not leave a half-prepared worktree behind.
+    const { model, streamFn } = await gateway.resolve(agentRow.endpointId, agentRow.modelId);
     const session = db.select().from(schema.agentSessions).where(eq(schema.agentSessions.runId, runId)).get();
     if (!session) {
       if (this.deps.refreshMirror) {
@@ -230,7 +253,6 @@ export class RunService {
       push: (s) => relay.push(this.get(runId), s),
       report: (r) => (report = r),
     });
-    const { model, streamFn } = await gateway.resolve(agentRow.endpointId, agentRow.modelId);
     const agent = new Agent({
       initialState: {
         systemPrompt: systemPrompt({ name: agentRow.name, role: agentRow.role, instructions: agentRow.instructions, repo: project.githubRepo, defaultBranch: project.defaultBranch, branch: run.branch }),
@@ -258,14 +280,19 @@ export class RunService {
 
     let lastError: string | null = null;
     try {
-      await agent.prompt(message);
-      lastError = modelError(agent);
-      for (let retry = 1; lastError && !active.reason && retry <= MODEL_RETRIES; retry++) {
-        bus.runEvent(runId, "error", { message: `Model request failed (${lastError}); retry ${retry} of ${MODEL_RETRIES}` });
-        // continue() resumes from the last user or tool message; drop the failed reply first.
-        agent.state.messages = agent.state.messages.slice(0, -1);
-        await agent.continue();
+      let next: string | undefined = [message, ...active.inbox.splice(0)].join("\n\n");
+      while (next !== undefined && !active.reason) {
+        await agent.prompt(next);
         lastError = modelError(agent);
+        for (let retry = 1; lastError && !active.reason && retry <= MODEL_RETRIES; retry++) {
+          bus.runEvent(runId, "error", { message: `Model request failed (${lastError}); retry ${retry} of ${MODEL_RETRIES}` });
+          await sleep(RETRY_DELAY_MS * retry, signal);
+          // continue() resumes from the last user or tool message; drop the failed reply first.
+          agent.state.messages = agent.state.messages.slice(0, -1);
+          await agent.continue();
+          lastError = modelError(agent);
+        }
+        next = !lastError && active.inbox.length ? active.inbox.splice(0).join("\n\n") : undefined;
       }
     } finally {
       clearTimeout(deadline);
@@ -310,6 +337,11 @@ export class RunService {
         return;
       default:
     }
+  }
+
+  private requeue(runId: string, text: string): void {
+    this.deps.db.update(schema.runs).set({ status: "queued", pendingMessage: text, error: null, endedAt: null }).where(eq(schema.runs.id, runId)).run();
+    this.emit(runId);
   }
 
   private saveSession(runId: string, messages: AgentMessage[], now = Date.now()): void {

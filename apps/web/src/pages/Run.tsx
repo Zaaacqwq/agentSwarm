@@ -1,13 +1,17 @@
 import { useState } from "react";
 import type { RunEventView, RunView } from "@hive/contracts";
 import { api, money, when } from "../api.ts";
-import { useLive, useResource } from "../live.ts";
+import { useLive, useReconnect, useResource } from "../live.ts";
 import { Badge, Field, Form, PageHead } from "../components/ui.tsx";
 
 export function RunPage({ id }: { id: string }) {
   const run = useResource<RunView>(`/runs/${id}`);
   const events = useResource<RunEventView[]>(`/runs/${id}/events`);
   const [text, setText] = useState("");
+  useReconnect(() => {
+    run.reload();
+    events.reload();
+  });
   useLive((m) => {
     if (m.kind === "run" && m.run.id === id) run.set(() => m.run);
     if (m.kind === "event" && m.event.runId === id) events.set((prev) => (prev?.some((e) => e.id === m.event.id) ? prev : [...(prev ?? []), m.event]));

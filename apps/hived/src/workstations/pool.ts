@@ -33,6 +33,11 @@ export class WorkstationPool {
     return this.list();
   }
 
+  /** Kills every leftover process of one workstation user (a run ended, or hived restarted). */
+  async reap(id: string): Promise<void> {
+    await this.backend.call(id, { op: "reap" }, { timeoutMs: 20_000 });
+  }
+
   /** Startup only: leases do not survive a restart, since no run is running yet. */
   resetLeases(): void {
     this.db.update(schema.workstations).set({ status: "free", runId: null }).where(eq(schema.workstations.status, "busy")).run();

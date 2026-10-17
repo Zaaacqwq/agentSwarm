@@ -9,7 +9,9 @@ import { gitOk, type GitRunner } from "../github/git.ts";
 import type { EventBus } from "../events/event-bus.ts";
 import { scanAddedLines } from "./secret-scan.ts";
 
-export const RELAY_LIMITS = { maxCommits: 100, maxFiles: 300, maxChangedLines: 20_000 } as const;
+export const RELAY_LIMITS = { maxCommits: 100, maxFiles: 300, maxChangedLines: 20_000, maxNewBytes: 50 * 1024 * 1024 } as const;
+/** Paths an agent may not change: CI workflows run with the repository's secrets. */
+const FORBIDDEN_PATHS = /^\.github\//;
 
 type RunRow = typeof schema.runs.$inferSelect;
 
@@ -90,8 +92,15 @@ export class Relay {
     }, 0);
     if (rows.length > RELAY_LIMITS.maxFiles) return `Too many files changed (${rows.length} > ${RELAY_LIMITS.maxFiles})`;
     if (lines > RELAY_LIMITS.maxChangedLines) return `Change too large (${lines} lines > ${RELAY_LIMITS.maxChangedLines})`;
-    const secrets = scanAddedLines(await gitOk(git, ["diff", "--unified=0", `${base}...${incoming}`], { cwd: mirror }));
-    if (secrets.length > 0) return `Possible secrets in the change (${secrets.join(", ")}); remove them from every commit before pushing`;
+    const forbidden = rows.map((r) => r.split("\t")[2] ?? "").filter((path) => FORBIDDEN_PATHS.test(path));
+    if (forbidden.length) return `Changes under .github/ are not allowed (${forbidden.slice(0, 3).join(", ")})`;
+    // Binary files count as 0 lines above; cap what the push would actually upload.
+    const bytes = Number((await gitOk(git, ["rev-list", "--objects", "--disk-usage", `${base}..${incoming}`], { cwd: mirror })).trim());
+    if (bytes > RELAY_LIMITS.maxNewBytes) return `Push too large (${Math.round(bytes / 1024 / 1024)} MB of new objects > ${RELAY_LIMITS.maxNewBytes / 1024 / 1024} MB)`;
+    // Every commit is published, so scan each one (a secret added then deleted is still in history), messages included.
+    const history = await gitOk(git, ["log", "-p", "--no-merges", "--unified=0", "--format=%x00%B", `${base}..${incoming}`], { cwd: mirror });
+    const secrets = scanAddedLines(history, { includeUnprefixed: true });
+    if (secrets.length > 0) return `Possible secrets in the commits (${secrets.join(", ")}); remove them from every commit (rewrite the branch) before pushing`;
     return null;
   }
 

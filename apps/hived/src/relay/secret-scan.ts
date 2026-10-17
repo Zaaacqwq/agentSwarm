@@ -8,10 +8,16 @@ const PATTERNS: readonly [string, RegExp][] = [
   ["Google API key", /\bAIza[0-9A-Za-z_-]{35}\b/],
 ];
 
-export function scanAddedLines(diff: string): string[] {
+/**
+ * Added lines of a diff. With `includeUnprefixed`, also lines that are not diff syntax at all,
+ * such as commit messages in `git log -p --format=%B` output.
+ */
+export function scanAddedLines(diff: string, opts: { includeUnprefixed?: boolean } = {}): string[] {
   const hits = new Set<string>();
   for (const line of diff.split("\n")) {
-    if (!line.startsWith("+") || line.startsWith("+++")) continue;
+    if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("@@") || line.startsWith("diff ") || line.startsWith("index ")) continue;
+    if (line.startsWith("-") || line.startsWith(" ")) continue;
+    if (!line.startsWith("+") && !opts.includeUnprefixed) continue;
     for (const [label, re] of PATTERNS) if (re.test(line)) hits.add(label);
   }
   return [...hits];

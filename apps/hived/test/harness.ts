@@ -61,11 +61,11 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
   const volume = join(base, "HiveWS");
   const layout: Layout = {
     volume, wsRoot: join(volume, "ws"), mirrors: join(volume, "mirrors"), inbox: join(volume, "inbox"),
-    hivedData: join(volume, "hived"), nodeBin: process.execPath.replace(/\/node$/, ""),
+    hivedData: join(volume, "hived"), nodeBin: process.execPath.replace(/\/node$/, ""), hivedPort: 4318,
   };
   const envs = new Map<string, ExecEnv>();
   for (const user of ["ws-1", "ws-2"]) {
-    const env: ExecEnv = { user, home: join(base, "homes", user), root: join(layout.wsRoot, user), layout, sandbox: true };
+    const env: ExecEnv = { user, home: join(base, "homes", user), root: join(layout.wsRoot, user), layout, sandbox: true, reapAll: false };
     for (const d of [env.home, env.root, join(layout.inbox, `${user}.git`)]) mkdirSync(d, { recursive: true });
     envs.set(user, env);
   }
@@ -101,7 +101,7 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
     ...(opts.limits ? { limits: opts.limits } : {}),
   });
   await services.pool.sync();
-  const app = await buildApp({ services, webDist: opts.webDist ?? null, check: { dataDir: layout.hivedData, volume: null } });
+  const app = await buildApp({ services, webDist: opts.webDist ?? null, check: { dataDir: layout.hivedData, volume: null }, allowedHosts: ["localhost:80", "127.0.0.1:4399"] });
 
   const api: Harness["api"] = async (method, url, body, cookie) => {
     const res = await app.inject({

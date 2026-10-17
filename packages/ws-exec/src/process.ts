@@ -80,10 +80,22 @@ export function runProcess(env: ExecEnv, argv: readonly string[], opts: RunOptio
       running.delete(child);
       reject(error);
     });
-    child.on("close", (code, signal) => {
+    let settled = false;
+    const settle = (code: number | null, signal: NodeJS.Signals | null) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       running.delete(child);
       resolve({ exitCode: signal ? null : code, output: out.text(), truncated: out.truncated, timedOut, durationMs: Date.now() - started });
+    };
+    child.on("close", settle);
+    // A daemonised grandchild (setsid) can hold the pipes open forever; do not wait for it.
+    child.on("exit", (code, signal) => {
+      setTimeout(() => {
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        settle(code, signal);
+      }, 500).unref();
     });
   });
 }

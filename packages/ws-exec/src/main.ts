@@ -45,7 +45,7 @@ async function main(): Promise<Response> {
   } catch (error) {
     return fail(`Bad request: ${(error as Error).message}`);
   }
-  const env: ExecEnv = { user: me.username, home: me.home, root, layout: PRODUCTION_LAYOUT, sandbox: true };
+  const env: ExecEnv = { user: me.username, home: me.home, root, layout: PRODUCTION_LAYOUT, sandbox: true, reapAll: true };
   return dispatch(env, request);
 }
 

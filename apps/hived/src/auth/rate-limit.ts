@@ -10,6 +10,12 @@ export class RateLimiter {
     this.windowMs = windowMs;
   }
 
+  /** True when `key` has used up its window, without recording anything. */
+  blocked(key: string, now = Date.now()): boolean {
+    const current = this.windows.get(key);
+    return Boolean(current && now - current.start < this.windowMs && current.count >= this.limit);
+  }
+
   /** Returns true when the call is allowed and records it. */
   hit(key: string, now = Date.now()): boolean {
     const current = this.windows.get(key);

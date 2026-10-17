@@ -15,6 +15,7 @@ export function fixture(sandbox = true): { env: ExecEnv; other: string; layout: 
     inbox: join(volume, "inbox"),
     hivedData: join(volume, "hived"),
     nodeBin: process.execPath.replace(/\/node$/, ""),
+    hivedPort: 4318,
   };
   const root = join(layout.wsRoot, "ws-1");
   const other = join(layout.wsRoot, "ws-2");
@@ -32,6 +33,6 @@ export function fixture(sandbox = true): { env: ExecEnv; other: string; layout: 
   git(src, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init");
   git(base, "clone", "-q", "--bare", src, join(layout.mirrors, "demo.git"));
 
-  const env: ExecEnv = { user: "ws-1", home, root, layout, sandbox };
+  const env: ExecEnv = { user: "ws-1", home, root, layout, sandbox, reapAll: false };
   return { env, other, layout, cleanup: () => rmSync(base, { recursive: true, force: true }) };
 }

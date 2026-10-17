@@ -52,6 +52,10 @@ if (ws) {
     record("Hive's Node runtime is on PATH", node.exitCode === 0 && node.output.includes("/usr/local/libexec/hive/node/bin/node"), node.output.replace(/\n/g, " ").trim());
     const net = await run("curl -s -o /dev/null -w '%{http_code}' https://github.com");
     record("network is allowed", net.output.trim() === "200", net.output.trim());
+    const api = await run("curl -s -m 3 -o /dev/null -w '%{http_code}' http://127.0.0.1:4318/api/health; echo \" exit=$?\"");
+    record("cannot reach hived's API", !api.output.includes("200"), api.output.trim());
+    const clip = await run("pbpaste > /dev/null 2>&1; echo pbpaste=$?; osascript -e 'return 1' > /dev/null 2>&1; echo osascript=$?");
+    record("no clipboard or AppleScript access", !/pbpaste=0/.test(clip.output) && !/osascript=0/.test(clip.output), clip.output.replace(/\n/g, " ").trim());
     const escape = await backend.call(ws, { op: "fs.read", scope, path: "../../ws-2/x" }).then(() => false, () => true);
     record("path traversal is refused", escape);
   } catch (e) {

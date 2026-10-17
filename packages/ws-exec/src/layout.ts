@@ -12,6 +12,8 @@ export interface Layout {
   readonly hivedData: string;
   /** Hive's own Node runtime for agent commands. */
   readonly nodeBin: string;
+  /** hived's port on loopback; agent commands may not connect to it. */
+  readonly hivedPort: number;
 }
 
 export const PRODUCTION_LAYOUT: Layout = {
@@ -21,6 +23,7 @@ export const PRODUCTION_LAYOUT: Layout = {
   inbox: "/Volumes/HiveWS/inbox",
   hivedData: "/Volumes/HiveWS/hived",
   nodeBin: "/usr/local/libexec/hive/node/bin",
+  hivedPort: 4318,
 };
 
 export const WS_USER_PATTERN = /^ws-[0-9]{1,2}$/;
@@ -34,4 +37,6 @@ export interface ExecEnv {
   readonly layout: Layout;
   /** Wrap commands in sandbox-exec (off only in tests that do not run commands). */
   readonly sandbox: boolean;
+  /** `reap` may kill every process of the user. True only in the installed ws-exec, never in tests. */
+  readonly reapAll: boolean;
 }

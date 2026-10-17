@@ -15,5 +15,5 @@ export async function exec(env: ExecEnv, scope: string, command: string, timeout
   mkdirSync(`${env.root}/.tmp`, { recursive: true, mode: 0o700 });
   mkdirSync(`${env.root}/cache`, { recursive: true, mode: 0o700 });
   const timeout = Math.min(Math.max(1000, timeoutMs), MAX_TIMEOUT_MS);
-  return runProcess(env, sandboxed(env, ["/bin/zsh", "-c", command]), { cwd, timeoutMs: timeout });
+  return runProcess(env, sandboxed(env, ["/bin/zsh", "-c", command], scope), { cwd, timeoutMs: timeout });
 }

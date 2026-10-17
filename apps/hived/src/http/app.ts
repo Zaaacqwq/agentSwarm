@@ -19,6 +19,8 @@ export interface AppOptions {
   readonly services: Services;
   readonly webDist: string | null;
   readonly check: CheckOptions;
+  /** Host headers the dashboard answers to (DNS rebinding); Origins must match one of them. */
+  readonly allowedHosts: readonly string[];
   readonly logger?: boolean;
 }
 
@@ -34,7 +36,8 @@ export async function buildApp(o: AppOptions): Promise<FastifyInstance> {
   await app.register(cookie);
   await app.register(websocket);
   app.decorateRequest("me", null);
-  const loginLimiter = new RateLimiter(10, 15 * 60_000);
+  const failedLogins = new RateLimiter(10, 15 * 60_000);
+  const hosts = new Set(o.allowedHosts.map((h) => h.toLowerCase()));
 
   app.addHook("onRequest", async (req, reply) => {
     reply.header("x-content-type-options", "nosniff");
@@ -42,10 +45,13 @@ export async function buildApp(o: AppOptions): Promise<FastifyInstance> {
     reply.header("referrer-policy", "no-referrer");
     reply.header("content-security-policy", "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'");
     if (!req.url.startsWith("/api/")) return;
-    // CSRF: state changes must come from this origin as JSON (forms cannot send JSON cross-site).
+    // DNS rebinding and cross-site WebSockets: only known hosts, and only same-origin pages.
+    const host = String(req.headers.host ?? "").toLowerCase();
+    if (!hosts.has(host)) throw forbidden("Unknown host");
+    const origin = req.headers.origin;
+    if (origin && origin.toLowerCase() !== `http://${host}`) throw forbidden("Cross-origin request refused");
+    // CSRF: state changes must be JSON (forms cannot send JSON cross-site).
     if (req.method !== "GET" && req.method !== "HEAD") {
-      const origin = req.headers.origin;
-      if (origin && origin !== `http://${req.headers.host}`) throw forbidden("Cross-origin request refused");
       if (req.headers["content-length"] !== "0" && req.headers["content-length"] !== undefined && !String(req.headers["content-type"] ?? "").startsWith("application/json")) {
         throw new HttpError(415, "Send JSON");
       }
@@ -76,8 +82,12 @@ export async function buildApp(o: AppOptions): Promise<FastifyInstance> {
     return session.user;
   });
   app.post<{ Body: Credentials }>("/api/auth/login", { schema: { body: Credentials } }, async (req, reply) => {
-    if (!loginLimiter.hit(req.ip)) throw new HttpError(429, "Too many attempts; wait a few minutes");
-    const session = await s.auth.login(req.body);
+    const key = `${req.ip}|${req.body.username}`;
+    if (failedLogins.blocked(key)) throw new HttpError(429, "Too many failed attempts; wait a few minutes");
+    const session = await s.auth.login(req.body).catch((error: Error) => {
+      failedLogins.hit(key);
+      throw error;
+    });
     setSession(reply, session.token);
     return session.user;
   });

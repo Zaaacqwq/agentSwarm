@@ -45,7 +45,8 @@ export class AuthService {
     const row = this.db.select().from(schema.users).where(eq(schema.users.username, input.username)).get();
     const valid = await verifyPassword(input.password, row?.passwordHash ?? (await this.dummy));
     if (!row || !valid) {
-      audit(this.db, "anonymous", "auth.login_failed", null, { username: input.username }, now);
+      // Never the raw username: people type passwords into that field.
+      audit(this.db, "anonymous", "auth.login_failed", row?.id ?? null, { knownUser: Boolean(row) }, now);
       throw unauthorized("Invalid username or password");
     }
     audit(this.db, row.id, "auth.login", row.id, {}, now);

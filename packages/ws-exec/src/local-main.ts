@@ -6,8 +6,10 @@ import type { ExecEnv } from "./layout.ts";
 import type { Request } from "./protocol.ts";
 
 killAllOnSignal();
-const env = JSON.parse(process.env.WS_EXEC_TEST_ENV ?? "null") as ExecEnv | null;
-if (!env) throw new Error("WS_EXEC_TEST_ENV is not set");
+const parsed = JSON.parse(process.env.WS_EXEC_TEST_ENV ?? "null") as ExecEnv | null;
+if (!parsed) throw new Error("WS_EXEC_TEST_ENV is not set");
+// Tests run as the developer: reap must never kill everything they own.
+const env: ExecEnv = { ...parsed, reapAll: false };
 const chunks: Buffer[] = [];
 for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
 const request = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Request;

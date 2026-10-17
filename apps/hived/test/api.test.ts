@@ -20,6 +20,10 @@ describe("auth and request guards", () => {
     const cookie = await h.login();
     const cross = await h.app.inject({ method: "POST", url: "/api/endpoints", headers: { cookie, origin: "http://evil.example", "content-type": "application/json" }, payload: "{}" });
     assert.equal(cross.statusCode, 403);
+    const rebound = await h.app.inject({ method: "GET", url: "/api/me", headers: { cookie, host: "evil.example:4318" } });
+    assert.equal(rebound.statusCode, 403);
+    const crossWs = await h.app.inject({ method: "GET", url: "/api/me", headers: { cookie, origin: "http://localhost:5174" } });
+    assert.equal(crossWs.statusCode, 403);
     const form = await h.app.inject({ method: "POST", url: "/api/endpoints", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, payload: "name=x" });
     assert.equal(form.statusCode, 415);
   });

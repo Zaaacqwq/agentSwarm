@@ -37,12 +37,19 @@ async function main(): Promise<void> {
 
   services.pool.resetLeases();
   const ws = await services.pool.sync();
+  // Nothing an earlier hived started may keep running as a workstation user.
+  await Promise.all(ws.map((w) => services.pool.reap(w.id).catch((e: Error) => log("warn", "reap failed", { ws: w.id, error: e.message }))));
   log("info", "workstations", { total: ws.length, unhealthy: ws.filter((w) => w.status === "unhealthy").map((w) => `${w.id}: ${w.lastError}`) });
   services.runs.recover();
   services.auth.pruneExpired();
   void services.github.verify().catch(() => undefined);
 
-  const app = await buildApp({ services, webDist: config.webDist, check: { dataDir: config.dataDir, volume: production ? PRODUCTION_LAYOUT.volume : null } });
+  const app = await buildApp({
+    services, webDist: config.webDist,
+    check: { dataDir: config.dataDir, volume: production ? PRODUCTION_LAYOUT.volume : null },
+    // The Vite dev server proxies with its own Host header.
+    allowedHosts: [`127.0.0.1:${config.port}`, `localhost:${config.port}`, `[::1]:${config.port}`, "localhost:5173", "127.0.0.1:5173"],
+  });
   await app.listen({ host: config.host, port: config.port });
   log("info", "hived listening", { url: `http://${config.host}:${config.port}`, dataDir: config.dataDir });
 

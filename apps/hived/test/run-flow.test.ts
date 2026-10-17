@@ -30,7 +30,7 @@ describe("a run", () => {
       report(),
     ]);
     const run = (await h.api("POST", `/api/agents/${agentId}/runs`, { title: "Fix square", brief: "square(3) should be 9" }, cookie)).body;
-    assert.match(run.branch, /^hive\/demo\/fix-square-[0-9a-f]{4}$/);
+    assert.match(run.branch, /^hive\/demo\/fix-square-[0-9a-f]{6}$/);
     const done = await h.services.runs.settled(run.id);
     assert.equal(done.status, "succeeded", done.error ?? "");
     assert.equal(done.report?.summary, "Fixed square");
@@ -145,5 +145,32 @@ describe("a run", () => {
     const v = h.services.runs.view(run.id);
     assert.equal(v.status, "failed");
     assert.match(v.error ?? "", /restart/);
+  });
+});
+
+describe("the Relay", () => {
+  let h: Harness;
+  afterEach(() => h?.close());
+
+  test("rejects a secret that a later commit deletes, and workflow changes", async () => {
+    h = await harness();
+    const { cookie, agentId } = await h.ready();
+    h.script([
+      call("ws_write", { path: "config.js", content: 'export const key = "AKIAABCDEFGHIJKLMNOP";\n' }),
+      call("git_commit", { message: "Add config" }),
+      call("ws_write", { path: "config.js", content: "export const key = process.env.KEY;\n" }),
+      call("git_commit", { message: "Read the key from the environment" }),
+      call("git_push", {}),
+      call("ws_bash", { command: "git reset --hard -q origin/main && mkdir -p .github/workflows && echo 'on: push' > .github/workflows/x.yml" }),
+      call("git_commit", { message: "Add a workflow" }),
+      call("git_push", {}),
+      report("blocked twice"),
+    ]);
+    const run = (await h.api("POST", `/api/agents/${agentId}/runs`, { title: "History", brief: "x" }, cookie)).body;
+    await h.services.runs.settled(run.id);
+    const [workflow, history] = h.services.relay.history(run.projectId);
+    assert.match(history?.reason ?? "", /AWS access key/);
+    assert.match(workflow?.reason ?? "", /\.github\//);
+    assert.ok(!h.remoteBranches().includes(run.branch));
   });
 });

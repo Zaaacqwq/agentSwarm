@@ -14,6 +14,17 @@ export async function dispatch(env: ExecEnv, request: Request): Promise<Response
   }
 }
 
+/** kill(-1) signals every process this user may signal, except the caller (BSD semantics). */
+function reap(env: ExecEnv): { reaped: boolean } {
+  if (!env.reapAll) return { reaped: false };
+  try {
+    process.kill(-1, "SIGKILL");
+  } catch {
+    // ESRCH: nothing else was running.
+  }
+  return { reaped: true };
+}
+
 function run(env: ExecEnv, r: Request): unknown {
   switch (r.op) {
     case "info": return { user: env.user, root: env.root, sandbox: env.sandbox };
@@ -28,6 +39,7 @@ function run(env: ExecEnv, r: Request): unknown {
     case "git.commit": return git.commit(env, r.scope, r.message);
     case "git.pushInbox": return git.pushInbox(env, r.scope, r.branch);
     case "git.remove": return git.remove(env, r.scope);
+    case "reap": return reap(env);
     default: throw new OpError("bad_request", `Unknown op ${(r as { op?: unknown }).op}`);
   }
 }
