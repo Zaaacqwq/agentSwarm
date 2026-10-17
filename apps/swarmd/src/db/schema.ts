@@ -277,6 +277,8 @@ export const linearEvents = sqliteTable("linear_events", {
   receivedAt: integer("received_at").notNull(),
   processedAt: integer("processed_at"),
   error: text("error"),
+  /** Failed handling is retried (Linear or the network may be down for a moment). */
+  attempts: integer("attempts").notNull().default(0),
 }, (t) => [index("linear_events_pending_idx").on(t.processedAt, t.receivedAt)]);
 
 /** R5: one Linear agent session (a ticket given to agentSwarm) and the mission it became. */
@@ -291,10 +293,12 @@ export const linearSessions = sqliteTable("linear_sessions", {
   priority: integer("priority").notNull(),
   status: text("status", { enum: ["queued", "active", "ended", "refused"] }).notNull(),
   missionId: text("mission_id"),
-  /** What to start with once it leaves the queue. */
-  request: json<{ kind: MissionKind; text: string; linearProjectId: string | null; teamId: string | null }>("request").notNull(),
-  /** Sent stage checklist, to avoid resending the same. */
+  /** What to start with once it leaves the queue; `promote`: an idea or experiment on its way to a real project. */
+  request: json<{ kind: MissionKind; text: string; linearProjectId: string | null; teamId: string | null; promote?: { repo: string | null; awaitingRepo: boolean } }>("request").notNull(),
+  /** The checklist, links and ticket state last sent, to avoid resending the same. */
   planDigest: text("plan_digest"),
+  /** When the final answer reached the ticket (ended sessions without it get it again). */
+  finalSentAt: integer("final_sent_at"),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
 }, (t) => [index("linear_sessions_status_idx").on(t.status, t.priority, t.createdAt), index("linear_sessions_mission_idx").on(t.missionId)]);

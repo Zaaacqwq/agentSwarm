@@ -46,7 +46,7 @@ export interface LinearTokens {
 
 export interface LinearApi {
   /** The app's own user in the workspace (installed with actor=app). */
-  viewer(token: string): Promise<{ id: string; name: string; organization: string }>;
+  viewer(token: string): Promise<{ id: string; name: string; organization: string; organizationId: string }>;
   users(token: string): Promise<{ id: string; name: string; email: string }[]>;
   projects(token: string): Promise<{ id: string; name: string; teamIds: string[] }[]>;
   teams(token: string): Promise<{ id: string; key: string; name: string }[]>;
@@ -89,8 +89,8 @@ export class LinearGraphql implements LinearApi {
   }
 
   async viewer(token: string) {
-    const d = await this.gql<{ viewer: { id: string; name: string; organization: { name: string } } }>(token, "query { viewer { id name organization { name } } }");
-    return { id: d.viewer.id, name: d.viewer.name, organization: d.viewer.organization.name };
+    const d = await this.gql<{ viewer: { id: string; name: string; organization: { id: string; name: string } } }>(token, "query { viewer { id name organization { id name } } }");
+    return { id: d.viewer.id, name: d.viewer.name, organization: d.viewer.organization.name, organizationId: d.viewer.organization.id };
   }
 
   async users(token: string) {

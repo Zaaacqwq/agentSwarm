@@ -63,13 +63,19 @@ describe("Linear", () => {
     const { cookie } = await linearReady(h);
     const issue = h.linear.addIssue({ title: "Nothing", projectId: "lp-elsewhere" });
     assert.equal(await webhook(h.linearWebhook, created("s-0", issue.id), { secret: "wrong-secret-value" }), 401);
-    assert.equal(await webhook(h.linearWebhook, created("s-0", issue.id), { at: Date.now() - 120_000 }), 401, "a replay");
+    assert.equal(await webhook(h.linearWebhook, created("s-0", issue.id), { at: Date.now() - 8 * 3_600_000 }), 401, "too old");
     assert.equal((await h.linearWebhook.inject({ method: "POST", url: "/linear/webhook", payload: "{}", headers: { "content-type": "application/json" } })).statusCode, 401);
     assert.equal((await h.linearWebhook.inject({ method: "GET", url: "/api/health" })).statusCode, 404, "nothing else is reachable on this port");
-    assert.equal(await webhook(h.linearWebhook, created("s-0", issue.id), { delivery: "d-1" }), 200);
-    assert.equal(await webhook(h.linearWebhook, created("s-0", issue.id), { delivery: "d-1" }), 200);
+    const at = Date.now();
+    assert.equal(await webhook(h.linearWebhook, created("s-0", issue.id), { delivery: "d-1", at }), 200);
+    // The same signed body again, even with a fresh (unsigned) delivery id: stored once.
+    assert.equal(await webhook(h.linearWebhook, created("s-0", issue.id), { delivery: "d-2", at }), 200);
     await h.services.linearBridge.idle();
-    assert.equal((h.db.sqlite.prepare("select count(*) as n from linear_events").get() as { n: number }).n, 1, "a redelivery is stored once");
+    assert.equal((h.db.sqlite.prepare("select count(*) as n from linear_events").get() as { n: number }).n, 1, "a replay is stored once");
+    // Other event types and other workspaces are answered and dropped.
+    assert.equal(await webhook(h.linearWebhook, { type: "Issue", action: "update" }), 200);
+    assert.equal(await webhook(h.linearWebhook, { ...created("s-x", issue.id), organizationId: "org-other" }), 200);
+    assert.equal((h.db.sqlite.prepare("select count(*) as n from linear_events").get() as { n: number }).n, 1);
     // Unconnected project: refused, with the reason in the ticket.
     await until(() => h.linear.in("s-0").some((a) => a.content.type === "error"));
     assert.match(JSON.stringify(h.linear.in("s-0")), /not connected to a repository/);
@@ -79,8 +85,9 @@ describe("Linear", () => {
     const everything = JSON.stringify([status, h.db.sqlite.prepare("select * from settings").all(), h.db.sqlite.prepare("select * from audit_log").all()]);
     for (const secret of ["client-secret-456", WEBHOOK_SECRET, "lin-access-1", "lin-refresh-1"]) assert.ok(!everything.includes(secret), secret);
     // A stale or forged OAuth state is refused.
-    const forged = await h.app.inject({ method: "GET", url: "/api/linear/callback?code=x&state=forged", headers: { host: "127.0.0.1:4399" } });
-    assert.match(forged.body, /expired/);
+    const forged = await h.app.inject({ method: "GET", url: "/api/linear/callback?code=x&state=0123456789abcdef0123456789abcdef&error=%3Cscript%3E", headers: { host: "127.0.0.1:4399" } });
+    assert.match(forged.body, /Linear was not connected \(the link expired or was refused\)/);
+    assert.doesNotMatch(forged.body, /script/);
   });
 
   test("a bug ticket: only the owner is obeyed, the plan is approved in the ticket, and the ticket follows the mission to Done", async () => {
@@ -101,6 +108,8 @@ describe("Linear", () => {
           return call("ws_write", { path: `${docsOf(c)}/plan.md`, content: "# Plan\nFix square; the test proves it.\n" });
         },
         ...commitPush("ZAC-2: plan"), call("request_approval", { summary: "Cause: + instead of *. Fix math.js." }),
+        // "ok" was a change request: a second version of the plan.
+        writeDoc("plan.md", "# Plan v2\nFix square; the test proves it.\n"), ...commitPush("ZAC-2: plan v2"), call("request_approval", { summary: "Revised: same fix, clearer test." }),
         call("ws_edit", { path: "math.js", old_text: "x + x", new_text: "x * x" }), ...commitPush("ZAC-2: fix square"), call("stage_done", { summary: "Fixed." }),
         writeDoc("acceptance.md", "# Acceptance\nnode --test passes.\n"), ...commitPush("ZAC-2: acceptance"),
         call("open_pull_request", { title: "Fix square", body: "square multiplied wrongly." }), call("stage_done", { summary: "PR open." }),
@@ -122,12 +131,15 @@ describe("Linear", () => {
     await until(() => h.linear.in("s-bug").some((a) => a.content.type === "elicitation"));
     assert.match(JSON.stringify(h.linear.in("s-bug").find((a) => a.content.type === "elicitation")), /square\(-2\)/);
     await send(h, prompted("s-bug", "Yes, 4.", undefined, OTHER_ID));
-    assert.equal(planned, "", "a stranger's reply is ignored");
+    await send(h, { ...prompted("s-bug", "Yes, 4."), agentActivity: { body: "Yes, 4." } });
+    assert.equal(planned, "", "a stranger's reply, and a reply from no one in particular, are ignored");
     await send(h, prompted("s-bug", "Yes, 4."));
     const gate = await stageOf(h, "s-bug", "awaiting_approval");
     assert.match(planned, /Yes, 4\./);
     const approval = h.linear.in("s-bug").find((a) => a.content.type === "elicitation" && "body" in a.content && a.content.body.includes("ready for your approval"))!;
-    assert.deepEqual(approval.opts.select?.map((o) => o.value), ["approve", "Request changes"]);
+    const approveValue = approval.opts.select?.[0]?.value ?? "";
+    assert.match(approveValue, /^approve:\d+$/);
+    assert.equal(approval.opts.select?.[1]?.value, "Request changes");
     assert.match(JSON.stringify(approval), /plan\.md/);
     // The checklist shows where it is.
     const plan = h.linear.sessionUpdates.filter((u) => u.sessionId === "s-bug").at(-1)!.plan!;
@@ -137,7 +149,14 @@ describe("Linear", () => {
     await send(h, prompted("s-bug", "Request changes"));
     assert.match(JSON.stringify(h.linear.in("s-bug").at(-1)), /What should change/);
     assert.equal(missionOf(h, "s-bug")!.stage, "awaiting_approval", "the button alone changes nothing");
-    await send(h, prompted("s-bug", "approve"));
+    await send(h, prompted("s-bug", "approve:1"));
+    assert.match(JSON.stringify(h.linear.in("s-bug").at(-1)), /earlier version of the plan/, "a stale button approves nothing");
+    await send(h, prompted("s-bug", "ok"));
+    await until(() => missionOf(h, "s-bug")!.stage === "planning", 30_000);
+    assert.ok(h.services.missions.messages(missionOf(h, "s-bug")!.id).some((x) => x.text.includes("ok")), "a vague reply is a change request, not an approval");
+    await stageOf(h, "s-bug", "awaiting_approval");
+    const again = h.linear.in("s-bug").filter((a) => a.opts.select).at(-1)!;
+    await send(h, prompted("s-bug", again.opts.select![0]!.value));
     const merge = await stageOf(h, "s-bug", "awaiting_merge");
     assert.equal(h.linear.stateOf(issue.id), "In Review");
     const pr = h.pullRequests.at(-1)!;
@@ -183,7 +202,7 @@ describe("Linear", () => {
     await until(() => missionOf(h, "s-a")?.waitingForYou === true);
     await send(h, prompted("s-a", "", "stop"));
     await stageOf(h, "s-a", "cancelled");
-    assert.match(JSON.stringify(h.linear.in("s-a")), /Stopped during intake/);
+    assert.match(JSON.stringify(h.linear.in("s-a")), /Stopping during intake/);
     await until(() => h.linear.stateOf(a.id) === "Canceled");
     await until(() => missionOf(h, "s-urgent") !== null);
     assert.equal(missionOf(h, "s-low"), null);
@@ -228,5 +247,50 @@ describe("Linear", () => {
     const files = execFileSync("/usr/bin/git", ["ls-tree", "-r", "--name-only", "main"], { cwd: h.services.projects.get(real.id).mirrorPath }).toString();
     assert.match(files, /results\.md/, "what the experiment found starts the new repository");
     assert.match(next.intent, /started as an experiment/);
+  });
+
+  test("Linear outages: failed events are retried, early replies wait, and messages and the final answer are sent again", async () => {
+    h = await harness();
+    await linearReady(h);
+    h.scriptAgents({
+      Lead: [
+        call("ask_user", { question: "Which size?" }),
+        call("stage_done", { summary: "Measure it." }),
+        writeDoc("results.md", "# Results\nSmall is enough.\n"), ...commitPush("Results"),
+        call("stage_done", { summary: "Small is enough." }),
+      ],
+    });
+    const issue = h.linear.addIssue({ title: "Try sizes", projectId: "lp-sandbox" });
+    // Linear is down for the first post: the event stays pending and is retried.
+    h.linear.failActivities = 1;
+    await send(h, created("s-out", issue.id)).catch(() => undefined);
+    await h.services.linearBridge.idle();
+    const pending = () => h.db.sqlite.prepare("select attempts, processed_at from linear_events").all() as { attempts: number; processed_at: number | null }[];
+    assert.deepEqual(pending().map((e) => [e.attempts, e.processed_at]), [[1, null]]);
+    assert.equal(missionOf(h, "s-out"), null);
+    // A reply that arrives before the ticket is set up waits for it.
+    assert.equal(await webhook(h.linearWebhook, { ...prompted("s-out", "Note: only small sizes."), agentActivity: { id: "act-1", body: "Note: only small sizes.", user: { id: OWNER_ID } } }), 200);
+    h.services.linearBridge.drain();
+    await h.services.linearBridge.idle();
+    assert.ok(missionOf(h, "s-out"), "the retried event started the mission");
+    await until(() => h.services.missions.messages(missionOf(h, "s-out")!.id).some((m) => m.text === "Note: only small sizes."), 20_000);
+    await until(() => h.linear.in("s-out").some((a) => a.content.type === "elicitation"), 20_000);
+    await send(h, { ...prompted("s-out", "Small."), agentActivity: { id: "act-2", body: "Small.", user: { id: OWNER_ID } } });
+
+    // Linear is down when the final answer is ready: it is sent once Linear is back, and only once.
+    h.linear.failActivities = 1000;
+    await stageOf(h, "s-out", "done");
+    assert.ok(!h.linear.in("s-out").some((a) => a.content.type === "response"));
+    h.linear.failActivities = 0;
+    h.services.linearBridge.resend(Date.now() + 60_000);
+    await h.services.linearBridge.idle();
+    h.services.linearBridge.resend(Date.now() + 60_000);
+    await h.services.linearBridge.idle();
+    const responses = h.linear.in("s-out").filter((a) => a.content.type === "response");
+    assert.equal(responses.length, 1);
+    assert.match(JSON.stringify(responses[0]), /Small is enough/);
+    // Everything the mission said reached the ticket, in order.
+    const said = h.linear.in("s-out").map((a) => ("body" in a.content ? a.content.body : "")).filter((b) => /Which size|Small is enough/.test(b));
+    assert.equal(said[0], "Which size?");
   });
 });

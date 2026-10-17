@@ -200,10 +200,12 @@ export async function buildApp(o: AppOptions): Promise<FastifyInstance> {
   app.get<{ Querystring: { code?: string; state?: string; error?: string } }>("/api/linear/callback", async (req, reply) => {
     let message = "Linear is connected.";
     try {
-      if (req.query.error) throw new Error(req.query.error);
+      if (req.query.error || !/^[0-9a-f]{32}$/.test(String(req.query.state ?? ""))) throw new Error("refused or invalid");
       await s.linear.callback("linear-oauth", String(req.query.code ?? ""), String(req.query.state ?? ""), linearCallback);
     } catch (error) {
-      message = `Linear was not connected: ${(error as Error).message}`;
+      // A fixed text: anyone can send a browser to this page with any query.
+      void s.linear.noteError(`Linear sign-in failed: ${(error as Error).message.slice(0, 200)}`);
+      message = "Linear was not connected (the link expired or was refused). Start again from the settings.";
     }
     const safe = message.replace(/[<>&"]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" })[c]!);
     // A page of our own, so the way back to the settings is a same-site navigation (the session cookie is Strict).

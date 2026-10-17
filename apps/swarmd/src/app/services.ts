@@ -52,6 +52,8 @@ export interface ServiceDeps {
   readonly prPollMs?: number;
   /** Tests fake Linear; production talks to api.linear.app. */
   readonly linearApi?: LinearApi;
+  /** The webhook port: agents may never connect to it. */
+  readonly linearPort?: number;
 }
 
 export interface Services {
@@ -112,5 +114,5 @@ export function createServices(d: ServiceDeps): Services {
   const discord = new DiscordBridge({ db: d.db, secrets: d.secrets, bus, missions, projects, transport: d.transport, dashboardUrl: d.dashboardUrl, log: warn, quota: () => cli.quota() });
   const linear = new LinearService({ db: d.db, secrets: d.secrets, api: d.linearApi ?? new LinearGraphql(), log: warn });
   const linearBridge = new LinearBridge({ db: d.db, bus, linear, missions, projects, agents, tree, github, git: d.git, dashboardUrl: d.dashboardUrl, log: warn });
-  return { bus, auth: new AuthService(d.db), endpoints, gateway, github, projects, pool, agents, relay, runs, tree, cleanup, missions, watcher, discord, cli, machine: new MachineService(d.db, d.layout.mirrors), linear, linearBridge };
+  return { bus, auth: new AuthService(d.db), endpoints, gateway, github, projects, pool, agents, relay, runs, tree, cleanup, missions, watcher, discord, cli, machine: new MachineService(d.db, d.layout.mirrors, d.linearPort ? [d.linearPort] : []), linear, linearBridge };
 }

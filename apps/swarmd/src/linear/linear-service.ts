@@ -22,6 +22,8 @@ interface Stored {
   readonly ideasProjectId: string | null;
   readonly maxActive: number;
   readonly organization: string | null;
+  /** Webhooks from any other workspace are ignored. */
+  readonly organizationId: string | null;
   readonly appUserId: string | null;
   readonly appUser: string | null;
   readonly lastEventAt: number | null;
@@ -36,7 +38,7 @@ interface Secrets {
   readonly expiresAt: number | null;
 }
 
-const EMPTY: Stored = { clientId: null, ownerUserId: null, sandboxProjectId: null, ideasProjectId: null, maxActive: 3, organization: null, appUserId: null, appUser: null, lastEventAt: null, error: null };
+const EMPTY: Stored = { clientId: null, ownerUserId: null, sandboxProjectId: null, ideasProjectId: null, maxActive: 3, organization: null, organizationId: null, appUserId: null, appUser: null, lastEventAt: null, error: null };
 const NO_SECRETS: Secrets = { clientSecret: null, webhookSecret: null, accessToken: null, refreshToken: null, expiresAt: null };
 
 export interface LinearServiceDeps {
@@ -75,10 +77,12 @@ export class LinearService {
   }
 
   private async save(value: Partial<Stored>, secrets?: Partial<Secrets>, now = Date.now()): Promise<void> {
-    const next = { ...this.stored(), ...value };
     const merged = secrets ? { ...(await this.opened()), ...secrets } : null;
+    const sealedNew = merged ? await this.deps.secrets.seal(JSON.stringify(merged)) : null;
+    // Read after the awaits: a concurrent save (a token refresh during configure) is not overwritten.
+    const next = { ...this.stored(), ...value };
     const old = this.deps.db.select().from(schema.settings).where(eq(schema.settings.id, ROW)).get();
-    const sealed = merged ? await this.deps.secrets.seal(JSON.stringify(merged)) : old?.secretSealed ?? null;
+    const sealed = sealedNew ?? old?.secretSealed ?? null;
     const values = { value: next as unknown as Record<string, unknown>, secretSealed: sealed, updatedAt: now };
     this.deps.db.insert(schema.settings).values({ id: ROW, ...values }).onConflictDoUpdate({ target: schema.settings.id, set: values }).run();
     if (merged) this.cache = merged;
@@ -130,12 +134,12 @@ export class LinearService {
     if (!s.clientId || !sec.clientSecret) throw badRequest("Add the Linear application's client ID and secret first");
     const t = await this.deps.api.token({ grant_type: "authorization_code", code, redirect_uri: redirectUri, client_id: s.clientId, client_secret: sec.clientSecret });
     const me = await this.deps.api.viewer(t.accessToken);
-    await this.save({ organization: me.organization, appUserId: me.id, appUser: me.name, error: null }, { accessToken: t.accessToken, refreshToken: t.refreshToken, expiresAt: t.expiresAt });
+    await this.save({ organization: me.organization, organizationId: me.organizationId, appUserId: me.id, appUser: me.name, error: null }, { accessToken: t.accessToken, refreshToken: t.refreshToken, expiresAt: t.expiresAt });
     audit(this.deps.db, actor, "linear.connect", ROW, { organization: me.organization });
   }
 
   async disconnect(actor: string): Promise<LinearStatusView> {
-    await this.save({ organization: null, appUserId: null, appUser: null }, { accessToken: null, refreshToken: null, expiresAt: null });
+    await this.save({ organization: null, organizationId: null, appUserId: null, appUser: null }, { accessToken: null, refreshToken: null, expiresAt: null });
     audit(this.deps.db, actor, "linear.disconnect", ROW);
     return this.status();
   }

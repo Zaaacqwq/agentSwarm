@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, writeSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import type { ExecEnv } from "../layout.ts";
 import { OpError } from "../protocol.ts";
@@ -28,8 +28,40 @@ function inboxPath(env: ExecEnv): string {
   return `${env.layout.inbox}/${env.user}.git`;
 }
 
-const FILE_PATH = /^(?!\.git(\/|$))(?!.*(^|\/)\.\.(\/|$))[A-Za-z0-9._@+-][A-Za-z0-9._@+ /-]{0,199}$/;
 const MAX_FILES = 20;
+const SEGMENT = /^[A-Za-z0-9._@+ -]{1,100}$/;
+
+/**
+ * A project file path: relative, segments of safe characters, no "." / ".." / empty segments, and no
+ * ".git" segment in any case (APFS is case-insensitive). Mirrors projectFilePath in swarmd.
+ */
+export function projectFilePath(path: unknown): string | null {
+  if (typeof path !== "string" || path.length < 1 || path.length > 200) return null;
+  const parts = path.split("/");
+  if (parts.some((p) => !SEGMENT.test(p) || p === "." || p === ".." || p.toLowerCase() === ".git" || p.trim() !== p)) return null;
+  return parts.join("/");
+}
+
+/** Refuses a path whose existing parts include a symlink: nothing may redirect where a file lands. */
+function noLinks(root: string, rel: string): void {
+  let cur = root;
+  for (const part of rel.split("/")) {
+    cur = join(cur, part);
+    if (!existsSync(cur)) return;
+    if (lstatSync(cur).isSymbolicLink()) throw new OpError("out_of_scope", `${rel} goes through a symbolic link`);
+  }
+}
+
+/** Appends to a file without following a symlink at any step (the agent controls its own .git). */
+function appendNoFollow(root: string, rel: string, text: string): void {
+  noLinks(root, rel);
+  const fd = openSync(join(root, rel), fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_NOFOLLOW, 0o600);
+  try {
+    writeSync(fd, text);
+  } finally {
+    closeSync(fd);
+  }
+}
 
 /**
  * The project's local files (Local.xcconfig, .env): written into the worktree and listed in
@@ -38,17 +70,27 @@ const MAX_FILES = 20;
 function placeFiles(dir: string, files: readonly { path: string; content: string }[] | undefined): number {
   if (!files?.length) return 0;
   if (files.length > MAX_FILES) throw new OpError("bad_request", `At most ${MAX_FILES} files`);
+  noLinks(dir, ".git/info");
+  mkdirSync(join(dir, ".git", "info"), { recursive: true });
+  noLinks(dir, ".git/info/exclude");
   const excludeFile = join(dir, ".git", "info", "exclude");
-  mkdirSync(dirname(excludeFile), { recursive: true });
   const excluded = new Set((existsSync(excludeFile) ? readFileSync(excludeFile, "utf8") : "").split("\n"));
   for (const f of files) {
-    if (typeof f.path !== "string" || !FILE_PATH.test(f.path) || typeof f.content !== "string") throw new OpError("bad_request", `Invalid file ${String(f.path)}`);
-    const target = resolveInScope(dir, f.path);
+    const path = projectFilePath(f.path);
+    if (!path || typeof f.content !== "string") throw new OpError("bad_request", `Invalid file ${String(f.path)}`);
+    noLinks(dir, path);
+    const target = resolveInScope(dir, path);
     mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
-    writeFileSync(target, f.content, { mode: 0o600 });
-    const line = `/${f.path}`;
+    noLinks(dir, path);
+    const fd = openSync(target, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW, 0o600);
+    try {
+      writeSync(fd, f.content);
+    } finally {
+      closeSync(fd);
+    }
+    const line = `/${path}`;
     if (!excluded.has(line)) {
-      appendFileSync(excludeFile, `${line}\n`);
+      appendNoFollow(dir, ".git/info/exclude", `${line}\n`);
       excluded.add(line);
     }
   }

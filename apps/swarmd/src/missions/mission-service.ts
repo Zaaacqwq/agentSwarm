@@ -348,10 +348,12 @@ export class MissionService implements RunHooks {
         return this.emit(m.id);
       }
       if (to === "done") this.deps.db.update(schema.missions).set({ retro: m.stageSummary }).where(eq(schema.missions.id, m.id)).run();
-      this.post(m.id, "lead", to === "awaiting_approval" ? "approval" : "stage", m.stageSummary ?? "(no summary)", "agentswarm");
-      this.move(this.row(m.id), to, "lead");
       // A standing decision of the person: this project's bug fixes go ahead without asking each time.
-      if (to === "awaiting_approval" && m.kind === "bug" && this.deps.projects.get(m.projectId).profile?.autoApproveBugs) {
+      const auto = to === "awaiting_approval" && m.kind === "bug" && Boolean(this.deps.projects.get(m.projectId).profile?.autoApproveBugs);
+      // No approval request (no button in Linear, no ping in Discord) for a plan that approves itself.
+      this.post(m.id, "lead", to === "awaiting_approval" && !auto ? "approval" : "stage", m.stageSummary ?? "(no summary)", "agentswarm");
+      this.move(this.row(m.id), to, "lead");
+      if (auto) {
         audit(this.deps.db, "system", "mission.auto_approve", m.id, { reason: "project setting" });
         this.post(m.id, "system", "text", "Approved automatically: this project lets bug fixes go ahead without asking. The pull request still waits for you.", "agentswarm");
         this.move(this.row(m.id), "building", "person");

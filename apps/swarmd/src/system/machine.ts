@@ -20,10 +20,13 @@ export interface MachineSettings {
 export class MachineService {
   private readonly db: Db;
   private readonly mirrorsDir: string;
+  /** Always denied, whatever the list says (swarmd's own webhook port). */
+  private readonly always: readonly number[];
 
-  constructor(db: Db, mirrorsDir: string) {
+  constructor(db: Db, mirrorsDir: string, always: readonly number[] = []) {
     this.db = db;
     this.mirrorsDir = mirrorsDir;
+    this.always = always;
   }
 
   get(): MachineSettings {
@@ -48,7 +51,7 @@ export class MachineService {
     mkdirSync(dir, { recursive: true });
     chmodSync(dir, 0o755);
     const file = join(dir, "deny-ports.json");
-    writeFileSync(`${file}.tmp`, JSON.stringify(this.get().denyPorts), { mode: 0o644 });
+    writeFileSync(`${file}.tmp`, JSON.stringify([...new Set([...this.always, ...this.get().denyPorts])]), { mode: 0o644 });
     chmodSync(`${file}.tmp`, 0o644);
     renameSync(`${file}.tmp`, file);
   }

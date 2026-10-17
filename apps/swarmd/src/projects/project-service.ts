@@ -26,8 +26,21 @@ export interface ProjectDeps {
   readonly secrets: SecretBox;
 }
 
+const SEGMENT = /^[A-Za-z0-9._@+ -]{1,100}$/;
+
+/**
+ * A project file path: relative, segments of safe characters, no "." / ".." / empty segments, and no
+ * ".git" segment in any case (APFS is case-insensitive). The same rule as ws-exec's projectFilePath.
+ */
+export function projectFilePath(path: string): string | null {
+  if (path.length < 1 || path.length > 200) return null;
+  const parts = path.split("/");
+  if (parts.some((p) => !SEGMENT.test(p) || p === "." || p === ".." || p.toLowerCase() === ".git" || p.trim() !== p)) return null;
+  return parts.join("/");
+}
+
 /** Local files written into every worktree: a project may need a few, never many or large ones. */
-export const PROJECT_FILE_LIMITS = { count: 20, bytes: 256 * 1024 } as const;
+export const PROJECT_FILE_LIMITS = { count: 20, bytes: 256 * 1024, total: 1024 * 1024 } as const;
 
 export class ProjectService {
   private readonly deps: ProjectDeps;
@@ -101,9 +114,15 @@ export class ProjectService {
 
   async putFile(actor: string, id: string, input: PutProjectFile, now = Date.now()): Promise<ProjectView> {
     this.get(id);
+    const path = projectFilePath(input.path);
+    if (!path) throw badRequest("Invalid path: use a relative path without ., .. or .git parts");
+    input = { ...input, path };
     const existing = this.fileRows(id);
     if (!existing.some((f) => f.path === input.path) && existing.length >= PROJECT_FILE_LIMITS.count) throw badRequest(`At most ${PROJECT_FILE_LIMITS.count} files per project`);
     if (Buffer.byteLength(input.content) > PROJECT_FILE_LIMITS.bytes) throw badRequest("The file is too large (256 KB at most)");
+    // Every clone carries all of them to the workstation (ws-exec takes at most 4 MB per request).
+    const others = (await this.files(id)).filter((f) => f.path !== path).reduce((sum, f) => sum + Buffer.byteLength(f.content), 0);
+    if (others + Buffer.byteLength(input.content) > PROJECT_FILE_LIMITS.total) throw badRequest("A project's local files may add up to 1 MB at most");
     const values = { contentSealed: await this.deps.secrets.seal(input.content), updatedAt: now };
     this.deps.db.insert(schema.projectFiles).values({ projectId: id, path: input.path, ...values })
       .onConflictDoUpdate({ target: [schema.projectFiles.projectId, schema.projectFiles.path], set: values }).run();
@@ -112,6 +131,8 @@ export class ProjectService {
   }
 
   deleteFile(actor: string, id: string, path: string, now = Date.now()): ProjectView {
+    this.get(id);
+    if (!projectFilePath(path)) throw badRequest("Invalid path");
     this.deps.db.delete(schema.projectFiles).where(and(eq(schema.projectFiles.projectId, id), eq(schema.projectFiles.path, path))).run();
     audit(this.deps.db, actor, "project.file_delete", id, { path }, now);
     return this.view(id);

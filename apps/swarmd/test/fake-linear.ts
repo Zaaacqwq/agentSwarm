@@ -52,7 +52,7 @@ export class FakeLinear implements LinearApi {
   }
 
   async viewer() {
-    return { id: "app-user", name: "agentSwarm", organization: "Zac" };
+    return { id: "app-user", name: "agentSwarm", organization: "Zac", organizationId: "org-zac" };
   }
   async users() {
     return [{ id: OWNER_ID, name: "Zac", email: "zac@example.com" }, { id: OTHER_ID, name: "Someone", email: "someone@example.com" }];
@@ -103,7 +103,7 @@ export class FakeLinear implements LinearApi {
 
 /** Posts a signed Linear webhook to agentSwarm's webhook app, as Linear would. */
 export async function webhook(app: FastifyInstance, payload: Record<string, unknown>, opts: { secret?: string; delivery?: string; at?: number } = {}): Promise<number> {
-  const body = JSON.stringify({ webhookTimestamp: opts.at ?? Date.now(), webhookId: "wh-1", ...payload });
+  const body = JSON.stringify({ webhookTimestamp: opts.at ?? Date.now(), webhookId: "wh-1", organizationId: "org-zac", ...payload });
   const signature = createHmac("sha256", opts.secret ?? WEBHOOK_SECRET).update(body).digest("hex");
   const res = await app.inject({
     method: "POST", url: "/linear/webhook", payload: body,

@@ -62,8 +62,11 @@ export class TreeCleanup {
         }
       }
       const prefix = `swarm/${project.slug}/${treeId}/`;
-      // A local project keeps its root branch: it is the only record of what the experiment or idea produced.
-      const keep = project.kind === "local" ? new Set(nodes.filter((n) => n.depth === 0).map((n) => n.branch)) : new Set<string>();
+      // The root branch is kept where it is the only record of the result: local projects, and research or
+      // experiments (no pull request ever carries their documents into main).
+      const noPr = db.select({ kind: schema.missions.kind }).from(schema.missions).where(eq(schema.missions.treeId, treeId)).all()
+        .some((m) => m.kind === "research" || m.kind === "experiment");
+      const keep = project.kind === "local" || noPr ? new Set(nodes.filter((n) => n.depth === 0).map((n) => n.branch)) : new Set<string>();
       const branches = [...new Set(nodes.filter((n) => n.kind === "task" && n.branch.startsWith(prefix) && !keep.has(n.branch)).map((n) => n.branch))];
       const token = await projects.tokenFor(project);
       let deleted = 0;

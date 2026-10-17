@@ -1,7 +1,8 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:net";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { dispatch } from "../src/dispatch.ts";
 import { denyPortsFile } from "../src/sandbox.ts";
@@ -34,9 +35,13 @@ describe("project files and machine limits (sandboxed)", () => {
       const again = await call<{ resumed: boolean; files: number }>(f.env, clone([{ path: "Local.xcconfig", content: "API_KEY = new\n" }]));
       assert.equal(again.resumed, true);
       assert.equal(readFileSync(join(dir, "Local.xcconfig"), "utf8"), "API_KEY = new\n");
-      for (const bad of ["../escape", ".git/config", "/etc/hosts", "a/../../b"]) {
+      for (const bad of ["../escape", ".git/config", "/etc/hosts", "a/../../b", "./.git/config", ".GIT/config", ".Git/hooks/pre-commit", "a/.git/config", "a//b", "./.env", "a/", " .env"]) {
         await assert.rejects(call(f.env, clone([{ path: bad, content: "x" }])), { code: "bad_request" }, bad);
       }
+      // A symlink in the worktree (an agent can make one) must not lead a file into .git.
+      symlinkSync(".git", join(dir, "sneaky"));
+      await assert.rejects(call(f.env, clone([{ path: "sneaky/config", content: "[core]\n\tfsmonitor = touch /tmp/pwned\n" }])), { code: "out_of_scope" });
+      assert.doesNotMatch(readFileSync(join(dir, ".git/config"), "utf8"), /fsmonitor/);
     } finally {
       f.cleanup();
     }
@@ -61,6 +66,27 @@ describe("project files and machine limits (sandboxed)", () => {
       assert.equal(await reach(), 0, "a broken list denies nothing extra");
     } finally {
       server.close();
+      f.cleanup();
+    }
+  });
+
+  test("Unix sockets in the shared temp directory (local databases) cannot be reached", async () => {
+    const f = fixture(true);
+    const sock = join("/tmp", `agentswarm-test-${process.pid}.sock`);
+    rmSync(sock, { force: true });
+    const server = createServer((s) => {
+      s.on("error", () => undefined);
+      s.end("hi\n");
+    });
+    await new Promise<void>((r) => server.listen(sock, r));
+    try {
+      mkdirSync(join(f.env.root, "work"));
+      const res = await call<{ exitCode: number; output: string }>(f.env, { op: "exec", scope: "work", command: `/usr/bin/nc -U ${sock} </dev/null` });
+      assert.notEqual(res.exitCode, 0, res.output);
+      assert.ok(tmpdir());
+    } finally {
+      server.close();
+      rmSync(sock, { force: true });
       f.cleanup();
     }
   });

@@ -541,9 +541,14 @@ export class RunService {
       const reason = stopReason();
       if (reason === "cancelled" || reason === "shutdown") throw error;
       if (reason) {
-        // The time limit: keep what it did so the parent can review it or continue it. The CLI's
-        // processes go first, so nothing is still writing to the worktree.
         await this.deps.pool.reap(ws).catch(() => undefined);
+        // A reviewer's worktree is thrown away (it reviews the child's branch, and never pushes to it).
+        if (run.kind === "review") {
+          this.deps.tree.recordVerdict(this.get(run.id), false, `The reviewer stopped before a verdict: ${STOP_TEXT[reason]}`);
+          return this.finish(run.id, "failed", null, STOP_TEXT[reason]);
+        }
+        // The time limit: keep what it did so the parent can review it or continue it. The CLI's
+        // processes are gone first, so nothing is still writing to the worktree.
         const problem = await this.cliRunner.salvage({ ...x, run: this.get(run.id) });
         return this.finish(run.id, "failed", null, problem ? `${STOP_TEXT[reason]}; ${problem}` : STOP_TEXT[reason]);
       }

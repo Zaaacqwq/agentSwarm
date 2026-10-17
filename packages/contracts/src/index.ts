@@ -98,8 +98,8 @@ export const SetProjectProfile = Type.Object({
 });
 export type SetProjectProfile = Static<typeof SetProjectProfile>;
 
-/** A file path inside the worktree: relative, no "..", not in .git. */
-export const PROJECT_FILE_PATH = "^(?!\\.git(/|$))(?!.*(^|/)\\.\\.(/|$))[A-Za-z0-9._@+-][A-Za-z0-9._@+ /-]{0,199}$";
+/** A file path inside the worktree; the segments are checked further by the server (no ".", "..", empty or .git segments). */
+export const PROJECT_FILE_PATH = "^[A-Za-z0-9._@+ /-]{1,200}$";
 export const PutProjectFile = Type.Object({
   path: Type.String({ pattern: PROJECT_FILE_PATH }),
   content: Type.String({ maxLength: 256 * 1024 }),

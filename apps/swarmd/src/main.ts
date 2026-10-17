@@ -36,6 +36,7 @@ async function main(): Promise<void> {
     maxConcurrentRuns: config.maxConcurrentRuns,
     log,
     transport: new DiscordJsTransport(),
+    linearPort: config.linearPort,
     dashboardUrl: `http://${config.host === "::1" ? "[::1]" : config.host}:${config.port}`,
   });
 

@@ -227,6 +227,7 @@ export class TreeService {
     const live = this.descendants(root.id).filter((r) => !TERMINAL.has(r.status));
     if (live.length) throw new TreeError(`Sub-agents are still working (${live.map((r) => r.title).join(", ")}); wait for them first`);
     const project = this.deps.projects.get(root.projectId);
+    if (project.kind === "local") throw new TreeError("This project lives only on this Mac: there is no pull request to open");
     const unmerged = this.children(root.id).filter((c) => c.kind === "task" && c.status === "succeeded" && !c.mergedAt);
     const note = unmerged.length ? `\n\nNot merged: ${unmerged.map((c) => c.branch).join(", ")}` : "";
     const url = await this.deps.github.client.createPullRequest(await this.deps.github.token(), project.githubRepo, {

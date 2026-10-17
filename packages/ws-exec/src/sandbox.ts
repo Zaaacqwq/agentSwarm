@@ -46,8 +46,12 @@ export function sandboxProfile(env: ExecEnv, scope: string, extraWritable: reado
     // Second wall for GUI services (the first is ws-launch's per-user session): clipboard, screen, Apple Events.
     `(deny appleevent-send)`,
     `(deny mach-lookup (global-name "com.apple.pasteboard.1") (global-name-regex #"^com\\.apple\\.windowserver"))`,
-    // The dashboard API is not for agents (logins, rate limits, run data); nor are the person's own services.
-    ...[layout.swarmdPort, ...deniedPorts(env)].map((port) => `(deny network-outbound (remote ip ${q(`localhost:${port}`)}))`),
+    // The dashboard API is not for agents (logins, rate limits, run data).
+    `(deny network-outbound (remote ip ${q(`localhost:${layout.swarmdPort}`)}))`,
+    // Nor are the person's own services: on any address (a service bound to 0.0.0.0 answers on the LAN and
+    // Tailscale addresses too), and local databases' Unix sockets in the shared temp and run directories.
+    ...deniedPorts(env).map((port) => `(deny network-outbound (remote ip ${q(`*:${port}`)}))`),
+    `(deny network-outbound (remote unix-socket (path-regex #"^/(private/)?(tmp|var/run)/")))`,
   ].join("\n");
 }
 
