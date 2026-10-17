@@ -113,7 +113,7 @@ export interface AgentView {
   readonly endpointId: string;
   readonly modelId: string;
   readonly instructions: string;
-  readonly runtime: "native";
+  readonly runtime: AgentRuntime;
   readonly parentId: string | null;
   readonly ephemeral: boolean;
   readonly createdAt: number;
@@ -180,6 +180,9 @@ export interface RunView {
   readonly missionId: string | null;
   readonly prState: "open" | "merged" | "closed" | null;
   readonly cleanedAt: number | null;
+  readonly runtime: AgentRuntime;
+  /** CLI runs: the cost at API prices as the CLI reports it (paid by the subscription, not the budget). */
+  readonly estimatedUsd: number;
 }
 
 /** Every run of one tree, and what the whole tree has spent. */
@@ -295,8 +298,74 @@ export type LiveMessage =
   | { readonly kind: "event"; readonly event: RunEventView }
   | { readonly kind: "run"; readonly run: RunView }
   | { readonly kind: "workstation"; readonly workstation: WorkstationView }
+  | { readonly kind: "cli"; readonly cli: CliStatusView }
   | { readonly kind: "mission"; readonly mission: MissionView }
   | { readonly kind: "mission_message"; readonly message: MissionMessageView };
+
+// ---- CLI workers (R4) --------------------------------------------------------------------
+export type AgentRuntime = "native" | "claude_code" | "codex";
+export type CliRuntimeName = Exclude<AgentRuntime, "native">;
+
+export const SetCli = Type.Object({
+  claudeEnabled: Type.Optional(Type.Boolean()),
+  codexEnabled: Type.Optional(Type.Boolean()),
+  /** A long-lived token from `claude setup-token`; omit to keep the stored one. */
+  claudeToken: Type.Optional(Type.String({ minLength: 20, maxLength: 500, pattern: "^sk-ant-[A-Za-z0-9_-]+$" })),
+  clearClaudeToken: Type.Optional(Type.Boolean()),
+  /** Per CLI runtime, how many runs at once. */
+  maxConcurrent: Type.Optional(Type.Integer({ minimum: 1, maximum: 8 })),
+  /** No new Claude Code runs once a subscription window is used past this share. */
+  fiveHourLimit: Type.Optional(Type.Number({ minimum: 0.1, maximum: 1 })),
+  sevenDayLimit: Type.Optional(Type.Number({ minimum: 0.1, maximum: 1 })),
+});
+export type SetCli = Static<typeof SetCli>;
+
+export interface CliQuotaView {
+  readonly fiveHour: number;
+  readonly fiveHourResetsAt: number | null;
+  readonly sevenDay: number;
+  readonly sevenDayResetsAt: number | null;
+  readonly status: string;
+  readonly at: number;
+}
+
+export interface CodexLoginView {
+  readonly state: "waiting" | "done" | "failed";
+  readonly url: string | null;
+  readonly code: string | null;
+  readonly error: string | null;
+}
+
+export interface CodexWorkstationView {
+  readonly workstationId: string;
+  readonly signedInAt: number | null;
+  readonly login: CodexLoginView | null;
+}
+
+export interface CliRuntimeView {
+  readonly enabled: boolean;
+  readonly version: string | null;
+  readonly pinned: string;
+  /** Whether a sub-agent can be spawned with it now, and if not, why. */
+  readonly available: boolean;
+  readonly reason: string | null;
+}
+
+export interface CliStatusView {
+  readonly claude: CliRuntimeView & { readonly hasToken: boolean; readonly quota: CliQuotaView | null };
+  readonly codex: CliRuntimeView & { readonly workstations: readonly CodexWorkstationView[] };
+  readonly maxConcurrent: number;
+  readonly fiveHourLimit: number;
+  readonly sevenDayLimit: number;
+  /** When the installed versions were last read. */
+  readonly checkedAt: number | null;
+}
+
+export interface CliTestResult {
+  readonly ok: boolean;
+  readonly detail: string;
+  readonly workstationId: string | null;
+}
 
 // ---- system check ------------------------------------------------------------------------
 export interface CheckItem {

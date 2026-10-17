@@ -109,7 +109,7 @@ tr.link:hover td { background: var(--paper-sunk); }
   .nav { flex-direction: row; overflow-x: auto; padding: var(--space-3); border-right: 0; border-bottom: 1px solid var(--rule); }
   .brand { margin: 0 var(--space-3) 0 0; }
   .nav .spacer { display: none; }
-  .split { grid-template-columns: 1fr; }
+  .split { grid-template-columns: minmax(0, 1fr); }
 }
 .status-line { padding: 0 var(--space-4); font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.06em; }
 .event details summary { margin-top: var(--space-2); }
@@ -184,3 +184,17 @@ ul.plain { list-style: none; padding: 0; margin: var(--space-1) 0 0; display: fl
   .mission-meta { align-items: flex-start; text-align: left; }
   .rail .label { display: none; }
 }
+
+/* ---- CLI workers (R4) ---- */
+.runtime { display: inline-flex; align-items: center; padding: 1px 7px; border-radius: 999px; font-size: var(--text-xs); font-weight: 600; letter-spacing: 0.02em; border: 1px solid currentColor; }
+.runtime.claude_code { color: var(--signal); }
+.runtime.codex { color: var(--run); }
+.meter { display: flex; flex-direction: column; gap: var(--space-1); font-size: var(--text-sm); }
+.meter-bar { position: relative; height: 6px; border-radius: 3px; background: var(--paper-sunk); overflow: hidden; }
+.meter-bar > span { position: absolute; inset: 0; background: var(--ok); transform-origin: left; transition: transform var(--duration-fast) var(--ease); }
+.meter-bar.over > span { background: var(--warn); }
+.meter-bar > i { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--ink-soft); }
+.device-code { font-family: var(--font-mono); font-size: var(--text-xl); letter-spacing: 0.12em; color: var(--ink); background: var(--paper-sunk); padding: var(--space-2) var(--space-4); border-radius: var(--radius-sm); align-self: flex-start; }
+.cli-ws { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: var(--space-2) var(--space-4); align-items: center; }
+@media (prefers-reduced-motion: reduce) { .meter-bar > span { transition: none; } }
+td .mono { overflow-wrap: anywhere; }

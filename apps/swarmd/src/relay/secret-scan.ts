@@ -6,6 +6,8 @@ const PATTERNS: readonly [string, RegExp][] = [
   ["OpenAI/OpenRouter-style key", /\bsk-(?:or-|proj-|ant-)?[A-Za-z0-9_-]{20,}/],
   ["Slack token", /\bxox[abprs]-[A-Za-z0-9-]{10,}/],
   ["Google API key", /\bAIza[0-9A-Za-z_-]{35}\b/],
+  // Codex (ChatGPT) sign-in tokens and most other bearer tokens are JWTs: header.payload.signature.
+  ["JSON Web Token", /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/],
 ];
 
 /**

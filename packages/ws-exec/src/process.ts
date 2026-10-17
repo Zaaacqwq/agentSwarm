@@ -105,6 +105,99 @@ export function runProcess(env: ExecEnv, argv: readonly string[], opts: RunOptio
   });
 }
 
+export interface StreamOptions extends RunOptions {
+  /** Added to (or replacing) the minimal environment. */
+  readonly extraEnv?: Readonly<Record<string, string>>;
+  /** Written to file descriptor 3 and closed: a secret the program reads once, never in its environment or argv. */
+  readonly fd3?: string;
+  /** Each complete stdout line, as it arrives; return false to stop the program. */
+  readonly onLine: (line: string) => boolean | void;
+}
+
+export interface StreamResult {
+  readonly exitCode: number | null;
+  readonly timedOut: boolean;
+  /** onLine asked to stop it. */
+  readonly stopped: boolean;
+  readonly stderr: string;
+  readonly durationMs: number;
+}
+
+const MAX_LINE_BYTES = 4 * 1024 * 1024;
+
+/** Like runProcess, for long programs that report as they go: stdout line by line, stderr's tail at the end. */
+export function streamProcess(env: ExecEnv, argv: readonly string[], opts: StreamOptions): Promise<StreamResult> {
+  const started = Date.now();
+  const [cmd, ...args] = argv;
+  if (!cmd) throw new Error("Empty argv");
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, {
+      cwd: opts.cwd,
+      env: { ...childEnv(env, opts.scope), ...opts.extraEnv },
+      detached: true,
+      stdio: [opts.stdin === undefined ? "ignore" : "pipe", "pipe", "pipe", ...(opts.fd3 === undefined ? [] : ["pipe" as const])],
+    });
+    running.add(child);
+    const err = new Tail(4096);
+    let stopped = false;
+    let timedOut = false;
+    let pending = "";
+    const line = (text: string) => {
+      if (stopped) return;
+      if (opts.onLine(text) === false) {
+        stopped = true;
+        killGroup(child);
+      }
+    };
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      pending += chunk;
+      let nl = pending.indexOf("\n");
+      while (nl >= 0) {
+        line(pending.slice(0, nl));
+        pending = pending.slice(nl + 1);
+        nl = pending.indexOf("\n");
+      }
+      // One endless line must not grow without bound.
+      if (pending.length > MAX_LINE_BYTES) {
+        line(pending);
+        pending = "";
+      }
+    });
+    child.stderr?.on("data", (b: Buffer) => err.push(b));
+    if (opts.stdin !== undefined) child.stdin?.end(opts.stdin);
+    if (opts.fd3 !== undefined) (child.stdio[3] as NodeJS.WritableStream | null)?.end(opts.fd3);
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killGroup(child);
+    }, opts.timeoutMs);
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      running.delete(child);
+      reject(error);
+    });
+    let settled = false;
+    const settle = (code: number | null, signal: NodeJS.Signals | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      running.delete(child);
+      if (pending) line(pending);
+      resolve({ exitCode: signal ? null : code, timedOut, stopped, stderr: err.text(), durationMs: Date.now() - started });
+    };
+    child.on("close", settle);
+    child.on("exit", (code, signal) => {
+      // The program is gone: its process group goes too (shells, test servers it left behind).
+      killGroup(child);
+      setTimeout(() => {
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        settle(code, signal);
+      }, 500).unref();
+    });
+  });
+}
+
 /** Keeps the last `limit` bytes of a stream. */
 class Tail {
   private chunks: Buffer[] = [];

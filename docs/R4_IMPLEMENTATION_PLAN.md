@@ -1,7 +1,8 @@
-# R4 实施方案：CLI worker（草案，待你确认）
+# R4 实施方案：CLI worker（2026-10-17 已确认）
 
 > 依据 `PLAN.md` 第 7 节和第 14 节（R4）、`docs/R0_FINDINGS.md` 第 3、4、7 节，以及 R1–R3 的现有实现。
-> 标 **【需验证】** 的内容在实现第一步用真实 CLI 实测后再定。
+> 你同意了第 8 节的全部推荐（"按建议，开始 R4"）。
+> 标 **【需验证】** 的内容在实现第一步用真实 CLI 实测后再定，结果见第 9 节。
 
 ## 0. 目标与验收
 
@@ -68,7 +69,7 @@
 - **环境变量**：沿用现在的最小环境（`HOME` 和 `TMPDIR` 是这个 worktree 自己的），再加上：
   - `DISABLE_AUTOUPDATER=1`；
   - `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`；
-  - `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`：Claude Code 跑 shell 命令时，从子进程环境里去掉凭据。【需验证】实际效果。
+  - ~~`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`~~：实测改用更好的办法，见第 9 节第 1 条。
 - **会话文件**：放在 worktree 自己的 `HOME` 下。worktree 一直留在原来那个工作站上，后续消息也会回到那里，所以"接着原来的会话"能用。万一会话文件丢了，就新开一个会话，把任务说明、最新消息和 `git log` 一起交给它。
 
 ### 2.3 结束之后
@@ -99,7 +100,7 @@ CLI 自己不能推送，它没有 GitHub 凭据。进程结束后，swarmd 依�
 
 **风险**（写进验收文档）：CLI 进程本身必须拿到凭据。一个被网页内容诱导的 CLI，理论上可以想办法把凭据读出来再发出去。应对措施：
 - 关掉 CLI 的网页工具；
-- Claude 令牌只有推理权限，用 `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` 不让它进入 shell 命令的环境；
+- Claude 令牌只有推理权限，并通过文件描述符 3 交给 Claude Code，根本不进环境变量，shell 命令看不到它（第 9 节第 1 条）；
 - Relay 的密钥扫描增加 JWT 格式，Codex 的令牌就是这种格式；
 - 两种凭据都能随时作废：面板上可以替换 Claude 令牌，也可以注销某个工作站的 Codex 登录。
 
@@ -113,7 +114,7 @@ R0 时有一段 Claude 令牌显示在了对话里。**R4 用的令牌请重新�
 - **额度。**
   - Claude Code 的事件里有 `rate_limit_event`，包含 5 小时和 7 天两个窗口的已用比例和重置时间。swarmd 保存最新的一份，显示在面板上。
   - 某个窗口超过设定的阈值（默认 5 小时 80%、7 天 90%）时，`spawn_agent` 拒绝新的 Claude Code 子 Agent，并告诉 lead 什么时候重置。已经在跑的不受影响。
-  - Codex 的 `exec --json` 是否带额度信息【需验证】。程序里有 `rate_limits` 字段，但 R0 的事件流里没看到。如果没有，就只记录 token 用量，不做额度检查。
+  - Codex 的 `exec --json` 不带额度信息（第 9 节第 3 条），所以只记录 token 用量，不做额度检查。
 - **并发。** 每种 CLI 运行时同时最多 2 个，可以在设置里调。超出的排队等待，不报错。你的订阅额度是共用的，这也是 `PLAN.md` 风险表里"订阅版 CLI 不能大量并发"那一条的应对。
 - **回合和时间上限**：和原生子 Agent 一样，每次执行 80 回合、30 分钟。
 
@@ -180,3 +181,21 @@ R0 时有一段 Claude 令牌显示在了对话里。**R4 用的令牌请重新�
 5. **Codex 登录。** 在面板上逐个工作站登录，先登 `ws-1` 和 `ws-2`，以后需要再加。另一个办法是用 OpenAI API key，但那样走的是 API 计费，不是订阅。（推荐：逐个工作站登录）
 6. **CLI 的网页工具。** 关掉。dev 子 Agent 不需要上网查资料，调研由 researcher 负责。（推荐）
 7. **版本。** 把 Claude Code 2.1.302 和 Codex 0.163.0 固定装到 `/usr/local/libexec/agentswarm/cli/`，升级时重新运行安装脚本。（推荐）
+
+## 9. 实测结果（2026-10-17，实现第一步）
+
+以你的账号和 `ws-8` 实际运行 Claude Code 2.1.302 和 Codex 0.163.0，修同一个小 bug，录下事件样本（已去掉本机路径，放在 `apps/swarmd/test/fixtures/cli/`）：
+
+1. **Claude 令牌的传法。** `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` 会把权限模式强制改回 default，必须另外列出允许的工具。实测发现更好的办法：`CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3`。以 `ws-8` 身份通过 fd 3 传入一个假令牌，Claude Code 读到并用它请求，得到 401 "OAuth access token is invalid"，说明这条路生效。令牌因此**不进入任何环境变量**，CLI 执行的 shell 命令看不到它。
+2. **锁定的参数可用。**
+   - `--tools` 和 `--allowedTools` 只放 `Bash,Read,Edit,Write,Glob,Grep`，没有网页工具和子 agent 工具；
+   - `--setting-sources ""` 不加载任何设置和 hooks，`--strict-mcp-config` 不加载 MCP；
+   - `--json-schema` 交回 `{summary, tests, unfinished}`；
+   - `--resume` 能接着原会话，session id 不变；
+   - 提示词从标准输入传入可用。
+3. **Codex。**
+   - `exec --json` 的事件里没有额度信息，只有 `turn.completed` 的 token 用量；
+   - `--output-schema` 交回同样的结构；
+   - `exec resume <thread_id> … -` 能接着原会话，提示词从标准输入读入；
+   - `-c web_search="disabled"` 在 `--strict-config` 下被接受，写错的配置项会直接报错。
+4. **安装来源。** 两个程序都带厂商签名（`codesign --verify --strict` 通过）。安装脚本从你本机已装的固定版本复制，并核对签名和版本号。

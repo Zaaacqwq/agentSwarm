@@ -4,7 +4,7 @@ import cookie from "@fastify/cookie";
 import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import {
-  CreateAgent, CreateEndpoint, CreateMission, CreateProject, CreateRun, Credentials, MissionBudget, MissionReply, RunMessage, SetDiscord, SetGitHubToken, type Me,
+  CreateAgent, CreateEndpoint, CreateMission, CreateProject, CreateRun, Credentials, MissionBudget, MissionReply, RunMessage, SetCli, SetDiscord, SetGitHubToken, type Me,
 } from "@agentswarm/contracts";
 import type { Services } from "../app/services.ts";
 import { RateLimiter } from "../auth/rate-limit.ts";
@@ -154,6 +154,20 @@ export async function buildApp(o: AppOptions): Promise<FastifyInstance> {
     await s.discord.test();
     return { ok: true };
   });
+
+  // ---- CLI workers (R4) ---------------------------------------------------------------------
+  const WS_ID = { type: "object", properties: { ws: { type: "string", pattern: "^ws-[0-9]{1,2}$" } }, required: ["ws"] } as const;
+  const RUNTIME = { type: "object", properties: { runtime: { type: "string", enum: ["claude_code", "codex"] } }, required: ["runtime"] } as const;
+  app.get("/api/cli", async () => s.cli.status());
+  app.put<{ Body: SetCli }>("/api/cli", { schema: { body: SetCli } }, async (req) => s.cli.configure(actor(req), req.body));
+  app.post("/api/cli/refresh", async () => s.cli.refresh());
+  app.post<{ Params: { runtime: "claude_code" | "codex" } }>("/api/cli/:runtime/test", { schema: { params: RUNTIME } }, async (req) => s.cli.test(req.params.runtime));
+  app.post<{ Params: { ws: string } }>("/api/cli/codex/:ws/login", { schema: { params: WS_ID } }, async (req) => s.cli.startCodexLogin(actor(req), req.params.ws));
+  app.post<{ Params: { ws: string } }>("/api/cli/codex/:ws/login/cancel", { schema: { params: WS_ID } }, async (req) => {
+    s.cli.cancelCodexLogin(req.params.ws);
+    return s.cli.status();
+  });
+  app.post<{ Params: { ws: string } }>("/api/cli/codex/:ws/logout", { schema: { params: WS_ID } }, async (req) => s.cli.codexLogout(actor(req), req.params.ws));
 
   // ---- live updates -------------------------------------------------------------------------
   app.get("/api/ws", { websocket: true }, (socket) => {

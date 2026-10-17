@@ -1,7 +1,8 @@
 #!/bin/zsh
 # agentSwarm workstation setup. Run from your own account:
 #   sudo zsh scripts/setup.sh                 install (8 workstations) or repair
-#   sudo zsh scripts/setup.sh --update-exec   reinstall ws-exec and its Node runtime only
+#   sudo zsh scripts/setup.sh --update-exec   reinstall ws-exec, its Node runtime and the CLI workers only
+#   sudo zsh scripts/setup.sh --update-cli    (re)install the pinned Claude Code and Codex CLI workers only
 #   sudo zsh scripts/setup.sh --uninstall     remove users, group, sudoers and /usr/local/libexec/agentswarm
 #
 # Creates: the SwarmWS APFS volume (ownership on) next to /Volumes/Data, the swarm-ws group, hidden users
@@ -21,6 +22,10 @@ SUDOERS="/etc/sudoers.d/agentswarm"
 GROUP="swarm-ws"
 NODE_VERSION="24.22.0"
 NODE_SHA256="75ddfb875bbd868ebe57536f4442225f54dd10f6d2178dd439de869a5c648dc3"   # node-v24.22.0-darwin-arm64.tar.xz
+# CLI workers (R4): the versions swarmd's event parsing was tested with. Copied from your own installs.
+CLAUDE_VERSION="2.1.302"
+CODEX_VERSION="0.163.0"
+CODEX_VENDOR="/opt/homebrew/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin"
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 OWNER="${SUDO_USER:-}"
 mode="install"
@@ -28,6 +33,7 @@ mode="install"
 for arg in "$@"; do
   case "$arg" in
     --update-exec) mode="update-exec" ;;
+    --update-cli) mode="update-cli" ;;
     --uninstall) mode="uninstall" ;;
     *) print -u2 "Unknown argument: $arg"; exit 64 ;;
   esac
@@ -170,6 +176,41 @@ LAUNCHER
   say "Installed ${EXEC} and ${LAUNCH}"
 }
 
+# ---- CLI workers (R4) -----------------------------------------------------------------------------
+# Workstations cannot read your home or Homebrew's node_modules, so pinned copies live in ${LIBEXEC}/cli.
+# Both programs are signed by their vendors; the copy must still verify and report the pinned version.
+install_cli() {
+  local dest="${LIBEXEC}/cli" src stage v
+  mkdir -p "$dest"
+  src="${OWNER_HOME}/.local/share/claude/versions/${CLAUDE_VERSION}"
+  if [[ -f "$src" ]]; then
+    stage="$(mktemp -d)"
+    cp "$src" "${stage}/claude"
+    codesign --verify --strict "${stage}/claude" 2>/dev/null || { rm -rf "$stage"; die "Claude Code ${CLAUDE_VERSION} at ${src} does not pass codesign; nothing installed."; }
+    v="$(/usr/bin/env -i HOME="$stage" DISABLE_AUTOUPDATER=1 "${stage}/claude" --version 2>/dev/null | head -1 || true)"
+    [[ "$v" == "${CLAUDE_VERSION}"* ]] || { rm -rf "$stage"; die "The copied Claude Code reports '${v}', not ${CLAUDE_VERSION}."; }
+    rm -rf "${dest}/claude" && mv "$stage" "${dest}/claude"
+    say "Installed Claude Code ${CLAUDE_VERSION} in ${dest}/claude"
+  else
+    warn "Claude Code ${CLAUDE_VERSION} not found at ${src} (install it with: claude install ${CLAUDE_VERSION}); skipped"
+  fi
+  v="$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "${CODEX_VENDOR}/../../package.json" 2>/dev/null | head -1 || true)"
+  if [[ -x "${CODEX_VENDOR}/bin/codex" && "$v" == "${CODEX_VERSION}"* ]]; then
+    stage="$(mktemp -d)"
+    mkdir -p "${stage}/bin" "${stage}/codex-path"
+    cp "${CODEX_VENDOR}/bin/codex" "${stage}/bin/codex"
+    cp "${CODEX_VENDOR}/codex-path/rg" "${stage}/codex-path/rg"
+    codesign --verify --strict "${stage}/bin/codex" 2>/dev/null || { rm -rf "$stage"; die "Codex ${CODEX_VERSION} does not pass codesign; nothing installed."; }
+    v="$(/usr/bin/env -i HOME="$stage" "${stage}/bin/codex" --version 2>/dev/null | head -1 || true)"
+    [[ "$v" == *"${CODEX_VERSION}"* ]] || { rm -rf "$stage"; die "The copied Codex reports '${v}', not ${CODEX_VERSION}."; }
+    rm -rf "${dest}/codex" && mv "$stage" "${dest}/codex"
+    say "Installed Codex ${CODEX_VERSION} in ${dest}/codex"
+  else
+    warn "Codex ${CODEX_VERSION} not found in ${CODEX_VENDOR} (found '${v:-nothing}'; install it with: npm install -g @openai/codex@${CODEX_VERSION}); skipped"
+  fi
+  chown -R root:wheel "$dest" && find "$dest" -type d -exec chmod 0755 {} + && find "$dest" -type f -exec chmod 0755 {} +
+}
+
 write_sudoers() {
   local tmp user
   tmp="$(mktemp)"
@@ -210,8 +251,12 @@ case "$mode" in
   update-exec)
     install_node
     install_exec
+    install_cli
     write_sudoers
     for user in $(workstation_users); do verify "$user"; done
+    ;;
+  update-cli)
+    install_cli
     ;;
   install)
     preflight
@@ -220,6 +265,7 @@ case "$mode" in
     for n in $(seq 1 "$COUNT"); do ensure_user "ws-${n}" "$gid" "$n"; done
     install_node
     install_exec
+    install_cli
     write_sudoers
     for n in $(seq 1 "$COUNT"); do verify "ws-${n}"; done
     say "Done. Next: npm run check (as yourself), then start swarmd."

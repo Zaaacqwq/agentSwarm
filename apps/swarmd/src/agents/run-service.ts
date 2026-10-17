@@ -19,6 +19,12 @@ import { REVIEW_TOOL_NAMES, workstationTools } from "./tools.ts";
 import { reviewerPrompt, systemPrompt } from "./prompts.ts";
 import { TERMINAL, TREE_LIMITS, TreeError, type TreeService } from "./tree-service.ts";
 import { treeTools, verdictTool, type TreeToolOps } from "./tree-tools.ts";
+import type { CliRuntimeName } from "@agentswarm/contracts";
+import type { CliService } from "../cli/cli-service.ts";
+import { CliRunner, type CliExecution } from "../cli/cli-run.ts";
+import { CLI_DEFAULT_MODEL } from "../cli/cli-prompts.ts";
+import type { AgentRow } from "./agent-service.ts";
+import type { ProjectRow } from "../projects/project-service.ts";
 
 export type RunRow = typeof schema.runs.$inferSelect;
 
@@ -49,6 +55,7 @@ export const DEFAULT_LIMITS: RunLimits = { maxTurns: 80, maxDurationMs: 30 * 60_
 export const MISSION_LEAD_TURNS = 150;
 /** A failed model request is retried this many times before the run fails. */
 export const MODEL_RETRIES = 2;
+
 const RETRY_DELAY_MS = 2_000;
 
 const sleep = (ms: number, signal: AbortSignal) => new Promise<void>((resolve) => {
@@ -66,6 +73,7 @@ export interface RunDeps {
   readonly gateway: ModelGateway;
   readonly relay: Relay;
   readonly tree: TreeService;
+  readonly cli: CliService;
   readonly maxConcurrent: number;
   readonly limits?: RunLimits;
   /** Fetch GitHub into the mirror before a run clones it (off in tests with local remotes). */
@@ -101,9 +109,11 @@ export class RunService {
   private scheduling = false;
   private rescheduled = false;
   private hooks: RunHooks | null = null;
+  private readonly cliRunner: CliRunner;
 
   constructor(deps: RunDeps) {
     this.deps = deps;
+    this.cliRunner = new CliRunner({ backend: deps.backend, relay: deps.relay, cli: deps.cli, getRun: (id) => this.get(id) });
   }
 
   attach(hooks: RunHooks): void {
@@ -164,7 +174,7 @@ export class RunService {
       limits: this.limitsFor(missionId), createdAt: now, startedAt: null, endedAt: null,
       treeId: names.treeId, parentRunId: null, depth: 0, baseBranch: null, budgetUsd: input.budgetUsd ?? TREE_LIMITS.defaultRootBudgetUsd,
       kind: "task", reviewOf: null, review: null, mergedAt: null, prUrl: null, waitingFor: null, reviewSha: null,
-      missionId, prState: null, cleanedAt: null,
+      missionId, prState: null, cleanedAt: null, cliSession: null, estimatedUsd: 0,
     };
     this.deps.db.insert(schema.runs).values(row).run();
     audit(this.deps.db, actor, "run.create", row.id, { agentId, branch: row.branch }, now);
@@ -290,6 +300,13 @@ export class RunService {
     {
       const queued = this.deps.db.select().from(schema.runs).where(eq(schema.runs.status, "queued")).orderBy(asc(schema.runs.createdAt)).all();
       const workstations = new Map(this.deps.pool.list().map((w) => [w.id, w.status]));
+      // CLI runs share your subscription: at most maxConcurrent of each at once; the rest wait their turn.
+      const cliRunning = new Map<string, number>();
+      for (const id of this.active.keys()) {
+        const runtime = this.runtimeOf(this.get(id));
+        if (runtime !== "native") cliRunning.set(runtime, (cliRunning.get(runtime) ?? 0) + 1);
+      }
+      const codexReady = new Set(this.deps.pool.codexReady());
       for (const run of queued) {
         if (this.active.size >= this.deps.maxConcurrent) break;
         // A follow-up needs the workstation that holds its worktree.
@@ -297,8 +314,16 @@ export class RunService {
           this.finish(run.id, "failed", run.report, `Its workstation ${run.workstationId} is unavailable; start a new run`);
           continue;
         }
-        const ws = this.deps.pool.acquire(run.id, run.workstationId);
-        if (ws) this.start(run, ws);
+        const runtime = this.runtimeOf(run);
+        if (runtime !== "native" && (cliRunning.get(runtime) ?? 0) >= this.deps.cli.maxConcurrent()) continue;
+        if (runtime === "codex" && run.workstationId && !codexReady.has(run.workstationId)) {
+          this.finish(run.id, "failed", run.report, `Codex is no longer signed in on ${run.workstationId}; sign it in again or start a new run`);
+          continue;
+        }
+        const ws = this.deps.pool.acquire(run.id, run.workstationId, Date.now(), runtime === "codex" ? (w) => codexReady.has(w.id) : undefined);
+        if (!ws) continue;
+        if (runtime !== "native") cliRunning.set(runtime, (cliRunning.get(runtime) ?? 0) + 1);
+        this.start(run, ws);
       }
     }
   }
@@ -341,6 +366,7 @@ export class RunService {
     const signal = active.controller.signal;
     const message = run.pendingMessage ?? "Continue.";
     db.update(schema.runs).set({ pendingMessage: null }).where(eq(schema.runs.id, runId)).run();
+    if (agentRow.runtime !== "native") return this.executeCli(run, agentRow, project, ws, active, message);
 
     // Resolve the model first: a bad model id should not leave a half-prepared worktree behind.
     const { model, streamFn } = await gateway.resolve(agentRow.endpointId, agentRow.modelId);
@@ -451,6 +477,62 @@ export class RunService {
     }
     if (isReview && !verdict) this.deps.tree.recordVerdict(this.get(runId), false, `The reviewer finished without a verdict: ${fallbackReport(agent.state.messages).summary}`);
     return this.finish(runId, "succeeded", report ?? fallbackReport(agent.state.messages), null);
+  }
+
+  /** Claude Code or Codex does the work in the worktree; swarmd relays its events, commits and pushes. */
+  private async executeCli(run: RunRow, agentRow: AgentRow, project: ProjectRow, ws: string, active: Active, message: string): Promise<void> {
+    const { db, bus, backend, projects } = this.deps;
+    const signal = active.controller.signal;
+    const runtime = agentRow.runtime as CliRuntimeName;
+    const available = this.deps.cli.availability(runtime);
+    // Checked again at start: it may have changed since the spawn (switched off, quota used up).
+    if (!available.ok && !run.cliSession) return this.finish(run.id, "failed", null, available.reason);
+    if (!run.cliSession && this.deps.refreshMirror) {
+      await projects.refresh(project.id).catch((e: Error) => bus.runEvent(run.id, "error", { message: `Could not refresh from GitHub, using the last mirror: ${e.message}` }));
+    }
+    // Idempotent: a follow-up finds its worktree as it left it.
+    const base = run.baseBranch ?? project.defaultBranch;
+    const cloned = await backend.call<{ resumed: boolean }>(ws, { op: "git.clone", scope: run.worktreeScope, mirror: basename(project.mirrorPath), branch: run.branch, base }, { signal });
+    if (!run.cliSession) bus.runEvent(run.id, "status", { status: "worktree", branch: run.branch, base, ...(cloned.resumed ? { resumed: true } : {}) });
+
+    const stopReason = () => active.reason;
+    const deadline = setTimeout(() => {
+      active.reason ??= "time";
+      active.controller.abort();
+    }, run.limits.maxDurationMs);
+    const x: CliExecution = {
+      run, runtime, name: agentRow.name, role: agentRow.role, repo: project.githubRepo, defaultBranch: project.defaultBranch,
+      model: agentRow.modelId === CLI_DEFAULT_MODEL ? null : agentRow.modelId, workstation: ws, signal, message,
+      event: (type, data) => bus.runEvent(run.id, type, data),
+      progress: (p) => {
+        db.update(schema.runs).set({ turns: p.turns, tokensIn: p.tokensIn, tokensOut: p.tokensOut, estimatedUsd: p.estimatedUsd }).where(eq(schema.runs.id, run.id)).run();
+        this.emit(run.id);
+      },
+      session: (id) => db.update(schema.runs).set({ cliSession: id }).where(eq(schema.runs.id, run.id)).run(),
+    };
+    let outcome;
+    try {
+      outcome = await this.cliRunner.execute(x);
+    } catch (error) {
+      const reason = stopReason();
+      if (reason === "cancelled" || reason === "shutdown") throw error;
+      if (reason) {
+        // The time limit: keep what it did so the parent can review it or continue it.
+        await this.cliRunner.salvage({ ...x, run: this.get(run.id) });
+        return this.finish(run.id, "failed", null, STOP_TEXT[reason]);
+      }
+      throw error;
+    } finally {
+      clearTimeout(deadline);
+    }
+    const reason = stopReason();
+    if (reason === "cancelled") return this.finish(run.id, "cancelled", outcome.report, null);
+    if (reason) return this.finish(run.id, "failed", outcome.report, STOP_TEXT[reason]);
+    return this.finish(run.id, outcome.error ? "failed" : "succeeded", outcome.report, outcome.error);
+  }
+
+  private runtimeOf(run: RunRow): AgentRow["runtime"] {
+    return this.deps.agents.get(run.agentId).runtime;
   }
 
   private onEvent(runId: string, event: AgentEvent, c: { turns: number; tokensIn: number; tokensOut: number; costUsd: number }, base: { turns: number; costUsd: number }, limits: RunLimits, stop: (r: StopReason) => void, agent: Agent): void {
@@ -573,6 +655,10 @@ export class RunService {
     const { tree, bus } = this.deps;
     return {
       spawn: async (input) => {
+        if (input.runtime && input.runtime !== "native") {
+          const available = this.deps.cli.availability(input.runtime);
+          if (!available.ok) throw new TreeError(`${input.runtime} is not available: ${available.reason}. Use another runtime.`);
+        }
         const child = await tree.spawn(this.get(runId), input, () => !active.reason);
         bus.runEvent(child.id, "user", { text: child.pendingMessage ?? child.brief });
         bus.runEvent(runId, "status", { status: "spawned", child: child.id, name: child.title, branch: child.branch });
@@ -580,6 +666,7 @@ export class RunService {
         this.schedule();
         return { id: child.id, branch: child.branch, budgetUsd: child.budgetUsd ?? 0 };
       },
+      runtimes: () => this.deps.cli.runtimesNote(),
       wait: (ids) => {
         const children = tree.children(runId);
         for (const id of ids ?? []) if (!children.some((c) => c.id === id)) throw new TreeError(`${id} is not one of your sub-agents`);
@@ -595,7 +682,8 @@ export class RunService {
       message: (id, text) => {
         const parent = this.get(runId);
         const child = tree.child(parent, id, "task");
-        if (TERMINAL.has(child.status)) {
+        // CLI workers spend the subscription, not the tree's budget: nothing to top up.
+        if (TERMINAL.has(child.status) && this.runtimeOf(child) === "native") {
           const topped = tree.topUp(parent, child);
           if (topped) bus.runEvent(id, "status", { status: "budget", added: topped });
         }
@@ -628,7 +716,7 @@ export class RunService {
   }
 
   private toView(row: RunRow): RunView {
-    const agent = this.deps.db.select({ name: schema.agents.name, role: schema.agents.role }).from(schema.agents).where(eq(schema.agents.id, row.agentId)).get();
+    const agent = this.deps.db.select({ name: schema.agents.name, role: schema.agents.role, runtime: schema.agents.runtime }).from(schema.agents).where(eq(schema.agents.id, row.agentId)).get();
     return {
       id: row.id, agentId: row.agentId, projectId: row.projectId, title: row.title, brief: row.brief, branch: row.branch,
       workstationId: row.workstationId, status: row.status, report: row.report, error: row.error, turns: row.turns,
@@ -636,6 +724,7 @@ export class RunService {
       agentName: agent?.name ?? "?", agentRole: agent?.role ?? "?", treeId: row.treeId, parentRunId: row.parentRunId, depth: row.depth,
       kind: row.kind, baseBranch: row.baseBranch, budgetUsd: row.budgetUsd, review: row.review, reviewOf: row.reviewOf,
       mergedAt: row.mergedAt, prUrl: row.prUrl, waitingFor: row.waitingFor, missionId: row.missionId, prState: row.prState, cleanedAt: row.cleanedAt,
+      runtime: agent?.runtime ?? "native", estimatedUsd: row.estimatedUsd,
     };
   }
 

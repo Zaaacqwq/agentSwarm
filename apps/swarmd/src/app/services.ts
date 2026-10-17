@@ -22,6 +22,7 @@ import { MissionService } from "../missions/mission-service.ts";
 import { createWebAccess, type WebAccess } from "../web/web-access.ts";
 import { DiscordBridge } from "../discord/bridge.ts";
 import type { ChatTransport } from "../discord/transport.ts";
+import { CliService } from "../cli/cli-service.ts";
 
 export type Logger = (level: "info" | "warn" | "error", msg: string, extra?: Record<string, unknown>) => void;
 
@@ -63,6 +64,7 @@ export interface Services {
   readonly missions: MissionService;
   readonly watcher: PullRequestWatcher;
   readonly discord: DiscordBridge;
+  readonly cli: CliService;
 }
 
 export function createServices(d: ServiceDeps): Services {
@@ -74,9 +76,10 @@ export function createServices(d: ServiceDeps): Services {
   const pool = new WorkstationPool(d.db, d.backend, (workstation) => bus.publish({ kind: "workstation", workstation }));
   const agents = new AgentService(d.db);
   const relay = new Relay({ db: d.db, backend: d.backend, projects, git: d.git, bus, layout: d.layout });
+  const cli = new CliService({ db: d.db, secrets: d.secrets, backend: d.backend, pool, bus, log: (msg, extra) => d.log("warn", msg, extra) });
   const tree = new TreeService({ db: d.db, projects, agents, github, git: d.git, backend: d.backend, limits: d.limits ?? DEFAULT_LIMITS });
   const runs = new RunService({
-    db: d.db, bus, pool, backend: d.backend, projects, agents, gateway, relay, tree,
+    db: d.db, bus, pool, backend: d.backend, projects, agents, gateway, relay, tree, cli,
     maxConcurrent: d.maxConcurrentRuns, refreshMirror: d.refreshMirror ?? true,
     log: (msg, extra) => d.log("warn", msg, extra),
     ...(d.limits ? { limits: d.limits } : {}),
@@ -96,6 +99,6 @@ export function createServices(d: ServiceDeps): Services {
       await cleanup.clean(root.treeId!);
     },
   });
-  const discord = new DiscordBridge({ db: d.db, secrets: d.secrets, bus, missions, projects, transport: d.transport, dashboardUrl: d.dashboardUrl, log: warn });
-  return { bus, auth: new AuthService(d.db), endpoints, gateway, github, projects, pool, agents, relay, runs, tree, cleanup, missions, watcher, discord };
+  const discord = new DiscordBridge({ db: d.db, secrets: d.secrets, bus, missions, projects, transport: d.transport, dashboardUrl: d.dashboardUrl, log: warn, quota: () => cli.quota() });
+  return { bus, auth: new AuthService(d.db), endpoints, gateway, github, projects, pool, agents, relay, runs, tree, cleanup, missions, watcher, discord, cli };
 }

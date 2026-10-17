@@ -1,5 +1,5 @@
 import { and, asc, eq, gt, isNull } from "drizzle-orm";
-import type { DiscordStatus, LiveMessage, MissionMessageView, SetDiscord } from "@agentswarm/contracts";
+import type { CliQuotaView, DiscordStatus, LiveMessage, MissionMessageView, SetDiscord } from "@agentswarm/contracts";
 import type { Db } from "../db/client.ts";
 import { schema } from "../db/client.ts";
 import type { SecretBox } from "../crypto/secret-box.ts";
@@ -43,6 +43,8 @@ export interface BridgeDeps {
   readonly transport: ChatTransport;
   readonly dashboardUrl: string;
   readonly log: (msg: string, extra?: Record<string, unknown>) => void;
+  /** Claude's subscription windows, for /status (R4). */
+  readonly quota?: () => CliQuotaView | null;
 }
 
 /**
@@ -284,7 +286,9 @@ export class DiscordBridge {
         const open = all.filter((m) => !ENDED.has(m.stage));
         const recent = all.filter((m) => ENDED.has(m.stage)).slice(0, 5);
         const line = (m: (typeof all)[number]) => `- **${m.title}**: ${STAGE_LABEL[m.stage]}${m.waitingForYou && !ENDED.has(m.stage) ? " (waiting for you)" : ""} · $${m.costUsd.toFixed(2)}${m.discordThreadId ? ` · <#${m.discordThreadId}>` : ""}`;
-        return e.reply([open.length ? `**Open missions**\n${open.map(line).join("\n")}` : "No open missions.", recent.length ? `\n**Recently ended**\n${recent.map(line).join("\n")}` : ""].join("\n"));
+        const q = this.deps.quota?.() ?? null;
+        const quota = q ? `\nClaude subscription: 5-hour window ${Math.round(q.fiveHour * 100)}% used, 7-day ${Math.round(q.sevenDay * 100)}%.` : "";
+        return e.reply([open.length ? `**Open missions**\n${open.map(line).join("\n")}` : "No open missions.", recent.length ? `\n**Recently ended**\n${recent.map(line).join("\n")}` : "", quota].join("\n"));
       }
       case "stop":
         if (!here) return e.reply("Use /stop inside a mission's thread.");

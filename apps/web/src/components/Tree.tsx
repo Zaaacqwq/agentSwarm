@@ -2,7 +2,7 @@ import type { RunView, TreeView } from "@agentswarm/contracts";
 import { money } from "../api.ts";
 import { useLive, useResource } from "../live.ts";
 import { Link } from "../router.tsx";
-import { Badge } from "./ui.tsx";
+import { Badge, RuntimeTag } from "./ui.tsx";
 
 /** Every run of one tree, nested by parent, live. */
 export function Tree({ treeId, current }: { treeId: string; current: string }) {
@@ -38,11 +38,12 @@ function Node({ node, byParent, current }: { node: RunView; byParent: Map<string
         <Badge status={node.status} />
         <Link to={`/agents/${node.agentId}/runs/${node.id}`}><b>{node.agentName}</b></Link>
         <span className="faint">{node.kind === "review" ? "reviewer" : node.agentRole}</span>
+        <RuntimeTag runtime={node.runtime} />
         {node.review && <Badge status={node.review.approved ? "ok" : "bad"}>{node.review.approved ? "approved" : "changes requested"}</Badge>}
         {node.mergedAt && <Badge status="pushed">merged</Badge>}
         {node.prUrl && <a href={node.prUrl} target="_blank" rel="noreferrer">pull request ↗</a>}
         <span className="faint mono">{node.kind === "review" ? "" : node.branch.split("/").pop()}</span>
-        <span className="faint">{money(node.costUsd)}</span>
+        <span className="faint">{node.runtime === "native" ? money(node.costUsd) : `≈${money(node.estimatedUsd)} subscription`}</span>
       </div>
       {kids.length > 0 && <ul role="group">{kids.map((k) => <Node key={k.id} node={k} byParent={byParent} current={current} />)}</ul>}
     </li>

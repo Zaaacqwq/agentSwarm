@@ -43,6 +43,8 @@ async function main(): Promise<void> {
   // Nothing an earlier swarmd started may keep running as a workstation user.
   await Promise.all(ws.map((w) => services.pool.reap(w.id).catch((e: Error) => log("warn", "reap failed", { ws: w.id, error: e.message }))));
   log("info", "workstations", { total: ws.length, unhealthy: ws.filter((w) => w.status === "unhealthy").map((w) => `${w.id}: ${w.lastError}`) });
+  // Installed CLI versions and Codex sign-ins (R4); failures only show in the dashboard.
+  void services.cli.refresh().catch(() => undefined);
   services.runs.recover();
   services.auth.pruneExpired();
   void services.github.verify().catch(() => undefined);

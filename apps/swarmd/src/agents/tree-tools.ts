@@ -1,11 +1,14 @@
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
+import type { AgentRuntime } from "@agentswarm/contracts";
 
 const text = (t: string, terminate = false): AgentToolResult<undefined> & { terminate?: boolean } => ({ content: [{ type: "text", text: t }], details: undefined, ...(terminate ? { terminate: true } : {}) });
 
 /** What the tree tools ask of the run service, bound to the calling run. */
 export interface TreeToolOps {
-  spawn(input: { name: string; role: string; brief: string; budgetUsd?: number; modelId?: string }): Promise<{ id: string; branch: string; budgetUsd: number }>;
+  spawn(input: { name: string; role: string; brief: string; budgetUsd?: number; modelId?: string; runtime?: AgentRuntime }): Promise<{ id: string; branch: string; budgetUsd: number }>;
+  /** Which runtimes can be spawned now, for the spawn_agent description (R4). */
+  runtimes(): string;
   /** Results right away if everything waited for has finished; otherwise null, and the run will suspend. */
   wait(ids: string[] | undefined): string | null;
   message(id: string, text: string): void;
@@ -21,6 +24,7 @@ const Spawn = Type.Object({
   brief: Type.String({ minLength: 20, maxLength: 20_000, description: "The complete task; the sub-agent sees nothing else" }),
   budget_usd: Type.Optional(Type.Number({ minimum: 0.01, maximum: 50 })),
   model: Type.Optional(Type.String({ maxLength: 200 })),
+  runtime: Type.Optional(Type.Union([Type.Literal("native"), Type.Literal("claude_code"), Type.Literal("codex")], { description: "Who does the work (default native)" })),
 });
 const Ids = Type.Object({ ids: Type.Optional(Type.Array(Type.String(), { maxItems: 20 })) });
 const Id = Type.Object({ id: Type.String() });
@@ -39,10 +43,15 @@ function build(ops: TreeToolOps, opts: { canSpawn: boolean; isRoot: boolean }): 
     tools.push(
       {
         name: "spawn_agent", label: "spawn_agent", parameters: Spawn,
-        description: "Give one part of the work to a new sub-agent with its own workstation, context and branch (cut from your last pushed commit). It starts right away. Commit and git_push first if it needs your changes.",
+        description: [
+          "Give one part of the work to a new sub-agent with its own workstation, context and branch (cut from your last pushed commit). It starts right away. Commit and git_push first if it needs your changes.",
+          "runtime: native (default) is a model run by agentSwarm; claude_code and codex are the Claude Code and Codex coding agents on the person's subscriptions: stronger for hard or wide coding packages, no dollar budget (budget_usd is ignored), model is that CLI's model name if you set one. Use them for development packages only; reviewers stay native.",
+          `Right now: ${ops.runtimes()}.`,
+        ].join(" "),
         execute: async (_id, p: any) => {
-          const c = await ops.spawn({ name: p.name, role: p.role, brief: p.brief, ...(p.budget_usd ? { budgetUsd: p.budget_usd } : {}), ...(p.model ? { modelId: p.model } : {}) });
-          return text(`Spawned ${p.name}: id ${c.id}, branch ${c.branch}, budget $${c.budgetUsd.toFixed(2)}. Spawn the others you need, then call wait_agents.`);
+          const c = await ops.spawn({ name: p.name, role: p.role, brief: p.brief, ...(p.budget_usd ? { budgetUsd: p.budget_usd } : {}), ...(p.model ? { modelId: p.model } : {}), ...(p.runtime ? { runtime: p.runtime } : {}) });
+          const who = p.runtime && p.runtime !== "native" ? `runs as ${p.runtime} (subscription)` : `budget $${c.budgetUsd.toFixed(2)}`;
+          return text(`Spawned ${p.name}: id ${c.id}, branch ${c.branch}, ${who}. Spawn the others you need, then call wait_agents.`);
         },
       },
       {

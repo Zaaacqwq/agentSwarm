@@ -20,6 +20,8 @@ export class WorkstationError extends Error {
 export interface CallOptions {
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
+  /** Events a streaming op (cli.*) reports before its response, in order. */
+  readonly onEvent?: (event: unknown) => void;
 }
 
 /** Runs one ws-exec request as a workstation user. */
@@ -80,7 +82,9 @@ function runJson<T>(argv: string[], env: Record<string, string>, request: Reques
   return new Promise((resolve, reject) => {
     if (opts.signal?.aborted) return reject(new WorkstationError("cancelled", "Cancelled"));
     const child = spawn(cmd, args, { cwd: "/", env, stdio: ["pipe", "pipe", "pipe"] });
-    let out = "";
+    // Lines are read as they come: `{"event": …}` lines go to onEvent, the last line is the response.
+    let pending = "";
+    let last = "";
     let err = "";
     let settled = false;
     const finish = (fn: () => void) => {
@@ -89,6 +93,18 @@ function runJson<T>(argv: string[], env: Record<string, string>, request: Reques
       clearTimeout(timer);
       opts.signal?.removeEventListener("abort", onAbort);
       fn();
+    };
+    const line = (text: string) => {
+      if (!text.trim()) return;
+      if (text.startsWith('{"event":')) {
+        try {
+          opts.onEvent?.((JSON.parse(text) as { event: unknown }).event);
+        } catch {
+          // A cut or garbled event line: skip it, the response still comes.
+        }
+        return;
+      }
+      last = text;
     };
     // sudo relays SIGTERM to ws-exec, which kills its commands' process groups.
     const onAbort = () => {
@@ -100,15 +116,25 @@ function runJson<T>(argv: string[], env: Record<string, string>, request: Reques
       child.kill("SIGTERM");
       finish(() => reject(new WorkstationError("timeout", "Workstation call timed out")));
     }, opts.timeoutMs ?? 660_000);
-    child.stdout.on("data", (b: Buffer) => (out += b.toString("utf8")));
-    child.stderr.on("data", (b: Buffer) => (err += b.toString("utf8")));
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      pending += chunk;
+      let nl = pending.indexOf("\n");
+      while (nl >= 0) {
+        line(pending.slice(0, nl));
+        pending = pending.slice(nl + 1);
+        nl = pending.indexOf("\n");
+      }
+    });
+    child.stderr.on("data", (b: Buffer) => (err = (err + b.toString("utf8")).slice(-4000)));
     child.on("error", (e) => finish(() => reject(new WorkstationError("failed", e.message))));
     child.on("close", (code) => finish(() => {
+      if (pending) line(pending);
       let res: Response;
       try {
-        res = JSON.parse(out) as Response;
+        res = JSON.parse(last) as Response;
       } catch {
-        return reject(new WorkstationError("failed", `ws-exec exited ${code}: ${(err || out).trim().slice(0, 300)}`));
+        return reject(new WorkstationError("failed", `ws-exec exited ${code}: ${(err || last).trim().slice(0, 300)}`));
       }
       if (res.ok) resolve(res.result as T);
       else reject(new WorkstationError(res.code, res.error));

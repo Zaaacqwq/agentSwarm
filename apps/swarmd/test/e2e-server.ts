@@ -2,6 +2,7 @@
 // scripted models) for Playwright. Each run replays the same tree: the root agent hands the fix to
 // a helper, has it reviewed, merges it, pushes and opens the pull request. Then a fast-track mission
 // started on the dashboard: the lead asks, you answer, it plans, you approve, it builds and opens a PR.
+// Last, CLI workers (R4): a Claude Code token and a Codex sign-in, then a root that hands its fix to Claude Code.
 import { fileURLToPath } from "node:url";
 import { fauxAssistantMessage, fauxToolCall, type FauxResponseFactory, type TranscriptContext } from "@earendil-works/pi-ai";
 import { harness } from "./harness.ts";
@@ -42,6 +43,10 @@ h.scriptAgents({
     call("git_push", {}),
     call("open_pull_request", { title: "Add cube", body: "See docs/agentswarm." }),
     call("stage_done", { summary: "Checked; the pull request is open." }),
+    // CLI workers.
+    call("spawn_agent", { name: "Claudia", role: "developer", brief: "square(3) must be 9: fix math.js so node --test passes.", runtime: "claude_code" }),
+    call("wait_agents", {}),
+    call("report", { summary: "Claude Code fixed square.", tests: "node --test: 1 passed", unfinished: [] }),
   ],
   Builder: [
     call("ws_write", { path: "cube.js", content: "export const cube = (x) => x * x * x;\n" }),
@@ -59,6 +64,13 @@ h.scriptAgents({
     call("report", { summary: "Fixed square.", tests: "node --test: 1 passed", unfinished: [] }),
   ],
   "Helper-review": [call("review_verdict", { approved: true, comments: "Correct, and the test passes." })],
+});
+h.cli.script([{ write: [{ path: "math.js", content: "export const square = (x) => x * x;\n" }], commit: "Fix square", quota: { five: 0.42, seven: 0.18 }, usd: 0.0731, report: { summary: "square multiplies now.", tests: "node --test: 1 passed", unfinished: [] } }]);
+// As swarmd does at startup: read the installed CLI versions and sign-ins.
+await h.services.cli.refresh();
+// The person confirms the Codex device code in their browser; here the fake does it a moment after the code shows.
+h.services.bus.subscribe((m) => {
+  if (m.kind === "cli" && m.cli.codex.workstations.some((w) => w.login?.state === "waiting" && w.login.code)) setTimeout(() => h.cli.approveLogin(), 1500);
 });
 await h.app.listen({ host: "127.0.0.1", port: Number(process.env.E2E_PORT ?? 4399) });
 const stop = async () => {

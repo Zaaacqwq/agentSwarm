@@ -105,3 +105,44 @@ test("start a mission on the dashboard, answer the lead, approve its plan, and g
   await expect(page.getByText("Needs you · Waiting for you to merge")).toBeVisible();
   await page.screenshot({ path: `${SHOTS}/missions-1440.png`, fullPage: true });
 });
+
+test("connect Claude Code and Codex, then watch a Claude Code sub-agent do the work", async ({ page }) => {
+  await page.goto("/settings");
+  await page.getByLabel("Password").fill("correct horse battery staple");
+  await page.getByRole("button", { name: "Sign in" }).click();
+  const cli = page.getByRole("region", { name: "CLI workers" });
+  await expect(cli).toBeVisible();
+  await expect(cli.getByText("version 2.1.302", { exact: false })).toBeVisible();
+  await cli.getByLabel("Long-lived token").fill("sk-ant-oat01-e2e-token-value-0123456789");
+  await cli.getByRole("button", { name: "Save Claude token" }).click();
+  await expect(cli.getByRole("button", { name: "Replace Claude token" })).toBeVisible();
+  await cli.getByRole("button", { name: "Sign in" }).first().click();
+  await expect(cli.getByLabel("One-time code")).toHaveText("FAKE-12345");
+  await page.screenshot({ path: `${SHOTS}/cli-login-1440.png`, fullPage: true });
+  await expect(cli.getByText("signed in", { exact: true })).toBeVisible({ timeout: 20_000 });
+
+  await page.getByRole("link", { name: "Agents" }).click();
+  await page.getByRole("cell", { name: "Dev", exact: true }).click();
+  await page.getByLabel("Title").fill("Square by Claude Code");
+  await page.getByLabel("Brief").fill("Give the square fix to Claude Code.");
+  await page.getByRole("button", { name: "Start run" }).click();
+  await expect(page.getByRole("region", { name: "Report" }).getByText("Claude Code fixed square.")).toBeVisible({ timeout: 30_000 });
+  const tree = page.getByRole("region", { name: "Agent tree" });
+  await expect(tree.getByText("Claude Code", { exact: true })).toBeVisible();
+  await expect(tree.getByText("≈$0.07 subscription")).toBeVisible();
+  await page.screenshot({ path: `${SHOTS}/cli-tree-1440.png`, fullPage: true });
+  await tree.getByRole("link", { name: "Claudia", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Claudia" })).toBeVisible();
+  await expect(page.getByText("At API prices (subscription)")).toBeVisible();
+  await expect(page.getByRole("region", { name: "Report" }).getByText("square multiplies now.")).toBeVisible();
+  const timeline = page.getByRole("region", { name: "Timeline" });
+  await expect(timeline.getByText("Write", { exact: false }).first()).toBeVisible();
+  await expect(timeline.getByText("pushed", { exact: true })).toBeVisible();
+  await page.screenshot({ path: `${SHOTS}/cli-run-1440.png`, fullPage: true });
+
+  await page.getByRole("link", { name: "Settings" }).click();
+  await expect(cli.getByRole("meter", { name: "5-hour window" })).toHaveAttribute("aria-valuenow", "42");
+  await page.screenshot({ path: `${SHOTS}/cli-settings-1440.png`, fullPage: true });
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.screenshot({ path: `${SHOTS}/cli-settings-375.png`, fullPage: true });
+});
