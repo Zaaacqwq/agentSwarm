@@ -1,6 +1,6 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { dispatch } from "../src/dispatch.ts";
 import type { Request } from "../src/protocol.ts";
@@ -21,6 +21,12 @@ async function setup() {
   const cli = installFakeCli(f.layout.cliDir);
   await call(f.env, { op: "git.clone", scope: SCOPE, mirror: "demo.git", branch: "swarm/demo/t1/part", base: "main" });
   return { ...f, cli };
+}
+
+/** What `codex login` leaves on a workstation. */
+function signIn(root: string): void {
+  mkdirSync(join(root, ".codex"), { recursive: true });
+  writeFileSync(join(root, ".codex", "auth.json"), JSON.stringify({ tokens: { account_id: "acct-owner", access_token: "a", refresh_token: "refresh-1" } }));
 }
 
 const run = (over: Partial<Extract<Request, { op: "cli.run" }>> = {}): Request => ({
@@ -55,17 +61,21 @@ describe("CLI workers (sandboxed)", () => {
     }
   });
 
-  test("Codex: its own signed-in home, bundled ripgrep on PATH, resume, and a stop at maxTurns actions", async () => {
+  test("Codex: a run's own copy of the sign-in, bundled ripgrep on PATH, no config, resume, and a stop at its action limit", async () => {
     const f = await setup();
     try {
-      f.cli.script([{ tools: 10 }, {}]);
+      await assert.rejects(call(f.env, run({ runtime: "codex", credential: undefined })), { code: "conflict" }, "not signed in yet");
+      signIn(f.env.root);
+      f.cli.script([{ tools: 20 }, {}]);
       const events: { type?: string }[] = [];
       const res = await call<{ stoppedFor: string | null; exitCode: number | null }>(f.env, run({ runtime: "codex", maxTurns: 3, credential: undefined }), events);
       assert.equal(res.stoppedFor, "turns");
-      assert.equal(events.filter((e) => e.type === "item.completed").length, 3);
+      assert.equal(events.filter((e) => e.type === "item.completed").length, 9, "3 turns × 3 actions");
       await call(f.env, run({ runtime: "codex", resume: "01a14ae8-1b09-7663-b855-8ae73f83915e", credential: undefined, model: "gpt-5.5-codex" }));
       const [first, second] = f.cli.calls();
-      assert.equal(first!.codexHome, join(f.env.root, ".codex"));
+      assert.equal(first!.codexHome, join(first!.home, ".codex"), "the Codex home is inside the run's own space");
+      assert.notEqual(first!.codexHome, join(f.env.root, ".codex"));
+      for (const flag of ["--ignore-user-config", "--ignore-rules"]) assert.ok(first!.args.includes(flag), flag);
       assert.ok(first!.path.startsWith(join(f.layout.cliDir, "codex", "codex-path")));
       assert.ok(first!.args.includes("--dangerously-bypass-approvals-and-sandbox"));
       assert.ok(first!.args.includes('web_search="disabled"'));
@@ -78,11 +88,33 @@ describe("CLI workers (sandboxed)", () => {
     }
   });
 
+  test("Codex hands back a rotated sign-in, but never another account's, and runs cannot plant config for each other", async () => {
+    const f = await setup();
+    try {
+      signIn(f.env.root);
+      const stored = () => JSON.parse(readFileSync(join(f.env.root, ".codex", "auth.json"), "utf8")).tokens;
+      f.cli.script([{ rotate: "refresh-2", plant: "config.toml", probe: `cat ${join(f.env.root, ".codex", "auth.json")} 2>&1` }, { swapAccount: "acct-attacker", rotate: "refresh-evil" }]);
+      const events: unknown[] = [];
+      await call(f.env, run({ runtime: "codex", credential: undefined }), events);
+      const seen = JSON.stringify(events);
+      assert.match(seen, /Operation not permitted/, "the workstation's own sign-in is out of reach");
+      assert.doesNotMatch(seen, /refresh-1/);
+      assert.equal(stored().refresh_token, "refresh-2", "the rotated token is kept");
+      assert.ok(!existsSync(join(f.env.root, ".codex", "config.toml")), "what a run writes stays in its own space");
+      await call(f.env, run({ runtime: "codex", credential: undefined }));
+      assert.deepEqual([stored().account_id, stored().refresh_token], ["acct-owner", "refresh-2"], "a swapped sign-in is not taken back");
+    } finally {
+      f.cleanup();
+    }
+  });
+
   test("requests cannot smuggle arguments or skip the token", async () => {
     const f = await setup();
     try {
       await assert.rejects(call(f.env, run({ model: "x --dangerously-skip-permissions" })), { code: "bad_request" });
       await assert.rejects(call(f.env, run({ resume: "--settings=/tmp/x" })), { code: "bad_request" });
+      await assert.rejects(call(f.env, run({ resume: "-add-dir-x" })), { code: "bad_request" });
+      await assert.rejects(call(f.env, run({ model: "-m" })), { code: "bad_request" });
       await assert.rejects(call(f.env, run({ runtime: "bash" as never })), { code: "bad_request" });
       await assert.rejects(call(f.env, run({ credential: undefined })), { code: "bad_request" });
       await assert.rejects(call(f.env, run({ maxTurns: 0 })), { code: "bad_request" });

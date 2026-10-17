@@ -6,11 +6,26 @@ import { prepareSpace } from "./space.ts";
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const running = new Set<ChildProcess>();
 
+const exitHooks = new Set<() => void>();
+
+/** Runs when ws-exec is stopped by a signal, after its commands are killed; returns the remover. */
+export function atSignalExit(fn: () => void): () => void {
+  exitHooks.add(fn);
+  return () => void exitHooks.delete(fn);
+}
+
 /** When swarmd cancels (sudo relays the signal), take every command's whole process group down. */
 export function killAllOnSignal(): void {
   for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
     process.on(signal, () => {
       for (const child of running) killGroup(child);
+      for (const fn of exitHooks) {
+        try {
+          fn();
+        } catch {
+          // Best effort: the process is going away.
+        }
+      }
       process.exit(143);
     });
   }
@@ -112,6 +127,8 @@ export interface StreamOptions extends RunOptions {
   readonly fd3?: string;
   /** Each complete stdout line, as it arrives; return false to stop the program. */
   readonly onLine: (line: string) => boolean | void;
+  /** Also pass stderr lines to onLine (stderr's tail is kept either way). */
+  readonly stderrLines?: boolean;
 }
 
 export interface StreamResult {
@@ -164,7 +181,18 @@ export function streamProcess(env: ExecEnv, argv: readonly string[], opts: Strea
         pending = "";
       }
     });
-    child.stderr?.on("data", (b: Buffer) => err.push(b));
+    let errPending = "";
+    child.stderr?.on("data", (b: Buffer) => {
+      err.push(b);
+      if (!opts.stderrLines) return;
+      errPending += b.toString("utf8");
+      const lines = errPending.split("\n");
+      errPending = lines.pop() ?? "";
+      for (const l of lines) line(l);
+    });
+    // A program that exits before reading its input must not crash ws-exec (EPIPE) and orphan its group.
+    child.stdin?.on("error", () => undefined);
+    (child.stdio[3] as NodeJS.WritableStream | null)?.on("error", () => undefined);
     if (opts.stdin !== undefined) child.stdin?.end(opts.stdin);
     if (opts.fd3 !== undefined) (child.stdio[3] as NodeJS.WritableStream | null)?.end(opts.fd3);
     const timer = setTimeout(() => {
@@ -173,6 +201,7 @@ export function streamProcess(env: ExecEnv, argv: readonly string[], opts: Strea
     }, opts.timeoutMs);
     child.on("error", (error) => {
       clearTimeout(timer);
+      killGroup(child);
       running.delete(child);
       reject(error);
     });
@@ -183,6 +212,7 @@ export function streamProcess(env: ExecEnv, argv: readonly string[], opts: Strea
       clearTimeout(timer);
       running.delete(child);
       if (pending) line(pending);
+      if (errPending && opts.stderrLines) line(errPending);
       resolve({ exitCode: signal ? null : code, timedOut, stopped, stderr: err.text(), durationMs: Date.now() - started });
     };
     child.on("close", settle);

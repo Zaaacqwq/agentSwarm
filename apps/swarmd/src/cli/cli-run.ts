@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import type { CliRuntimeName, RunReport } from "@agentswarm/contracts";
 import type { CliRunResult, ExecResult } from "@agentswarm/ws-exec";
 import type { WorkstationBackend } from "../workstations/backend.ts";
@@ -51,7 +52,6 @@ export interface CliRunnerDeps {
 /** Runs Claude Code or Codex in a run's worktree, then commits what it left and pushes through the Relay. */
 export class CliRunner {
   private readonly deps: CliRunnerDeps;
-  private executions = 0;
 
   constructor(deps: CliRunnerDeps) {
     this.deps = deps;
@@ -61,15 +61,17 @@ export class CliRunner {
     const credential = x.runtime === "claude_code" ? (await this.deps.cli.claudeToken()) ?? undefined : undefined;
     if (x.runtime === "claude_code" && !credential) throw new Error("Claude Code has no token (dashboard settings)");
     const resume = x.run.cliSession ?? undefined;
-    const prompt = resume ? cliFollowUp(x.message) : cliPrompt({ name: x.name, role: x.role, repo: x.repo, branch: x.run.branch, base: x.run.baseBranch ?? x.defaultBranch, message: x.message });
+    const first = (message: string) => cliPrompt({ name: x.name, role: x.role, repo: x.repo, branch: x.run.branch, base: x.run.baseBranch ?? x.defaultBranch, message });
+    // No session to continue: the CLI hears the task itself, not only the latest message ("Continue.",
+    // an answer) — unless that message is the brief (the first execution).
+    const prompt = resume ? cliFollowUp(x.message)
+      : x.message.includes(x.run.brief.trim()) ? first(x.message)
+      : first(`${x.run.brief}\n\nAn earlier attempt did not start a session; anything it did is in this worktree (see git log and git status).\n\nThe latest message:\n${x.message}`);
     let attempt = await this.once(x, prompt, resume, credential);
     // A session the CLI no longer has (its files are gone): start a new one with the whole story.
     if (resume && !attempt.sawSession && attempt.res.exitCode !== 0 && !x.signal.aborted) {
       x.event("error", { message: `${x.runtime} could not continue its earlier session; starting a new one` });
-      const fresh = cliPrompt({
-        name: x.name, role: x.role, repo: x.repo, branch: x.run.branch, base: x.run.baseBranch ?? x.defaultBranch,
-        message: `${x.run.brief}\n\nYour earlier session is gone, but your work so far is in this worktree (see git log and git status).\n\nThe latest message:\n${x.message}`,
-      });
+      const fresh = first(`${x.run.brief}\n\nYour earlier session is gone, but your work so far is in this worktree (see git log and git status).\n\nThe latest message:\n${x.message}`);
       attempt = await this.once(x, fresh, undefined, credential);
     }
     const { res, result, lastText } = attempt;
@@ -79,20 +81,23 @@ export class CliRunner {
     if (res.stoppedFor === "turns") error = "Stopped: the run reached its turn limit";
     else if (res.timedOut) error = "Stopped: the run reached its time limit";
     else if (result?.isError) error = result.error ?? `${x.runtime} reported an error`;
-    else if (!result && res.exitCode !== 0) error = `${x.runtime} exited ${res.exitCode ?? "on a signal"}: ${res.stderr.trim().split("\n").slice(-3).join(" ").slice(0, 400)}`;
+    else if (!result) error = `${x.runtime} ${res.exitCode === 0 ? "ended without its final result" : `exited ${res.exitCode ?? "on a signal"}`}: ${res.stderr.trim().split("\n").slice(-3).join(" ").slice(0, 400) || "(no output)"}`;
     if (pushError) error = error ? `${error}; ${pushError}` : pushError;
     return { report, error };
   }
 
-  /** After a stop (time limit): keep what the CLI did, so the parent can see and continue it. */
-  async salvage(x: Pick<CliExecution, "run" | "workstation" | "runtime" | "event" | "defaultBranch">): Promise<void> {
-    await this.commitAndPush(x).catch(() => undefined);
+  /** After a stop (time limit): keep what the CLI did, so the parent can see and continue it. Returns a problem, or null. */
+  async salvage(x: Pick<CliExecution, "run" | "workstation" | "runtime" | "event" | "defaultBranch">): Promise<string | null> {
+    return this.commitAndPush(x).catch((error: Error) => `Could not keep the CLI's work: ${error.message}`);
   }
 
   private async once(x: CliExecution, prompt: string, resume: string | undefined, credential: string | undefined) {
     const parser = parserFor(x.runtime);
-    const n = ++this.executions;
-    const base = { turns: x.run.turns, tokensIn: x.run.tokensIn, tokensOut: x.run.tokensOut, estimatedUsd: x.run.estimatedUsd };
+    // CLI tool ids restart in every execution (and this process restarts): keep them apart in the run's events.
+    const n = randomBytes(3).toString("hex");
+    // Fresh: a second attempt in the same execution adds to the first one's counts.
+    const now = this.deps.getRun(x.run.id);
+    const base = { turns: now.turns, tokensIn: now.tokensIn, tokensOut: now.tokensOut, estimatedUsd: now.estimatedUsd };
     const live = { ...base };
     let sawSession = false;
     let lastText = "";

@@ -47,7 +47,8 @@ export interface CliRunResult {
 export interface CliStatus {
   readonly claude: string | null;
   readonly codex: string | null;
-  readonly codexSignedIn: boolean;
+  /** null: the check gave no clear answer (a timeout, a crash). */
+  readonly codexSignedIn: boolean | null;
 }
 
 export type ErrorCode = "bad_request" | "out_of_scope" | "not_found" | "conflict" | "timeout" | "failed";

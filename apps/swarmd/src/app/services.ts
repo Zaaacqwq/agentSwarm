@@ -76,7 +76,8 @@ export function createServices(d: ServiceDeps): Services {
   const pool = new WorkstationPool(d.db, d.backend, (workstation) => bus.publish({ kind: "workstation", workstation }));
   const agents = new AgentService(d.db);
   const relay = new Relay({ db: d.db, backend: d.backend, projects, git: d.git, bus, layout: d.layout });
-  const cli = new CliService({ db: d.db, secrets: d.secrets, backend: d.backend, pool, bus, log: (msg, extra) => d.log("warn", msg, extra) });
+  // A workstation the CLI service held (sign-in, test) is free again: let queued runs have it.
+  const cli = new CliService({ db: d.db, secrets: d.secrets, backend: d.backend, pool, bus, log: (msg, extra) => d.log("warn", msg, extra), onFreed: () => runs.schedule() });
   const tree = new TreeService({ db: d.db, projects, agents, github, git: d.git, backend: d.backend, limits: d.limits ?? DEFAULT_LIMITS });
   const runs = new RunService({
     db: d.db, bus, pool, backend: d.backend, projects, agents, gateway, relay, tree, cli,

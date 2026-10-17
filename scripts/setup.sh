@@ -22,9 +22,15 @@ SUDOERS="/etc/sudoers.d/agentswarm"
 GROUP="swarm-ws"
 NODE_VERSION="24.22.0"
 NODE_SHA256="75ddfb875bbd868ebe57536f4442225f54dd10f6d2178dd439de869a5c648dc3"   # node-v24.22.0-darwin-arm64.tar.xz
-# CLI workers (R4): the versions swarmd's event parsing was tested with. Copied from your own installs.
+# CLI workers (R4): the versions swarmd's event parsing was tested with. Copied from your own installs,
+# but only if each file is exactly the pinned one (SHA-256) and signed by its vendor's Developer ID.
 CLAUDE_VERSION="2.1.302"
+CLAUDE_SHA256="5262ce9de86243fed0d21edc39b271555d56780d0112e2b194439fe1c6662d37"
+CLAUDE_TEAM="Q6L2SF6YDW"   # Anthropic PBC
 CODEX_VERSION="0.163.0"
+CODEX_SHA256="8813367285524ac798dd96d1b071aea30d58708c7226fd236cd275cf1cfdee31"
+CODEX_RG_SHA256="27d09e29c478fddbfc750a2cb5fd06965bad0ea223e776f8667160a0de63c6e4"
+CODEX_TEAM="2DC432GLL2"    # OpenAI OpCo, LLC
 CODEX_VENDOR="/opt/homebrew/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin"
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 OWNER="${SUDO_USER:-}"
@@ -178,36 +184,38 @@ LAUNCHER
 
 # ---- CLI workers (R4) -----------------------------------------------------------------------------
 # Workstations cannot read your home or Homebrew's node_modules, so pinned copies live in ${LIBEXEC}/cli.
-# Both programs are signed by their vendors; the copy must still verify and report the pinned version.
+# Each file is copied first and checked as the copy (hash and vendor signature), so nothing can swap it
+# between the check and the install; nothing from your account is ever executed as root.
+pinned_copy() {  # source, destination, sha256, team id (empty: hash only)
+  local src="$1" dst="$2" sha="$3" team="$4"
+  [[ -f "$src" && ! -L "$src" ]] || return 1
+  cp "$src" "$dst"
+  [[ "$(shasum -a 256 "$dst" | awk '{print $1}')" == "$sha" ]] || { warn "${src} is not the pinned build (SHA-256 differs)"; return 1; }
+  if [[ -n "$team" ]]; then
+    codesign --verify --strict -R="anchor apple generic and certificate leaf[subject.OU] = \"${team}\"" "$dst" 2>/dev/null || { warn "${src} is not signed by team ${team}"; return 1; }
+  fi
+}
+
 install_cli() {
-  local dest="${LIBEXEC}/cli" src stage v
+  local dest="${LIBEXEC}/cli" stage
   mkdir -p "$dest"
-  src="${OWNER_HOME}/.local/share/claude/versions/${CLAUDE_VERSION}"
-  if [[ -f "$src" ]]; then
-    stage="$(mktemp -d)"
-    cp "$src" "${stage}/claude"
-    codesign --verify --strict "${stage}/claude" 2>/dev/null || { rm -rf "$stage"; die "Claude Code ${CLAUDE_VERSION} at ${src} does not pass codesign; nothing installed."; }
-    v="$(/usr/bin/env -i HOME="$stage" DISABLE_AUTOUPDATER=1 "${stage}/claude" --version 2>/dev/null | head -1 || true)"
-    [[ "$v" == "${CLAUDE_VERSION}"* ]] || { rm -rf "$stage"; die "The copied Claude Code reports '${v}', not ${CLAUDE_VERSION}."; }
-    rm -rf "${dest}/claude" && mv "$stage" "${dest}/claude"
+  stage="$(mktemp -d)"
+  if pinned_copy "${OWNER_HOME}/.local/share/claude/versions/${CLAUDE_VERSION}" "${stage}/claude" "$CLAUDE_SHA256" "$CLAUDE_TEAM"; then
+    mkdir -p "${stage}/claude.d" && mv "${stage}/claude" "${stage}/claude.d/claude"
+    rm -rf "${dest}/claude" && mv "${stage}/claude.d" "${dest}/claude"
     say "Installed Claude Code ${CLAUDE_VERSION} in ${dest}/claude"
   else
-    warn "Claude Code ${CLAUDE_VERSION} not found at ${src} (install it with: claude install ${CLAUDE_VERSION}); skipped"
+    warn "Claude Code ${CLAUDE_VERSION} not installed (install it as yourself with: claude install ${CLAUDE_VERSION}); skipped"
   fi
-  v="$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "${CODEX_VENDOR}/../../package.json" 2>/dev/null | head -1 || true)"
-  if [[ -x "${CODEX_VENDOR}/bin/codex" && "$v" == "${CODEX_VERSION}"* ]]; then
-    stage="$(mktemp -d)"
-    mkdir -p "${stage}/bin" "${stage}/codex-path"
-    cp "${CODEX_VENDOR}/bin/codex" "${stage}/bin/codex"
-    cp "${CODEX_VENDOR}/codex-path/rg" "${stage}/codex-path/rg"
-    codesign --verify --strict "${stage}/bin/codex" 2>/dev/null || { rm -rf "$stage"; die "Codex ${CODEX_VERSION} does not pass codesign; nothing installed."; }
-    v="$(/usr/bin/env -i HOME="$stage" "${stage}/bin/codex" --version 2>/dev/null | head -1 || true)"
-    [[ "$v" == *"${CODEX_VERSION}"* ]] || { rm -rf "$stage"; die "The copied Codex reports '${v}', not ${CODEX_VERSION}."; }
-    rm -rf "${dest}/codex" && mv "$stage" "${dest}/codex"
+  mkdir -p "${stage}/codex/bin" "${stage}/codex/codex-path"
+  if pinned_copy "${CODEX_VENDOR}/bin/codex" "${stage}/codex/bin/codex" "$CODEX_SHA256" "$CODEX_TEAM" \
+    && pinned_copy "${CODEX_VENDOR}/codex-path/rg" "${stage}/codex/codex-path/rg" "$CODEX_RG_SHA256" "$CODEX_TEAM"; then
+    rm -rf "${dest}/codex" && mv "${stage}/codex" "${dest}/codex"
     say "Installed Codex ${CODEX_VERSION} in ${dest}/codex"
   else
-    warn "Codex ${CODEX_VERSION} not found in ${CODEX_VENDOR} (found '${v:-nothing}'; install it with: npm install -g @openai/codex@${CODEX_VERSION}); skipped"
+    warn "Codex ${CODEX_VERSION} not installed (install it as yourself with: npm install -g @openai/codex@${CODEX_VERSION}); skipped"
   fi
+  rm -rf "$stage"
   chown -R root:wheel "$dest" && find "$dest" -type d -exec chmod 0755 {} + && find "$dest" -type f -exec chmod 0755 {} +
 }
 

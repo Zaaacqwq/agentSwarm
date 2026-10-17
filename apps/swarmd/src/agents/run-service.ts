@@ -55,6 +55,7 @@ export const DEFAULT_LIMITS: RunLimits = { maxTurns: 80, maxDurationMs: 30 * 60_
 export const MISSION_LEAD_TURNS = 150;
 /** A failed model request is retried this many times before the run fails. */
 export const MODEL_RETRIES = 2;
+const QUOTA_RETRY_MS = 5 * 60_000;
 
 const RETRY_DELAY_MS = 2_000;
 
@@ -110,6 +111,7 @@ export class RunService {
   private rescheduled = false;
   private hooks: RunHooks | null = null;
   private readonly cliRunner: CliRunner;
+  private retryTimer: NodeJS.Timeout | null = null;
 
   constructor(deps: RunDeps) {
     this.deps = deps;
@@ -256,6 +258,8 @@ export class RunService {
 
   /** Cancels everything running and waits for it to wind down (shutdown and tests). */
   async stopAll(): Promise<void> {
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
     for (const [id, active] of this.active) {
       active.reason = "shutdown";
       active.controller.abort();
@@ -315,7 +319,19 @@ export class RunService {
           continue;
         }
         const runtime = this.runtimeOf(run);
-        if (runtime !== "native" && (cliRunning.get(runtime) ?? 0) >= this.deps.cli.maxConcurrent()) continue;
+        if (runtime !== "native") {
+          const available = this.deps.cli.availability(runtime);
+          if (!available.ok && available.blocked === "quota") {
+            // It waits for the window to reset rather than failing.
+            this.retryLater();
+            continue;
+          }
+          if (!available.ok) {
+            this.finish(run.id, "failed", run.report, available.reason);
+            continue;
+          }
+          if ((cliRunning.get(runtime) ?? 0) >= this.deps.cli.maxConcurrent()) continue;
+        }
         if (runtime === "codex" && run.workstationId && !codexReady.has(run.workstationId)) {
           this.finish(run.id, "failed", run.report, `Codex is no longer signed in on ${run.workstationId}; sign it in again or start a new run`);
           continue;
@@ -485,8 +501,8 @@ export class RunService {
     const signal = active.controller.signal;
     const runtime = agentRow.runtime as CliRuntimeName;
     const available = this.deps.cli.availability(runtime);
-    // Checked again at start: it may have changed since the spawn (switched off, quota used up).
-    if (!available.ok && !run.cliSession) return this.finish(run.id, "failed", null, available.reason);
+    // Checked again at start, follow-ups included: it may have changed since it was queued.
+    if (!available.ok) return this.finish(run.id, "failed", run.report, available.reason);
     if (!run.cliSession && this.deps.refreshMirror) {
       await projects.refresh(project.id).catch((e: Error) => bus.runEvent(run.id, "error", { message: `Could not refresh from GitHub, using the last mirror: ${e.message}` }));
     }
@@ -513,13 +529,20 @@ export class RunService {
     let outcome;
     try {
       outcome = await this.cliRunner.execute(x);
+      // Messages that came while it worked (message_agent, the person): the same execution goes on,
+      // so its parent hears back only once everything asked of it is done.
+      while (!outcome.error && active.inbox.length && !stopReason()) {
+        outcome = await this.cliRunner.execute({ ...x, run: this.get(run.id), message: active.inbox.splice(0).join("\n\n") });
+      }
     } catch (error) {
       const reason = stopReason();
       if (reason === "cancelled" || reason === "shutdown") throw error;
       if (reason) {
-        // The time limit: keep what it did so the parent can review it or continue it.
-        await this.cliRunner.salvage({ ...x, run: this.get(run.id) });
-        return this.finish(run.id, "failed", null, STOP_TEXT[reason]);
+        // The time limit: keep what it did so the parent can review it or continue it. The CLI's
+        // processes go first, so nothing is still writing to the worktree.
+        await this.deps.pool.reap(ws).catch(() => undefined);
+        const problem = await this.cliRunner.salvage({ ...x, run: this.get(run.id) });
+        return this.finish(run.id, "failed", null, problem ? `${STOP_TEXT[reason]}; ${problem}` : STOP_TEXT[reason]);
       }
       throw error;
     } finally {
@@ -529,6 +552,16 @@ export class RunService {
     if (reason === "cancelled") return this.finish(run.id, "cancelled", outcome.report, null);
     if (reason) return this.finish(run.id, "failed", outcome.report, STOP_TEXT[reason]);
     return this.finish(run.id, outcome.error ? "failed" : "succeeded", outcome.report, outcome.error);
+  }
+
+  /** Runs held back by a used-up quota: look again in a few minutes (nothing else may wake the scheduler). */
+  private retryLater(): void {
+    if (this.retryTimer) return;
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      this.schedule();
+    }, QUOTA_RETRY_MS);
+    this.retryTimer.unref();
   }
 
   private runtimeOf(run: RunRow): AgentRow["runtime"] {
@@ -581,7 +614,11 @@ export class RunService {
   private deliverPending(runId: string): void {
     const run = this.get(runId);
     if (!run.pendingMessage || run.cleanedAt || this.active.has(runId)) return;
-    if (run.status === "succeeded" || run.status === "failed") this.requeue(runId, run.pendingMessage);
+    if (run.status === "succeeded" || run.status === "failed") {
+      // New work on a finished task: its old review and merge no longer describe what it will push.
+      if (run.kind === "task") this.deps.db.update(schema.runs).set({ review: null, mergedAt: null }).where(eq(schema.runs.id, runId)).run();
+      this.requeue(runId, run.pendingMessage);
+    }
     else if (run.status === "waiting" && run.waitingFor?.includes(WAIT_FOR_USER)) this.answer(runId, "");
   }
 

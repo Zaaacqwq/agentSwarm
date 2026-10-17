@@ -1,17 +1,18 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExecEnv } from "../layout.ts";
 import { CLI_RUNTIMES, OpError, type CliRunResult, type CliRuntime, type CliStatus } from "../protocol.ts";
 import { resolveScope } from "../paths.ts";
-import { childEnv, streamProcess } from "../process.ts";
+import { atSignalExit, childEnv, streamProcess } from "../process.ts";
 import { sandboxed } from "../sandbox.ts";
 import { prepareSpace } from "../space.ts";
 
 export const CLI_MAX_TIMEOUT_MS = 60 * 60_000;
 const MAX_PROMPT = 100_000;
-const MODEL = /^[A-Za-z0-9._:/[\]-]{1,100}$/;
-const SESSION = /^[A-Za-z0-9-]{8,80}$/;
+// Both start with a letter or digit, so neither can be read as an option.
+const MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/[\]-]{0,99}$/;
+const SESSION = /^[A-Za-z0-9][A-Za-z0-9-]{7,79}$/;
 /** Longest string kept in a forwarded event; tool output and file contents beyond it are cut. */
 const MAX_FIELD = 8000;
 const LOGIN_TIMEOUT_MS = 15 * 60_000;
@@ -30,21 +31,60 @@ export const REPORT_SCHEMA = {
 
 /** The only tools Claude Code gets: files and the shell, no web, no sub-agents, no scheduling. */
 const CLAUDE_TOOLS = "Bash,Read,Edit,Write,Glob,Grep";
-/** Codex items that count as one action against maxTurns (it has no turn limit of its own). */
+/** Codex items that count as one action (it has no turn limit of its own). */
 const CODEX_ACTIONS = new Set(["command_execution", "file_change", "mcp_tool_call", "web_search"]);
+/** A model turn often runs several commands; Codex gets this many actions per allowed turn. */
+export const CODEX_ACTIONS_PER_TURN = 3;
 
 export type Emit = (event: unknown) => void;
 
 const claudeBin = (env: ExecEnv) => join(env.layout.cliDir, "claude", "claude");
 const codexBin = (env: ExecEnv) => join(env.layout.cliDir, "codex", "bin", "codex");
-/** Each workstation signs in to Codex once; only Codex runs on it may touch this directory. */
+/**
+ * Each workstation signs in to Codex once, here. Runs never see this directory: each gets its own
+ * Codex home in its scope with a copy of the sign-in (see run), so one run cannot plant config or read
+ * another run's transcripts.
+ */
 export const codexHome = (env: ExecEnv) => join(env.root, ".codex");
 
-function codexEnv(env: ExecEnv, scope: string): Record<string, string> {
-  const home = codexHome(env);
+function codexEnv(env: ExecEnv, scope: string, home: string): Record<string, string> {
   mkdirSync(home, { recursive: true, mode: 0o700 });
   // Codex looks for its bundled ripgrep on PATH.
   return { CODEX_HOME: home, PATH: `${join(env.layout.cliDir, "codex", "codex-path")}:${childEnv(env, scope).PATH}` };
+}
+
+/** The ChatGPT account a Codex auth.json signs in as, or null if it is not a sign-in. */
+function codexAccount(text: string | null): string | null {
+  if (!text) return null;
+  try {
+    const auth = JSON.parse(text) as { tokens?: { account_id?: unknown; refresh_token?: unknown } };
+    return typeof auth.tokens?.account_id === "string" && typeof auth.tokens.refresh_token === "string" ? auth.tokens.account_id : null;
+  } catch {
+    return null;
+  }
+}
+
+const readText = (path: string) => (existsSync(path) ? readFileSync(path, "utf8") : null);
+
+/** Gives a run its own copy of the workstation's sign-in. */
+function lendCodexAuth(env: ExecEnv, runHome: string): string {
+  const original = readText(join(codexHome(env), "auth.json"));
+  if (!codexAccount(original)) throw new OpError("conflict", "Codex is not signed in on this workstation");
+  mkdirSync(runHome, { recursive: true, mode: 0o700 });
+  writeFileSync(join(runHome, "auth.json"), original!, { mode: 0o600 });
+  return original!;
+}
+
+/**
+ * Codex rotates its refresh token, so the run's copy is the current one afterwards. It goes back only
+ * if it still signs in to the same account: a run must not swap in a sign-in of its choosing.
+ */
+function returnCodexAuth(env: ExecEnv, runHome: string, original: string): void {
+  const now = readText(join(runHome, "auth.json"));
+  if (!now || now === original || codexAccount(now) !== codexAccount(original)) return;
+  const target = join(codexHome(env), "auth.json");
+  writeFileSync(`${target}.tmp`, now, { mode: 0o600 });
+  renameSync(`${target}.tmp`, target);
 }
 
 export async function run(env: ExecEnv, r: { scope: string; runtime: CliRuntime; prompt: string; resume?: string; model?: string; maxTurns: number; timeoutMs: number; credential?: string }, emit: Emit): Promise<CliRunResult> {
@@ -63,13 +103,21 @@ export async function run(env: ExecEnv, r: { scope: string; runtime: CliRuntime;
 
   let argv: string[];
   let extraEnv: Record<string, string>;
+  const runCodexHome = join(space.home, ".codex");
+  let lent: string | null = null;
   if (isCodex) {
+    lent = lendCodexAuth(env, runCodexHome);
     const schemaFile = join(space.tmp, "report-schema.json");
     writeFileSync(schemaFile, JSON.stringify(REPORT_SCHEMA), { mode: 0o600 });
-    const flags = ["--json", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check", "--strict-config", "-c", 'web_search="disabled"', "--output-schema", schemaFile, ...(r.model ? ["-m", r.model] : [])];
+    const flags = [
+      "--json", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check", "--strict-config",
+      // Nothing from config files or exec-policy rules, wherever they came from.
+      "--ignore-user-config", "--ignore-rules", "-c", 'web_search="disabled"',
+      "--output-schema", schemaFile, ...(r.model ? ["-m", r.model] : []),
+    ];
     // The prompt comes on stdin ("-"): no length limit, and not visible in `ps`.
     argv = [codexBin(env), "exec", ...(r.resume ? ["resume", r.resume] : []), ...flags, "-"];
-    extraEnv = codexEnv(env, r.scope);
+    extraEnv = codexEnv(env, r.scope, runCodexHome);
   } else {
     argv = [
       claudeBin(env), "-p", "--output-format", "stream-json", "--verbose",
@@ -85,7 +133,13 @@ export async function run(env: ExecEnv, r: { scope: string; runtime: CliRuntime;
 
   let actions = 0;
   let stoppedFor: CliRunResult["stoppedFor"] = null;
-  const res = await streamProcess(env, sandboxed(env, argv, r.scope, isCodex ? [codexHome(env)] : []), {
+  const maxActions = r.maxTurns * CODEX_ACTIONS_PER_TURN;
+  // A cancelled run still hands back a rotated sign-in.
+  const giveBack = () => {
+    if (lent !== null) returnCodexAuth(env, runCodexHome, lent);
+  };
+  const removeHook = atSignalExit(giveBack);
+  const res = await streamProcess(env, sandboxed(env, argv, r.scope), {
     cwd, scope: r.scope, timeoutMs, stdin: r.prompt, extraEnv, ...(isCodex ? {} : { fd3: r.credential! }),
     onLine: (text) => {
       if (!text.trim()) return;
@@ -97,11 +151,14 @@ export async function run(env: ExecEnv, r: { scope: string; runtime: CliRuntime;
       }
       emit(event);
       const e = event as { type?: string; item?: { type?: string } };
-      if (isCodex && e.type === "item.completed" && CODEX_ACTIONS.has(e.item?.type ?? "") && ++actions >= r.maxTurns) {
+      if (isCodex && e.type === "item.completed" && CODEX_ACTIONS.has(e.item?.type ?? "") && ++actions >= maxActions) {
         stoppedFor = "turns";
         return false;
       }
     },
+  }).finally(() => {
+    removeHook();
+    giveBack();
   });
   return { exitCode: res.exitCode, timedOut: res.timedOut, stoppedFor, stderr: res.stderr, durationMs: res.durationMs };
 }
@@ -113,14 +170,14 @@ export async function login(env: ExecEnv, emit: Emit): Promise<{ exitCode: numbe
   mkdirSync(cwd, { recursive: true, mode: 0o700 });
   if (!existsSync(codexBin(env))) throw new OpError("not_found", "codex is not installed; run scripts/setup.sh");
   const res = await streamProcess(env, sandboxed(env, [codexBin(env), "login", "--device-auth"], scope, [codexHome(env)]), {
-    cwd, scope, timeoutMs: LOGIN_TIMEOUT_MS, extraEnv: { ...codexEnv(env, scope), NO_COLOR: "1" },
+    cwd, scope, timeoutMs: LOGIN_TIMEOUT_MS, extraEnv: { ...codexEnv(env, scope, codexHome(env)), NO_COLOR: "1" },
+    // Some versions print the device code on stderr: both streams, as they come.
+    stderrLines: true,
     onLine: (text) => {
       const clean = stripAnsi(text).trim();
       if (clean) emit({ type: "line", text: clean.slice(0, 500) });
     },
   });
-  // Codex prints the device code on stderr in some versions; pass along what is there too.
-  for (const l of stripAnsi(res.stderr).split("\n").map((s) => s.trim()).filter(Boolean)) emit({ type: "line", text: l.slice(0, 500) });
   return { exitCode: res.exitCode, timedOut: res.timedOut };
 }
 
@@ -130,7 +187,7 @@ export async function logout(env: ExecEnv): Promise<{ signedOut: boolean }> {
   mkdirSync(cwd, { recursive: true, mode: 0o700 });
   if (!existsSync(codexBin(env))) return { signedOut: true };
   const res = await streamProcess(env, sandboxed(env, [codexBin(env), "logout"], scope, [codexHome(env)]), {
-    cwd, scope, timeoutMs: 60_000, extraEnv: codexEnv(env, scope), onLine: () => undefined,
+    cwd, scope, timeoutMs: 60_000, extraEnv: codexEnv(env, scope, codexHome(env)), onLine: () => undefined,
   });
   return { signedOut: res.exitCode === 0 };
 }
@@ -145,8 +202,14 @@ export async function status(env: ExecEnv): Promise<CliStatus> {
     return out.code === 0 ? (out.text.match(/\d+\.\d+\.\d+/)?.[0] ?? out.text.trim().slice(0, 40)) : null;
   };
   const claude = await version(claudeBin(env), { DISABLE_AUTOUPDATER: "1" });
-  const codex = existsSync(codexBin(env)) ? await version(codexBin(env), codexEnv(env, scope)) : null;
-  const signedIn = codex ? (await quick(env, scope, cwd, [codexBin(env), "login", "status"], codexEnv(env, scope), [codexHome(env)])).code === 0 : false;
+  const home = codexHome(env);
+  const codex = existsSync(codexBin(env)) ? await version(codexBin(env), codexEnv(env, scope, home)) : null;
+  let signedIn: boolean | null = false;
+  if (codex) {
+    const st = await quick(env, scope, cwd, [codexBin(env), "login", "status"], codexEnv(env, scope, home), [home]);
+    // Only a clear answer counts; a timeout or a crash says nothing about the sign-in.
+    signedIn = st.code === 0 ? true : /not logged in/i.test(st.text) ? false : null;
+  }
   return { claude, codex, codexSignedIn: signedIn };
 }
 

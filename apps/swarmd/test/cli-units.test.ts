@@ -77,6 +77,8 @@ describe("CLI event streams", () => {
     assert.deepEqual(failed, { kind: "result", report: null, text: "working on it", isError: true, error: "stream disconnected" });
     assert.deepEqual(codex.parse({ type: "item.completed", item: { id: "item_2", type: "reasoning", text: "…" } }), []);
     assert.deepEqual(codex.parse({ type: "error", message: "Reconnecting… 1/5" }), [{ kind: "error", message: "Reconnecting… 1/5" }]);
+    assert.deepEqual(codex.parse({ type: "thread.started", thread_id: "--add-dir=/" }), [], "a session id that could pass for an option is dropped");
+    assert.deepEqual(new ClaudeParser().parse({ type: "rate_limit_event", rate_limit_info: { unifiedWindows: { five_hour: { utilization: 0.5 } } } }), [], "one window alone is not a quota reading");
   });
 
   test("reports: structured objects or their JSON text, and nothing else", () => {
@@ -88,6 +90,8 @@ describe("CLI event streams", () => {
   test("the Codex sign-in code and URL are read from what it prints", () => {
     assert.deepEqual(deviceCode(["1. Open this link in your browser", "   https://auth.openai.com/codex/device", "2. Enter this one-time code (expires in 15 minutes)", "   ABCD-12345"]), { url: "https://auth.openai.com/codex/device", code: "ABCD-12345" });
     assert.deepEqual(deviceCode(["Starting…"]), { url: null, code: null });
+    assert.equal(deviceCode(["Open https://auth-openai.evil.example/device or https://chatgpt.com/device"]).url, "https://chatgpt.com/device", "only OpenAI's sign-in pages");
+    assert.equal(deviceCode(["Open https://evil.example/codex/device"]).url, null);
   });
 
   test("the Relay catches sign-in tokens shaped like JWTs, and Claude tokens", () => {

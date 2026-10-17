@@ -33,6 +33,9 @@ export function parserFor(runtime: CliRuntime, now: () => number = Date.now): Cl
 }
 
 type Obj = Record<string, unknown>;
+/** What ws-exec accepts back as a session to resume (it starts with a letter or digit). */
+const SESSION = /^[A-Za-z0-9][A-Za-z0-9-]{7,79}$/;
+const session = (id: string, model: string | null): CliEvent[] => (SESSION.test(id) ? [{ kind: "session", id, model }] : []);
 const obj = (v: unknown): Obj => (v && typeof v === "object" && !Array.isArray(v) ? (v as Obj) : {});
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
 const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
@@ -76,7 +79,7 @@ export class ClaudeParser implements CliParser {
     const e = obj(event);
     switch (e.type) {
       case "system":
-        if (e.subtype === "init") return [{ kind: "session", id: str(e.session_id), model: str(e.model) || null }];
+        if (e.subtype === "init") return session(str(e.session_id), str(e.model) || null);
         if (e.subtype === "api_retry") return [{ kind: "error", message: "Claude API request failed; Claude Code is retrying" }];
         return [];
       case "assistant": {
@@ -114,7 +117,8 @@ export class ClaudeParser implements CliParser {
         const windows = obj(info.unifiedWindows);
         const five = obj(windows.five_hour);
         const seven = obj(windows.seven_day);
-        if (!("utilization" in five) && !("utilization" in seven)) return [];
+        // Both windows or nothing: a missing one must not read as 0% used.
+        if (typeof five.utilization !== "number" || typeof seven.utilization !== "number") return [];
         const resets = (w: Obj) => (typeof w.resetsAt === "number" ? w.resetsAt * 1000 : null);
         return [{ kind: "quota", quota: { fiveHour: num(five.utilization), fiveHourResetsAt: resets(five), sevenDay: num(seven.utilization), sevenDayResetsAt: resets(seven), status: str(info.status) || "allowed", at: this.now() } }];
       }
@@ -157,7 +161,7 @@ export class CodexParser implements CliParser {
     const e = obj(event);
     switch (e.type) {
       case "thread.started":
-        return [{ kind: "session", id: str(e.thread_id), model: null }];
+        return session(str(e.thread_id), null);
       case "turn.started":
         this.turns++;
         return [{ kind: "turn" }];

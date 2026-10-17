@@ -33,7 +33,15 @@ export interface CliServiceDeps {
   readonly pool: WorkstationPool;
   readonly bus: EventBus;
   readonly log: (msg: string, extra?: Record<string, unknown>) => void;
+  /** A workstation this service held (a sign-in, a test) is free again: queued runs may start. */
+  readonly onFreed?: () => void;
 }
+
+/** Why a runtime cannot take a new sub-agent: "quota" passes on its own; "off" needs the person. */
+export type Unavailable = { ok: false; reason: string; blocked: "quota" | "off" };
+
+/** Codex prints where to confirm its device code; only OpenAI's own sign-in pages are shown as links. */
+export const CODEX_SIGN_IN_HOSTS = new Set(["auth.openai.com", "chatgpt.com"]);
 
 /** Settings, the Claude token, subscription quota and Codex sign-ins for the CLI workers (R4). */
 export class CliService {
@@ -42,6 +50,9 @@ export class CliService {
   private checkedAt: number | null = null;
   private readonly logins = new Map<string, CodexLoginView>();
   private readonly loginAborts = new Map<string, AbortController>();
+  /** One test per runtime and one refresh at a time: each holds workstations and spends quota. */
+  private readonly testing = new Map<CliRuntimeName, Promise<CliTestResult>>();
+  private refreshing: Promise<CliStatusView> | null = null;
 
   constructor(deps: CliServiceDeps) {
     this.deps = deps;
@@ -108,22 +119,23 @@ export class CliService {
   // ---- availability ---------------------------------------------------------------------
 
   /** Whether a sub-agent can be spawned with this runtime now; the reason is said to the lead. */
-  availability(runtime: CliRuntimeName, now = Date.now()): { ok: true } | { ok: false; reason: string } {
+  availability(runtime: CliRuntimeName, now = Date.now()): { ok: true } | Unavailable {
     const s = this.stored();
+    const off = (reason: string): Unavailable => ({ ok: false, reason, blocked: "off" });
     if (runtime === "claude_code") {
-      if (!s.claudeEnabled) return { ok: false, reason: "Claude Code is switched off in the dashboard settings" };
-      if (!this.hasToken()) return { ok: false, reason: "Claude Code has no token yet (dashboard settings)" };
+      if (!s.claudeEnabled) return off("Claude Code is switched off in the dashboard settings");
+      if (!this.hasToken()) return off("Claude Code has no token yet (dashboard settings)");
       const q = s.quota;
       if (q) {
         const five = q.fiveHourResetsAt !== null && q.fiveHourResetsAt <= now ? 0 : q.fiveHour;
         const seven = q.sevenDayResetsAt !== null && q.sevenDayResetsAt <= now ? 0 : q.sevenDay;
-        if (five >= s.fiveHourLimit) return { ok: false, reason: `Claude's 5-hour window is ${pct(five)} used (limit ${pct(s.fiveHourLimit)}); it resets ${when(q.fiveHourResetsAt)}` };
-        if (seven >= s.sevenDayLimit) return { ok: false, reason: `Claude's 7-day window is ${pct(seven)} used (limit ${pct(s.sevenDayLimit)}); it resets ${when(q.sevenDayResetsAt)}` };
+        if (five >= s.fiveHourLimit) return { ok: false, blocked: "quota", reason: `Claude's 5-hour window is ${pct(five)} used (limit ${pct(s.fiveHourLimit)}); it resets ${when(q.fiveHourResetsAt)}` };
+        if (seven >= s.sevenDayLimit) return { ok: false, blocked: "quota", reason: `Claude's 7-day window is ${pct(seven)} used (limit ${pct(s.sevenDayLimit)}); it resets ${when(q.sevenDayResetsAt)}` };
       }
       return { ok: true };
     }
-    if (!s.codexEnabled) return { ok: false, reason: "Codex is switched off in the dashboard settings" };
-    if (this.deps.pool.codexReady().length === 0) return { ok: false, reason: "Codex is not signed in on any workstation (dashboard settings)" };
+    if (!s.codexEnabled) return off("Codex is switched off in the dashboard settings");
+    if (this.deps.pool.codexReady().length === 0) return off("Codex is not signed in on any workstation (dashboard settings)");
     return { ok: true };
   }
 
@@ -162,7 +174,12 @@ export class CliService {
   }
 
   /** Reads the installed versions, and which workstations are signed in to Codex. Never throws. */
-  async refresh(now = Date.now()): Promise<CliStatusView> {
+  refresh(): Promise<CliStatusView> {
+    this.refreshing ??= this.doRefresh().finally(() => (this.refreshing = null));
+    return this.refreshing;
+  }
+
+  private async doRefresh(now = Date.now()): Promise<CliStatusView> {
     const rows = this.deps.pool.rows().filter((w) => w.status !== "unhealthy");
     const results = await Promise.all(rows.map(async (w) => {
       try {
@@ -176,8 +193,9 @@ export class CliService {
       if (!st) continue;
       this.versions = { claude: st.claude ?? this.versions.claude, codex: st.codex ?? this.versions.codex };
       const row = rows.find((w) => w.id === id)!;
-      if (st.codexSignedIn && row.codexLoginAt === null) this.deps.pool.setCodexLogin(id, now);
-      if (!st.codexSignedIn && row.codexLoginAt !== null) this.deps.pool.setCodexLogin(id, null);
+      if (st.codexSignedIn === true && row.codexLoginAt === null) this.deps.pool.setCodexLogin(id, now);
+      // Only a clear "not signed in" clears it; a check that timed out says nothing.
+      if (st.codexSignedIn === false && row.codexLoginAt !== null) this.deps.pool.setCodexLogin(id, null);
     }
     this.checkedAt = now;
     for (const [r, v] of [["claude_code", this.versions.claude], ["codex", this.versions.codex]] as const) {
@@ -192,8 +210,8 @@ export class CliService {
   startCodexLogin(actor: string, workstationId: string, now = Date.now()): CliStatusView {
     if (this.logins.get(workstationId)?.state === "waiting") return this.status();
     const lease = `login:${workstationId}`;
-    if (!this.deps.pool.acquire(lease, workstationId)) throw badRequest(`${workstationId} is busy or unhealthy; try again when it is free`);
     audit(this.deps.db, actor, "cli.codex_login", workstationId, {}, now);
+    if (!this.deps.pool.acquire(lease, workstationId)) throw badRequest(`${workstationId} is busy or unhealthy; try again when it is free`);
     const abort = new AbortController();
     this.loginAborts.set(workstationId, abort);
     this.logins.set(workstationId, { state: "waiting", url: null, code: null, error: null });
@@ -221,6 +239,7 @@ export class CliService {
       this.loginAborts.delete(workstationId);
       await this.deps.pool.reap(workstationId).catch(() => undefined);
       this.deps.pool.release(workstationId, lease);
+      this.deps.onFreed?.();
       this.publish();
     });
     return this.publish();
@@ -230,18 +249,35 @@ export class CliService {
     this.loginAborts.get(workstationId)?.abort();
   }
 
+  /** Signs Codex out of a free workstation (not from under a run that is using it). */
   async codexLogout(actor: string, workstationId: string, now = Date.now()): Promise<CliStatusView> {
-    await this.deps.backend.call(workstationId, { op: "cli.logout", runtime: "codex" }, { timeoutMs: 90_000 });
-    this.deps.pool.setCodexLogin(workstationId, null);
-    this.logins.delete(workstationId);
-    audit(this.deps.db, actor, "cli.codex_logout", workstationId, {}, now);
+    const lease = `logout:${workstationId}`;
+    if (!this.deps.pool.acquire(lease, workstationId)) throw badRequest(`${workstationId} is busy or unhealthy; try again when it is free`);
+    try {
+      const res = await this.deps.backend.call<{ signedOut: boolean }>(workstationId, { op: "cli.logout", runtime: "codex" }, { timeoutMs: 90_000 });
+      if (!res.signedOut) throw badRequest(`Codex did not sign out on ${workstationId}; try again`);
+      this.deps.pool.setCodexLogin(workstationId, null);
+      this.logins.delete(workstationId);
+      audit(this.deps.db, actor, "cli.codex_logout", workstationId, {}, now);
+    } finally {
+      this.deps.pool.release(workstationId, lease);
+      this.deps.onFreed?.();
+    }
     return this.publish();
   }
 
   // ---- test -----------------------------------------------------------------------------
 
   /** Runs a one-line prompt on a free workstation, the same way a sub-agent would. */
-  async test(runtime: CliRuntimeName): Promise<CliTestResult> {
+  test(runtime: CliRuntimeName): Promise<CliTestResult> {
+    const running = this.testing.get(runtime);
+    if (running) return running;
+    const p = this.doTest(runtime).finally(() => this.testing.delete(runtime));
+    this.testing.set(runtime, p);
+    return p;
+  }
+
+  private async doTest(runtime: CliRuntimeName): Promise<CliTestResult> {
     const credential = runtime === "claude_code" ? await this.claudeToken() : undefined;
     if (runtime === "claude_code" && !credential) return { ok: false, detail: "No Claude Code token yet", workstationId: null };
     const ready = new Set(this.deps.pool.codexReady());
@@ -276,6 +312,7 @@ export class CliService {
     } finally {
       await this.deps.pool.reap(ws).catch(() => undefined);
       this.deps.pool.release(ws, lease);
+      this.deps.onFreed?.();
     }
     await this.refresh().catch(() => undefined);
     return error ? { ok: false, detail: error.slice(0, 500), workstationId: ws } : { ok: true, detail: `Replied: ${text.trim().slice(0, 200) || "(nothing)"}`, workstationId: ws };
@@ -285,7 +322,13 @@ export class CliService {
 /** Finds the sign-in URL and the one-time code in what Codex printed. */
 export function deviceCode(lines: readonly string[]): { url: string | null; code: string | null } {
   const text = lines.join("\n");
-  const url = text.match(/https:\/\/[^\s"'<>]+/)?.[0] ?? null;
+  const url = [...text.matchAll(/https:\/\/[^\s"'<>]+/g)].map((m) => m[0]).find((u) => {
+    try {
+      return CODEX_SIGN_IN_HOSTS.has(new URL(u).host);
+    } catch {
+      return false;
+    }
+  }) ?? null;
   const code = text.match(/\b[A-Z0-9]{4,8}-[A-Z0-9]{4,8}\b/)?.[0] ?? null;
   return { url, code };
 }

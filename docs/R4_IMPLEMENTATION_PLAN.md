@@ -24,7 +24,7 @@
    - 读其他工作站的目录；
    - 读 swarmd 的数据目录；
    - 连 swarmd 的端口；
-   - 在 shell 里打印出自己的登录凭据。
+   - 在 shell 里打印出自己的登录凭据（Claude Code 用真实令牌检查：`env`、`~/.claude` 下的文件里都不应该出现令牌）。
 7. **对比。** 验收文档里列出三种运行时在同一个工作包上的表现：用时、轮数、费用或额度、评审结论、测试结果。
 
 不在 R4 范围内：
@@ -62,7 +62,7 @@
 | 无头运行 | `-p --output-format stream-json --verbose` | `exec --json` |
 | 权限 | `--permission-mode bypassPermissions`。安全靠外层沙箱：独立用户加 seatbelt | `--dangerously-bypass-approvals-and-sandbox`。R0 发现它自带的沙箱套在 seatbelt 里会失效 |
 | 关掉的工具 | `WebFetch`、`WebSearch`；不加载 MCP（`--strict-mcp-config`）；不加载用户级设置和 hooks | 网页搜索关掉（`-c` 配置） |
-| 上限 | `--max-turns`，再加时间上限 | 没有回合上限参数：靠时间上限，外加命令和文件改动的条数上限 |
+| 上限 | `--max-turns`，再加时间上限 | 没有回合上限参数：靠时间上限，外加动作条数上限（命令和文件改动，每个允许的回合 3 条） |
 | 结构化结果 | `--json-schema`：要求最后交回 `{summary, tests, unfinished}` | `--output-schema`：同样的结构 |
 | 继续会话 | `--resume <session_id>` | `exec resume <thread_id>` |
 
@@ -95,13 +95,13 @@ CLI 自己不能推送，它没有 GitHub 凭据。进程结束后，swarmd 依�
 |---|---|---|
 | 来源 | 你运行 `claude setup-token` 生成长期令牌，粘贴到面板设置里 | 面板上点"登录 ws-1"：swarmd 在 `ws-1` 下运行 `codex login --device-auth`，把网址和验证码显示在面板上，你在浏览器里确认 |
 | 保存 | 加密存进 swarmd 数据库，和 Discord 令牌一样 | 每个工作站各自的 `CODEX_HOME`（`/Volumes/SwarmWS/ws/ws-N/.codex`）。不复制你的 `auth.json`，以免共用刷新令牌、互相挤下线（R0 的发现） |
-| 交给 CLI | 放进 ws-exec 请求，经标准输入传入，在 CLI 进程的环境变量里。不出现在命令行参数和日志里 | 只有 Codex 运行时，seatbelt 才允许读写这个目录。原生子 Agent 和 Claude Code 都碰不到它 |
+| 交给 CLI | 放进 ws-exec 请求，经标准输入传入，再经文件描述符 3 交给 Claude Code。不出现在环境变量、命令行参数和日志里 | 每次运行拿到一份登录信息的**副本**，放在它自己的空间里（`CODEX_HOME` 指向那里），工作站上的原件它读不到。运行结束后，如果 Codex 轮换了刷新令牌，而且还是同一个账号，副本才写回原件；换成别的账号的不收。运行之间互相看不到对方的会话记录，也没法给别的运行留配置，另外加上 `--ignore-user-config` 和 `--ignore-rules` |
 | 可用范围 | 所有工作站 | 只在已登录的工作站上运行。调度时 Codex 子 Agent 只排到这些工作站 |
 
 **风险**（写进验收文档）：CLI 进程本身必须拿到凭据。一个被网页内容诱导的 CLI，理论上可以想办法把凭据读出来再发出去。应对措施：
 - 关掉 CLI 的网页工具；
 - Claude 令牌只有推理权限，并通过文件描述符 3 交给 Claude Code，根本不进环境变量，shell 命令看不到它（第 9 节第 1 条）；
-- Relay 的密钥扫描增加 JWT 格式，Codex 的令牌就是这种格式；
+- Relay 的密钥扫描增加 JWT 格式（Codex 的访问令牌是这种格式）。这只能防止意外提交，挡不住有意外传：网络是开放的，编码一下就能绕过；
 - 两种凭据都能随时作废：面板上可以替换 Claude 令牌，也可以注销某个工作站的 Codex 登录。
 
 R0 时有一段 Claude 令牌显示在了对话里。**R4 用的令牌请重新生成。**
@@ -199,3 +199,17 @@ R0 时有一段 Claude 令牌显示在了对话里。**R4 用的令牌请重新�
    - `exec resume <thread_id> … -` 能接着原会话，提示词从标准输入读入；
    - `-c web_search="disabled"` 在 `--strict-config` 下被接受，写错的配置项会直接报错。
 4. **安装来源。** 两个程序都带厂商签名（`codesign --verify --strict` 通过）。安装脚本从你本机已装的固定版本复制，并核对签名和版本号。
+
+## 10. 代码审查后的调整
+
+code-reviewer 和 security-reviewer 共报 0 个 CRITICAL、4 个 HIGH。HIGH 全部修复，并加了回归测试：
+1. **运行中的 CLI 收到消息。** 原来要等它结束、父 Agent 已经拿到"完成"之后，才作为新任务重新开始。现在同一次执行会接着处理，父 Agent 只在全部做完后收到一次结果。
+2. **没有会话的后续消息。** 原来 CLI 只收到"Continue."这类最新消息，看不到任务本身。现在会连同任务说明一起交给它。
+3. **共享的 Codex 目录。** 原来每个 Codex 运行都能读写工作站上的同一个 `.codex`：可以给后来的运行留配置，也能读别的运行的会话记录。现在改成每次运行用一份副本，见第 3 节。
+4. **登录链接。** 面板只显示 OpenAI 自己的登录页面链接（`auth.openai.com`、`chatgpt.com`），其他网址一律不显示。
+
+安装脚本另外改为：
+- 核对固定的 SHA-256，以及厂商的 Developer ID（Anthropic `Q6L2SF6YDW`、OpenAI `2DC432GLL2`）；
+- 校验的是复制出来的那份文件，不以 root 身份运行你账号下的任何程序。
+
+其他 MEDIUM 和 LOW 的处理见验收文档。

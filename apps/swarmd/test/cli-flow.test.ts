@@ -144,7 +144,8 @@ describe("CLI workers", () => {
     const cx = h.services.runs.tree(root.treeId!).nodes.find((n) => n.agentName === "Cx")!;
     assert.equal(cx.status, "succeeded", String(cx.error));
     assert.equal(cx.workstationId, "ws-2");
-    assert.equal(h.cli.calls()[0]!.codexHome?.endsWith("/ws-2/.codex"), true);
+    const codexHome = h.cli.calls()[0]!.codexHome!;
+    assert.match(codexHome, /\/ws-2\/\.homes\/[^/]+\/\.codex$/, "a copy of ws-2's sign-in, in the run's own space");
     const log = execFileSync("/usr/bin/git", ["log", "-1", "--format=%s", cx.branch], { cwd: h.remote }).toString();
     assert.match(log, /Uncommitted changes left by Codex/);
     assert.ok(cx.tokensIn > 0);
@@ -212,6 +213,85 @@ describe("CLI workers", () => {
     assert.equal(calls[1]!.resume, null);
     assert.match(calls[1]!.prompt, /earlier session is gone/);
     assert.match(calls[1]!.prompt, /Please fix square\(\) now/);
+  });
+
+  test("a message to a working CLI sub-agent continues the same execution; its parent hears back once", async () => {
+    h = await harness();
+    const { cookie, agentId } = await h.ready();
+    await withClaude(h, cookie);
+    h.cli.script([{ sleepMs: 1500, write: [{ path: "a.txt", content: "a" }], commit: "a" }, { write: [{ path: "b.txt", content: "b" }], commit: "b", report: { summary: "a and b", tests: "-", unfinished: [] } }]);
+    let results = "";
+    const script = h.scriptAgents({
+      Dev: [
+        call("spawn_agent", { name: "Busy", role: "developer", brief: "Write a.txt, nothing else, for this test.", runtime: "claude_code" }),
+        call("wait_agents", {}),
+        (context) => {
+          results = lastText(context);
+          return report("done");
+        },
+      ],
+    });
+    const root = (await h.api("POST", `/api/agents/${agentId}/runs`, { title: "Steer", brief: "Steer a CLI child." }, cookie)).body;
+    const busy = () => h.services.runs.tree(root.treeId!).nodes.find((n) => n.agentName === "Busy")!;
+    await until(() => h.cli.calls().length === 1, 20_000);
+    h.services.runs.message("admin", busy().id, "Also write b.txt.");
+    const done = await h.services.runs.settled(root.id, 60_000);
+    assert.equal(done.status, "succeeded", `${done.error} / ${script.remaining()}`);
+    assert.deepEqual(script.remaining(), []);
+    const calls = h.cli.calls();
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1]!.resume, h.services.runs.get(busy().id).cliSession);
+    assert.match(calls[1]!.prompt, /Also write b\.txt/);
+    assert.match(results, /a and b/, "the parent got the report after the follow-up, not before");
+  });
+
+  test("a follow-up without a session still tells the CLI its task", async () => {
+    h = await harness();
+    const { cookie, agentId } = await h.ready();
+    await withClaude(h, cookie);
+    h.cli.script([{ crash: true }, { write: [{ path: "math.js", content: FIXED }], commit: "Fix square" }]);
+    h.scriptAgents({ Dev: [call("spawn_agent", { name: "Crashy", role: "developer", brief: "Fix square() in math.js so the tests pass.", runtime: "claude_code" }), call("wait_agents", {}), report("tried")] });
+    const root = (await h.api("POST", `/api/agents/${agentId}/runs`, { title: "Crash", brief: "A CLI that crashes first." }, cookie)).body;
+    await h.services.runs.settled(root.id, 30_000);
+    const crashy = h.services.runs.tree(root.treeId!).nodes.find((n) => n.agentName === "Crashy")!;
+    assert.equal(crashy.status, "failed");
+    assert.match(crashy.error ?? "", /exited 2: fatal: could not start/);
+    assert.equal(h.services.runs.get(crashy.id).cliSession, null);
+    h.services.runs.message("admin", crashy.id, "Try again.");
+    const again = await h.services.runs.settled(crashy.id, 30_000);
+    assert.equal(again.status, "succeeded", String(again.error));
+    const second = h.cli.calls()[1]!;
+    assert.equal(second.resume, null);
+    assert.match(second.prompt, /Fix square\(\) in math\.js/, "the brief");
+    assert.match(second.prompt, /Try again\./, "and the latest message");
+  });
+
+  test("a queued CLI run waits while the quota is used up, instead of failing", async () => {
+    h = await harness();
+    const { cookie, agentId } = await h.ready();
+    await withClaude(h, cookie);
+    await h.api("PUT", "/api/cli", { maxConcurrent: 1 }, cookie);
+    h.cli.script([{ sleepMs: 1500, write: [{ path: "a.txt", content: "a" }], commit: "a" }, { write: [{ path: "b.txt", content: "b" }], commit: "b" }]);
+    h.scriptAgents({
+      Dev: [
+        call("spawn_agent", { name: "First", role: "developer", brief: "Write a.txt for this test.", runtime: "claude_code" }),
+        call("spawn_agent", { name: "Second", role: "developer", brief: "Write b.txt for this test.", runtime: "claude_code" }),
+        call("wait_agents", {}),
+        report("both"),
+      ],
+    });
+    const root = (await h.api("POST", `/api/agents/${agentId}/runs`, { title: "Quota", brief: "Two CLIs, quota runs out." }, cookie)).body;
+    const node = (name: string) => h.services.runs.tree(root.treeId!).nodes.find((n) => n.agentName === name);
+    await until(() => node("Second")?.status === "queued" && node("First")?.status === "running", 20_000);
+    h.services.cli.recordQuota({ fiveHour: 0.95, fiveHourResetsAt: Date.now() + 3_600_000, sevenDay: 0.1, sevenDayResetsAt: Date.now() + 86_400_000, status: "allowed", at: Date.now() });
+    await until(() => node("First")?.status === "succeeded", 20_000);
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(node("Second")!.status, "queued", "it waits for the window");
+    h.services.cli.recordQuota({ fiveHour: 0.1, fiveHourResetsAt: Date.now() + 3_600_000, sevenDay: 0.1, sevenDayResetsAt: Date.now() + 86_400_000, status: "allowed", at: Date.now() + 1 });
+    h.services.runs.schedule();
+    const done = await h.services.runs.settled(root.id, 30_000);
+    assert.equal(done.status, "succeeded", String(done.error));
+    assert.equal(node("Second")!.status, "succeeded");
   });
 
   test("at most maxConcurrent runs of one CLI at a time; the rest wait their turn", async () => {

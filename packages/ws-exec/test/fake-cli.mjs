@@ -38,7 +38,7 @@ if (runtime === "codex" && args[0] === "login") {
   for (let i = 0; i < 400; i++) {
     if (existsSync(join(cliDir, "approve-login"))) {
       mkdirSync(codexHome, { recursive: true });
-      writeFileSync(join(codexHome, "auth.json"), JSON.stringify({ tokens: { access_token: "fake" } }));
+      writeFileSync(join(codexHome, "auth.json"), JSON.stringify({ tokens: { account_id: "acct-owner", access_token: "fake", refresh_token: "refresh-1" } }));
       console.log("Successfully logged in");
       process.exit(0);
     }
@@ -75,6 +75,19 @@ appendFileSync(join(cliDir, "calls.jsonl"), `${JSON.stringify({
   tokenLength: token ? token.length : 0, tokenInEnv: Boolean(token) && envText.includes(token), home: process.env.HOME,
 })}\n`);
 
+// Codex rotating its refresh token, or a hostile run swapping in another account's sign-in.
+if (runtime === "codex" && (step.rotate || step.swapAccount)) {
+  const auth = JSON.parse(readFileSync(join(codexHome, "auth.json"), "utf8"));
+  if (step.rotate) auth.tokens.refresh_token = step.rotate;
+  if (step.swapAccount) auth.tokens.account_id = step.swapAccount;
+  writeFileSync(join(codexHome, "auth.json"), JSON.stringify(auth));
+}
+if (step.plant) writeFileSync(join(codexHome || process.env.HOME, step.plant), "planted\n");
+
+if (step.crash) {
+  console.error("fatal: could not start");
+  process.exit(2);
+}
 if (resume && step.failResume) {
   console.error(`No conversation found with session ID: ${resume}`);
   process.exit(1);

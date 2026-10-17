@@ -32,6 +32,13 @@ export interface FakeStep {
   readonly failResume?: boolean;
   readonly probe?: string;
   readonly longLived?: boolean;
+  /** Codex: rotate the refresh token to this value, or swap the account id. */
+  readonly rotate?: string;
+  readonly swapAccount?: string;
+  /** Write this file in the Codex home the run was given. */
+  readonly plant?: string;
+  /** Exit at once, before any event. */
+  readonly crash?: boolean;
 }
 
 export interface FakeCli {

@@ -94,13 +94,22 @@ function runJson<T>(argv: string[], env: Record<string, string>, request: Reques
       opts.signal?.removeEventListener("abort", onAbort);
       fn();
     };
+    // The first error thrown by onEvent fails the call (after ws-exec ends), instead of vanishing.
+    let handlerError: Error | null = null;
     const line = (text: string) => {
       if (!text.trim()) return;
       if (text.startsWith('{"event":')) {
+        let event: unknown;
         try {
-          opts.onEvent?.((JSON.parse(text) as { event: unknown }).event);
+          event = (JSON.parse(text) as { event: unknown }).event;
         } catch {
           // A cut or garbled event line: skip it, the response still comes.
+          return;
+        }
+        try {
+          opts.onEvent?.(event);
+        } catch (error) {
+          handlerError ??= error as Error;
         }
         return;
       }
@@ -130,6 +139,7 @@ function runJson<T>(argv: string[], env: Record<string, string>, request: Reques
     child.on("error", (e) => finish(() => reject(new WorkstationError("failed", e.message))));
     child.on("close", (code) => finish(() => {
       if (pending) line(pending);
+      if (handlerError) return reject(new WorkstationError("failed", `Handling the workstation's events failed: ${handlerError.message}`));
       let res: Response;
       try {
         res = JSON.parse(last) as Response;
