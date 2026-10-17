@@ -84,6 +84,9 @@ describe("project files and machine limits (sandboxed)", () => {
       const res = await call<{ exitCode: number; output: string }>(f.env, { op: "exec", scope: "work", command: `/usr/bin/nc -U ${sock} </dev/null` });
       assert.notEqual(res.exitCode, 0, res.output);
       assert.ok(tmpdir());
+      // Name lookups (a Unix socket under /var/run) still work: agents need the network for packages.
+      const dns = await call<{ exitCode: number; output: string }>(f.env, { op: "exec", scope: "work", command: "/usr/bin/dscacheutil -q host -a name github.com | grep -c ip_address" });
+      assert.equal(dns.exitCode, 0, dns.output);
     } finally {
       server.close();
       rmSync(sock, { force: true });

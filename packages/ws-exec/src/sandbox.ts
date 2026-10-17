@@ -51,7 +51,10 @@ export function sandboxProfile(env: ExecEnv, scope: string, extraWritable: reado
     // Nor are the person's own services: on any address (a service bound to 0.0.0.0 answers on the LAN and
     // Tailscale addresses too), and local databases' Unix sockets in the shared temp and run directories.
     ...deniedPorts(env).map((port) => `(deny network-outbound (remote ip ${q(`*:${port}`)}))`),
-    `(deny network-outbound (remote unix-socket (path-regex #"^/(private/)?(tmp|var/run)/")))`,
+    // (Not all of /var/run: name lookups go through /var/run/mDNSResponder.)
+    `(deny network-outbound (remote unix-socket (path-regex #"^/(private/)?tmp/")))`,
+    `(deny network-outbound (remote unix-socket (path-regex #"^/(private/)?var/run/docker\\.sock$")))`,
+    `(deny network-outbound (remote unix-socket (path-regex #"^/Users/")))`,
   ].join("\n");
 }
 
