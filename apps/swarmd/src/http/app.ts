@@ -114,6 +114,11 @@ export async function buildApp(o: AppOptions): Promise<FastifyInstance> {
   // ---- GitHub and projects ------------------------------------------------------------------
   app.get("/api/github", async () => s.github.status());
   app.put<{ Body: SetGitHubToken }>("/api/github", { schema: { body: SetGitHubToken } }, async (req) => s.github.setToken(actor(req), req.body.token));
+  // Repositories to pick a project from: the account's, minus the ones that are projects already.
+  app.get("/api/github/repos", async () => {
+    const taken = new Set(s.projects.list().map((p) => p.githubRepo.toLowerCase()));
+    return (await s.github.client.listRepos(await s.github.token())).filter((r) => !taken.has(r.fullName.toLowerCase()));
+  });
   app.get("/api/projects", async () => s.projects.list());
   app.post<{ Body: CreateProject }>("/api/projects", { schema: { body: CreateProject } }, async (req) => s.projects.create(actor(req), req.body));
   app.get<{ Params: { id: string } }>("/api/projects/:id", async (req) => s.projects.view(req.params.id));

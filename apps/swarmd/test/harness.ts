@@ -119,6 +119,7 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
       if (!remotes.has(fullName) && fullName !== "tester/demo") throw new Error(`no repository ${fullName}`);
       return { fullName, defaultBranch: "main", private: true, canAdmin: true, cloneUrl: remotes.get(fullName) ?? remote };
     },
+    listRepos: async () => [...remotes.keys()].map((fullName) => ({ fullName, private: true, description: "", updatedAt: new Date().toISOString() })),
     createRepo: async (_t, name) => {
       const fullName = `tester/${name}`;
       const path = join(base, "github", `${name}.git`);

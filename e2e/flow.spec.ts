@@ -19,7 +19,7 @@ test("set up agentSwarm, add a project and an agent, and watch a run fix a bug",
   await expect(page.getByText("tester")).toBeVisible();
 
   await page.getByRole("link", { name: "Projects" }).click();
-  await page.getByLabel("GitHub repository").fill("tester/demo");
+  await page.getByLabel("Or type it").fill("tester/demo");
   await page.getByRole("button", { name: "Add project" }).click();
   await expect(page.getByText("main protected")).toBeVisible();
 

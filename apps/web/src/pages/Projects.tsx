@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { GitHubStatus, LinearOptionsView, LinearStatusView, ProjectProfile, ProjectView, PushView } from "@agentswarm/contracts";
+import type { GitHubStatus, LinearOptionsView, LinearStatusView, ProjectProfile, ProjectView, PushView, RepoChoice } from "@agentswarm/contracts";
 import { api, ago } from "../api.ts";
 import { useResource } from "../live.ts";
 import { Badge, Empty, Field, Form, PageHead } from "../components/ui.tsx";
@@ -7,6 +7,7 @@ import { Badge, Empty, Field, Form, PageHead } from "../components/ui.tsx";
 export function ProjectsPage() {
   const projects = useResource<ProjectView[]>("/projects");
   const github = useResource<GitHubStatus>("/github");
+  const repos = useResource<RepoChoice[]>(github.data?.configured ? "/github/repos" : null);
   const [repo, setRepo] = useState("");
   return (
     <div className="stack">
@@ -17,8 +18,17 @@ export function ProjectsPage() {
           await api("POST", "/projects", { githubRepo: repo.trim() });
           setRepo("");
           projects.reload();
+          repos.reload();
         }}>
-          <Field label="GitHub repository" hint="owner/name, readable with agentSwarm's token"><input value={repo} onChange={(e) => setRepo(e.target.value)} placeholder="Zaaacqwq/agentswarm-playground" required /></Field>
+          <div className="grid">
+            <Field label="Your repositories" hint="Most recently updated first. agentSwarm's token must have access to the one you pick.">
+              <select value={repos.data?.some((r) => r.fullName === repo) ? repo : ""} onChange={(e) => setRepo(e.target.value)}>
+                <option value="">{repos.data ? "Choose…" : repos.error ? "Could not list repositories" : "Loading…"}</option>
+                {repos.data?.map((r) => <option key={r.fullName} value={r.fullName}>{r.fullName}{r.private ? " (private)" : ""}</option>)}
+              </select>
+            </Field>
+            <Field label="Or type it" hint="owner/name"><input value={repo} onChange={(e) => setRepo(e.target.value)} placeholder="Zaaacqwq/agentswarm-playground" required /></Field>
+          </div>
         </Form>
       </section>
       {projects.data?.length === 0 && <Empty>No projects yet.</Empty>}
