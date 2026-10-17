@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import type { ExecEnv } from "./layout.ts";
 import type { ExecResult } from "./protocol.ts";
+import { prepareSpace } from "./space.ts";
 
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const running = new Set<ChildProcess>();
@@ -25,15 +26,17 @@ function killGroup(child: ChildProcess): void {
 }
 
 /** A minimal, explicit environment: nothing from swarmd or sudo leaks into agent commands. */
-export function childEnv(env: ExecEnv): Record<string, string> {
-  const cache = `${env.root}/cache`;
+export function childEnv(env: ExecEnv, scope: string): Record<string, string> {
+  // HOME and TMPDIR belong to the scope, so runs that share a workstation user do not share them.
+  const s = prepareSpace(env, scope);
+  const cache = s.cache;
   return {
-    HOME: env.home,
+    HOME: s.home,
     USER: env.user,
     LOGNAME: env.user,
     SHELL: "/bin/zsh",
     PATH: `${env.layout.nodeBin}:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin`,
-    TMPDIR: `${env.root}/.tmp/`,
+    TMPDIR: `${s.tmp}/`,
     LANG: "en_US.UTF-8",
     TERM: "dumb",
     XDG_CACHE_HOME: cache,
@@ -49,6 +52,8 @@ export function childEnv(env: ExecEnv): Record<string, string> {
 
 export interface RunOptions {
   readonly cwd: string;
+  /** The scope whose space (HOME, TMPDIR) the command gets. */
+  readonly scope: string;
   readonly timeoutMs: number;
   readonly stdin?: string;
 }
@@ -61,7 +66,7 @@ export function runProcess(env: ExecEnv, argv: readonly string[], opts: RunOptio
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, {
       cwd: opts.cwd,
-      env: childEnv(env),
+      env: childEnv(env, opts.scope),
       detached: true,
       stdio: [opts.stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"],
     });

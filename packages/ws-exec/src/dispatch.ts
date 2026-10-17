@@ -54,7 +54,7 @@ function run(env: ExecEnv, r: Request): unknown {
     case "git.commit": return git.commit(env, r.scope, r.message);
     case "git.pushInbox": return git.pushInbox(env, r.scope, r.branch);
     case "git.remove": return git.remove(env, r.scope);
-    case "git.merge": return git.merge(env, r.scope, r.branch, r.message);
+    case "git.merge": return git.merge(env, r.scope, r.branch, r.sha, r.message);
     case "reap": return reap(env);
     default: throw new OpError("bad_request", `Unknown op ${(r as { op?: unknown }).op}`);
   }

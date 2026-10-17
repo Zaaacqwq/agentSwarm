@@ -3,6 +3,7 @@ import { dirname, join, relative } from "node:path";
 import type { ExecEnv } from "../layout.ts";
 import { OpError } from "../protocol.ts";
 import { resolveScope } from "../paths.ts";
+import { prepareSpace } from "../space.ts";
 import { runProcess } from "../process.ts";
 import { sandboxed } from "../sandbox.ts";
 
@@ -13,7 +14,9 @@ const WORKTREE_SCOPE = /^worktrees\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
 const AUTHOR = { name: "agentSwarm Agent", email: "agent@agentswarm.local" };
 
 async function git(env: ExecEnv, cwd: string, args: string[], stdin?: string, timeoutMs = 120_000, scope?: string) {
-  return runProcess(env, sandboxed(env, ["/usr/bin/git", ...args], scope), { cwd, timeoutMs, ...(stdin !== undefined ? { stdin } : {}) });
+  // Calls without a scope work on the inbox only; give them a space of their own.
+  const sc = scope ?? ".inbox";
+  return runProcess(env, sandboxed(env, ["/usr/bin/git", ...args], sc), { cwd, scope: sc, timeoutMs, ...(stdin !== undefined ? { stdin } : {}) });
 }
 
 function ok<T extends { exitCode: number | null; output: string }>(res: T, what: string): T {
@@ -43,7 +46,8 @@ export async function clone(env: ExecEnv, scope: string, mirror: string, branch:
     throw new OpError("conflict", `Worktree ${scope} already exists on another branch`);
   }
 
-  ok(await git(env, parent, ["clone", "--quiet", "--no-hardlinks", "--branch", base, mirrorPath, dir], undefined, 300_000, scope), "clone");
+  // Run from the scope's own home: the sandbox does not let it look at the shared parent directory.
+  ok(await git(env, prepareSpace(env, scope).home, ["clone", "--quiet", "--no-hardlinks", "--branch", base, mirrorPath, dir], undefined, 300_000, scope), "clone");
   ok(await git(env, dir, ["config", "user.name", author.name], undefined, 120_000, scope), "config");
   ok(await git(env, dir, ["config", "user.email", author.email], undefined, 120_000, scope), "config");
   ok(await git(env, dir, ["remote", "add", "inbox", inboxPath(env)], undefined, 120_000, scope), "remote add");
@@ -93,15 +97,21 @@ export async function pushInbox(env: ExecEnv, scope: string, branch: string) {
   return { branch, head, inbox };
 }
 
-/** Fetches `branch` from the mirror (origin) and merges it; on conflict, aborts and lists the files. */
-export async function merge(env: ExecEnv, scope: string, branch: string, message: string) {
+/**
+ * Fetches `branch` from the mirror (origin) and merges exactly `sha` (the reviewed commit); refuses if
+ * the branch has moved since. On conflict, aborts and lists the files.
+ */
+export async function merge(env: ExecEnv, scope: string, branch: string, sha: string, message: string) {
   if (!BRANCH_PATTERN.test(branch)) throw new OpError("bad_request", "Invalid branch");
+  if (!/^[0-9a-f]{40}$/.test(sha)) throw new OpError("bad_request", "Invalid commit");
   if (!message.trim() || message.length > 2000) throw new OpError("bad_request", "Merge message must be 1-2000 chars");
   const dir = worktreeDir(env, scope);
-  const dirty = ok(await git(env, dir, ["status", "--porcelain"], undefined, 120_000, scope), "status").output.trim();
+  const dirty = ok(await git(env, dir, ["status", "--porcelain", "--untracked-files=no"], undefined, 120_000, scope), "status").output.trim();
   if (dirty) throw new OpError("conflict", "Commit or discard your changes before merging");
   ok(await git(env, dir, ["fetch", "--quiet", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`], undefined, 300_000, scope), "fetch");
-  const res = await git(env, dir, ["merge", "--no-ff", "--no-edit", "-m", message, `refs/remotes/origin/${branch}`], undefined, 300_000, scope);
+  const tip = ok(await git(env, dir, ["rev-parse", `refs/remotes/origin/${branch}`], undefined, 30_000, scope), "rev-parse").output.trim();
+  if (tip !== sha) throw new OpError("conflict", `${branch} moved since it was reviewed (now ${tip.slice(0, 10)}, reviewed ${sha.slice(0, 10)}); review it again`);
+  const res = await git(env, dir, ["merge", "--no-ff", "--no-edit", "-m", message, sha], undefined, 300_000, scope);
   if (res.exitCode === 0) {
     const head = ok(await git(env, dir, ["rev-parse", "HEAD"], undefined, 30_000, scope), "rev-parse").output.trim();
     return { merged: true, head, conflicts: [] as string[] };

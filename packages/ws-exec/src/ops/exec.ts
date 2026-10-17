@@ -12,8 +12,7 @@ export async function exec(env: ExecEnv, scope: string, command: string, timeout
   if (!command.trim()) throw new OpError("bad_request", "Empty command");
   if (command.length > 20_000) throw new OpError("bad_request", "Command too long");
   const cwd = resolveScope(env.root, scope);
-  mkdirSync(`${env.root}/.tmp`, { recursive: true, mode: 0o700 });
-  mkdirSync(`${env.root}/cache`, { recursive: true, mode: 0o700 });
+  mkdirSync(cwd, { recursive: true, mode: 0o700 });
   const timeout = Math.min(Math.max(1000, timeoutMs), MAX_TIMEOUT_MS);
-  return runProcess(env, sandboxed(env, ["/bin/zsh", "-c", command], scope), { cwd, timeoutMs: timeout });
+  return runProcess(env, sandboxed(env, ["/bin/zsh", "-c", command], scope), { cwd, scope, timeoutMs: timeout });
 }

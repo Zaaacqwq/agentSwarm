@@ -143,6 +143,7 @@ export interface ReviewVerdict {
   readonly approved: boolean;
   readonly comments: string;
   readonly reviewRunId: string;
+  readonly headSha: string;
 }
 
 export interface RunView {

@@ -29,6 +29,11 @@ const Pr = Type.Object({ title: Type.String({ minLength: 1, maxLength: 200 }), b
 
 /** Spawning and coordinating sub-agents. `canSpawn` is false at the depth limit; `isRoot` adds the PR tool. */
 export function treeTools(ops: TreeToolOps, opts: { canSpawn: boolean; isRoot: boolean }): AgentTool<any, undefined>[] {
+  // These change shared tree state: one at a time, even when the model asks for several at once.
+  return build(ops, opts).map((t) => ({ ...t, executionMode: "sequential" as const }));
+}
+
+function build(ops: TreeToolOps, opts: { canSpawn: boolean; isRoot: boolean }): AgentTool<any, undefined>[] {
   const tools: AgentTool<any, undefined>[] = [];
   if (opts.canSpawn) {
     tools.push(
@@ -91,6 +96,7 @@ const Verdict = Type.Object({ approved: Type.Boolean(), comments: Type.String({ 
 /** The reviewer's last word. */
 export function verdictTool(onVerdict: (approved: boolean, comments: string) => void): AgentTool<typeof Verdict, undefined> {
   return {
+    executionMode: "sequential",
     name: "review_verdict", label: "review_verdict", parameters: Verdict,
     description: "Give your verdict and finish: approved true only if the branch can be merged as is; comments must be specific.",
     execute: async (_id, p) => {

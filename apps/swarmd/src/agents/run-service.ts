@@ -72,6 +72,7 @@ export class RunService {
   private readonly deps: RunDeps;
   private readonly active = new Map<string, Active>();
   private scheduling = false;
+  private rescheduled = false;
 
   constructor(deps: RunDeps) {
     this.deps = deps;
@@ -120,7 +121,7 @@ export class RunService {
       status: "queued", pendingMessage: input.brief, report: null, error: null, turns: 0, tokensIn: 0, tokensOut: 0, costUsd: 0,
       limits: this.deps.limits ?? DEFAULT_LIMITS, createdAt: now, startedAt: null, endedAt: null,
       treeId: names.treeId, parentRunId: null, depth: 0, baseBranch: null, budgetUsd: input.budgetUsd ?? TREE_LIMITS.defaultRootBudgetUsd,
-      kind: "task", reviewOf: null, review: null, mergedAt: null, prUrl: null, waitingFor: null,
+      kind: "task", reviewOf: null, review: null, mergedAt: null, prUrl: null, waitingFor: null, reviewSha: null,
     };
     this.deps.db.insert(schema.runs).values(row).run();
     audit(this.deps.db, actor, "run.create", row.id, { agentId, branch: row.branch }, now);
@@ -139,9 +140,13 @@ export class RunService {
       active.agent.steer({ role: "user", content: text, timestamp: now });
     } else if (active) {
       active.inbox.push(text);
+    } else if (run.status === "waiting" || run.status === "queued") {
+      // Delivered when it runs next (for a waiting run: with its children's results).
+      this.appendPending(runId, text);
     } else {
-      const pending = run.status === "queued" && run.pendingMessage ? `${run.pendingMessage}\n\n${text}` : text;
-      this.deps.db.update(schema.runs).set({ status: "queued", pendingMessage: pending, error: null, endedAt: null, waitingFor: null }).where(eq(schema.runs.id, runId)).run();
+      // New work on a finished task: its old review and merge no longer describe what it will push.
+      this.deps.db.update(schema.runs).set({ status: "queued", pendingMessage: text, error: null, endedAt: null, waitingFor: null, ...(run.kind === "task" ? { review: null, mergedAt: null } : {}) })
+        .where(eq(schema.runs.id, runId)).run();
       this.emit(runId);
       this.schedule();
     }
@@ -156,6 +161,7 @@ export class RunService {
     if (live.length === 0) throw conflict(`The run is already ${run.status}`);
     this.cancelTree(runId, now);
     audit(this.deps.db, actor, "run.cancel", runId, { runs: live.length }, now);
+    this.schedule();
     return this.view(runId);
   }
 
@@ -210,9 +216,24 @@ export class RunService {
   // ---- scheduling -----------------------------------------------------------------------
 
   schedule(): void {
-    if (this.scheduling) return;
+    // Re-entrant calls (a run failed or resumed while scheduling) ask for one more pass.
+    if (this.scheduling) {
+      this.rescheduled = true;
+      return;
+    }
     this.scheduling = true;
     try {
+      do {
+        this.rescheduled = false;
+        this.schedulePass();
+      } while (this.rescheduled);
+    } finally {
+      this.scheduling = false;
+    }
+  }
+
+  private schedulePass(): void {
+    {
       const queued = this.deps.db.select().from(schema.runs).where(eq(schema.runs.status, "queued")).orderBy(asc(schema.runs.createdAt)).all();
       const workstations = new Map(this.deps.pool.list().map((w) => [w.id, w.status]));
       for (const run of queued) {
@@ -225,8 +246,6 @@ export class RunService {
         const ws = this.deps.pool.acquire(run.id, run.workstationId);
         if (ws) this.start(run, ws);
       }
-    } finally {
-      this.scheduling = false;
     }
   }
 
@@ -247,8 +266,14 @@ export class RunService {
         await this.deps.pool.reap(ws).catch((e: Error) => this.deps.log("reap failed", { ws, error: e.message }));
         this.deps.pool.release(ws, run.id);
         this.active.delete(run.id);
-        // A message that arrived as the run ended starts a follow-up.
-        if (active.inbox.length && active.reason !== "cancelled") this.requeue(run.id, active.inbox.splice(0).join("\n\n"));
+        // A message that arrived as the run ended: a waiting or resumed run gets it with its next
+        // message; a finished one starts a follow-up.
+        if (active.inbox.length && active.reason !== "cancelled") {
+          const text = active.inbox.splice(0).join("\n\n");
+          const status = this.get(run.id).status;
+          if (status === "waiting" || status === "queued") this.appendPending(run.id, text);
+          else this.requeue(run.id, text);
+        }
         this.schedule();
       });
   }
@@ -348,6 +373,12 @@ export class RunService {
     if (active.reason) return this.finish(runId, "failed", report, STOP_TEXT[active.reason]);
     if (lastError) return this.finish(runId, "failed", report, `Model request failed: ${lastError}`);
     if (active.waitFor && !report) return this.suspend(runId, active.waitFor);
+    // A parent does not finish while its sub-agents work: it waits for them and hears back.
+    const unfinished = this.deps.tree.children(runId).filter((c) => !TERMINAL.has(c.status)).map((c) => c.id);
+    if (unfinished.length) {
+      bus.runEvent(runId, "error", { message: `Not finished: ${unfinished.length} sub-agent(s) are still working; waiting for them` });
+      return this.suspend(runId, unfinished);
+    }
     if (isReview && !verdict) this.deps.tree.recordVerdict(this.get(runId), false, `The reviewer finished without a verdict: ${fallbackReport(agent.state.messages).summary}`);
     return this.finish(runId, "succeeded", report ?? fallbackReport(agent.state.messages), null);
   }
@@ -387,9 +418,16 @@ export class RunService {
     }
   }
 
+  private appendPending(runId: string, text: string): void {
+    const run = this.get(runId);
+    this.deps.db.update(schema.runs).set({ pendingMessage: run.pendingMessage ? `${run.pendingMessage}\n\n${text}` : text }).where(eq(schema.runs.id, runId)).run();
+  }
+
   private requeue(runId: string, text: string): void {
     this.deps.db.update(schema.runs).set({ status: "queued", pendingMessage: text, error: null, endedAt: null, waitingFor: null }).where(eq(schema.runs.id, runId)).run();
     this.emit(runId);
+    // Whoever requeued may be deep inside a finish; start it once the stack unwinds.
+    queueMicrotask(() => this.schedule());
   }
 
   private saveSession(runId: string, messages: AgentMessage[], now = Date.now()): void {
@@ -419,9 +457,9 @@ export class RunService {
     for (const run of waiting) {
       const ids = run.waitingFor ?? [];
       if (!ids.every((id) => TERMINAL.has(this.deps.tree.run(id).status))) continue;
-      const text = this.deps.tree.resultsMessage(ids);
-      this.deps.bus.runEvent(run.id, "results", { text, runs: ids });
-      this.requeue(run.id, text);
+      const results = this.deps.tree.resultsMessage(ids);
+      this.deps.bus.runEvent(run.id, "results", { text: results, runs: ids });
+      this.requeue(run.id, run.pendingMessage ? `${results}\n\nMessages that arrived while you waited:\n${run.pendingMessage}` : results);
     }
   }
 
@@ -430,7 +468,7 @@ export class RunService {
     const { tree, bus } = this.deps;
     return {
       spawn: async (input) => {
-        const child = await tree.spawn(this.get(runId), input);
+        const child = await tree.spawn(this.get(runId), input, () => !active.reason);
         bus.runEvent(child.id, "user", { text: child.pendingMessage ?? child.brief });
         bus.runEvent(runId, "status", { status: "spawned", child: child.id, name: child.title, branch: child.branch });
         this.emit(child.id);
@@ -450,8 +488,13 @@ export class RunService {
         return null;
       },
       message: (id, text) => {
-        tree.child(this.get(runId), id);
-        this.message(this.get(runId).agentId, id, text);
+        const parent = this.get(runId);
+        const child = tree.child(parent, id, "task");
+        if (TERMINAL.has(child.status)) {
+          const topped = tree.topUp(parent, child);
+          if (topped) bus.runEvent(id, "status", { status: "budget", added: topped });
+        }
+        this.message(parent.agentId, id, text);
       },
       cancel: (id) => {
         tree.child(this.get(runId), id);
@@ -459,7 +502,7 @@ export class RunService {
       },
       review: async (id) => {
         const review = await tree.startReview(this.get(runId), id);
-        active.waitFor = [review.id];
+        active.waitFor = [...(active.waitFor ?? []), review.id];
         bus.runEvent(review.id, "user", { text: review.pendingMessage ?? review.brief });
         this.emit(review.id);
         this.schedule();

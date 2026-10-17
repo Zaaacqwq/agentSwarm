@@ -244,18 +244,104 @@ describe("an agent tree", () => {
     const root = (await h.api("POST", `/api/agents/${agentId}/runs`, { title: "Limits", brief: "x", budgetUsd: 1 }, cookie)).body;
     await h.services.runs.settled(root.id);
     const tree = h.services.tree;
+    // Only a running parent may spawn; act as if the root were still working.
+    const running = (id: string) => h.db.sqlite.prepare("UPDATE runs SET status = 'running' WHERE id = ?").run(id);
+    running(root.id);
     const rootRow = tree.run(root.id);
     await assert.rejects(tree.spawn(rootRow, { name: "Big", role: "dev", brief: "x".repeat(30), budgetUsd: 5 }), (e: Error) => e instanceof TreeError && /Not enough budget/.test(e.message));
     const half = await tree.spawn(rootRow, { name: "Half", role: "dev", brief: "x".repeat(30) });
     // Default share: 30% of what the root can give away ($1 minus its $0.15 reserve).
     assert.equal(half.budgetUsd, 0.255);
     assert.equal(tree.ownCap(tree.run(root.id)), 0.745);
+    running(half.id);
     let deep = half;
     // Each level keeps $0.05 for itself, so the middle level needs room for the one below it.
     deep = await tree.spawn(deep, { name: "D2", role: "dev", brief: "x".repeat(30), budgetUsd: 0.15 });
+    running(deep.id);
     deep = await tree.spawn(deep, { name: "D3", role: "dev", brief: "x".repeat(30), budgetUsd: 0.05 });
+    running(deep.id);
     assert.equal(deep.depth, 3);
     await assert.rejects(tree.spawn(deep, { name: "Too deep", role: "dev", brief: "x".repeat(30), budgetUsd: 0.01 }), /Depth limit/);
     h.services.runs.cancel("test", root.id);
+  });
+
+  test("parallel spawns cannot overspend the budget or share a branch", async () => {
+    h = await harness();
+    const { cookie, agentId } = await h.ready();
+    h.scriptAgents({ Dev: [report("nothing")] });
+    const root = (await h.api("POST", `/api/agents/${agentId}/runs`, { title: "Race", brief: "x", budgetUsd: 1 }, cookie)).body;
+    await h.services.runs.settled(root.id);
+    h.db.sqlite.prepare("UPDATE runs SET status = 'running' WHERE id = ?").run(root.id);
+    const row = h.services.tree.run(root.id);
+    const greedy = await Promise.allSettled([1, 2, 3].map(() => h.services.tree.spawn(row, { name: "Same", role: "dev", brief: "x".repeat(30), budgetUsd: 0.8 })));
+    assert.equal(greedy.filter((r) => r.status === "fulfilled").length, 1);
+    const fair = await Promise.all([1, 2].map(() => h.services.tree.spawn(h.services.tree.run(root.id), { name: "Same", role: "dev", brief: "x".repeat(30), budgetUsd: 0.01 })));
+    const branches = h.services.runs.tree(root.treeId).nodes.map((n) => n.branch);
+    assert.equal(new Set(branches).size, branches.length);
+    assert.ok(fair.every((c) => c.budgetUsd === 0.01));
+    h.services.runs.cancel("test", root.id);
+  });
+
+  test("an approval is void once the child is asked for more work", async () => {
+    h = await harness();
+    const { cookie, agentId } = await h.ready();
+    let mergeOutput = "";
+    h.scriptAgents({
+      Dev: [
+        call("spawn_agent", { name: "A", role: "developer", brief: "Add a.js, commit and push." }),
+        call("wait_agents", {}),
+        callWith("review_agent", (i) => ({ id: i.A! })),
+        callWith("message_agent", (i) => ({ id: i.A!, text: "Also add b.js." })),
+        call("wait_agents", {}),
+        callWith("merge_agent", (i) => ({ id: i.A! })),
+        (context) => {
+          mergeOutput = lastText(context);
+          return report("not merged");
+        },
+      ],
+      A: [
+        writeModule("a.js", "export const a = 1;\n"), call("git_commit", { message: "a" }), call("git_push", {}), report("a"),
+        writeModule("b.js", "export const b = 2;\n"), call("git_commit", { message: "b" }), call("git_push", {}), report("a and b"),
+      ],
+      "A-review": [call("review_verdict", { approved: true, comments: "ok" })],
+    });
+    const root = (await h.api("POST", `/api/agents/${agentId}/runs`, { title: "Void", brief: "x" }, cookie)).body;
+    const done = await h.services.runs.settled(root.id);
+    assert.equal(done.status, "succeeded", done.error ?? "");
+    assert.match(mergeOutput, /not been approved/);
+    assert.equal(h.services.runs.tree(root.treeId).nodes.find((n) => n.agentName === "A")!.mergedAt, null);
+  });
+
+  test("cancelling a child wakes its waiting parent, and a parent cannot finish before its children", async () => {
+    h = await harness();
+    const { cookie, agentId } = await h.ready();
+    let woke = "";
+    h.scriptAgents({
+      Dev: [
+        call("spawn_agent", { name: "Slow", role: "developer", brief: "Run a very long command for this test." }),
+        report("reported too early"),
+        (context) => {
+          woke = lastText(context);
+          return report("done after the child");
+        },
+      ],
+      Slow: [call("ws_bash", { command: "sleep 60" })],
+    });
+    const root = (await h.api("POST", `/api/agents/${agentId}/runs`, { title: "Early", brief: "x" }, cookie)).body;
+    const until = async (check: () => boolean) => {
+      const end = Date.now() + 15_000;
+      while (!check()) {
+        if (Date.now() > end) throw new Error("timed out");
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    };
+    await until(() => h.services.runs.view(root.id).status === "waiting");
+    const slow = h.services.runs.tree(root.treeId).nodes.find((n) => n.agentName === "Slow")!;
+    await until(() => h.services.runs.events(slow.id).some((e) => e.type === "tool_start"));
+    assert.equal((await h.api("POST", `/api/runs/${slow.id}/cancel`, {}, cookie)).status, 200);
+    const done = await h.services.runs.settled(root.id);
+    assert.equal(done.status, "succeeded", done.error ?? "");
+    assert.equal(done.report?.summary, "done after the child");
+    assert.match(woke, /Slow \(run_[0-9a-f]+\) — cancelled/);
   });
 });

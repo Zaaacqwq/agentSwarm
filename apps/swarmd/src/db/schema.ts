@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { index, integer, real, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 const json = <T>(name: string) => text(name, { mode: "json" }).$type<T>();
@@ -126,8 +127,10 @@ export const runs = sqliteTable("runs", {
   kind: text("kind", { enum: ["task", "review"] }).notNull().default("task"),
   /** For a review run: the run under review. */
   reviewOf: text("review_of"),
-  /** On a reviewed run: the reviewer's verdict. */
-  review: json<{ approved: boolean; comments: string; reviewRunId: string }>("review"),
+  /** On a reviewed run: the reviewer's verdict, for exactly the commit that was reviewed. */
+  review: json<{ approved: boolean; comments: string; reviewRunId: string; headSha: string }>("review"),
+  /** For a review run: the commit it reviews (the branch tip when the review started). */
+  reviewSha: text("review_sha"),
   mergedAt: integer("merged_at"),
   prUrl: text("pr_url"),
   /** While waiting: the child runs it is waiting for. */
@@ -136,6 +139,8 @@ export const runs = sqliteTable("runs", {
   index("runs_agent_idx").on(t.agentId, t.createdAt),
   index("runs_status_idx").on(t.status),
   index("runs_branch_idx").on(t.projectId, t.branch),
+  // Two task runs never share a branch; reviewers check out the branch they review.
+  uniqueIndex("runs_task_branch_uq").on(t.projectId, t.branch).where(sql`kind = 'task'`),
   index("runs_tree_idx").on(t.treeId),
   index("runs_parent_idx").on(t.parentRunId),
 ]);

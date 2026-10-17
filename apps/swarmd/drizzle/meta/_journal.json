@@ -15,6 +15,13 @@
       "when": 1792203552023,
       "tag": "0001_agent_tree",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1792204626045,
+      "tag": "0002_review_sha",
+      "breakpoints": true
     }
   ]
 }
