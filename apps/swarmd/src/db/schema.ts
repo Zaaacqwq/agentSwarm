@@ -133,8 +133,14 @@ export const runs = sqliteTable("runs", {
   reviewSha: text("review_sha"),
   mergedAt: integer("merged_at"),
   prUrl: text("pr_url"),
-  /** While waiting: the child runs it is waiting for. */
+  /** While waiting: the child runs it is waiting for ("@user" while it waits for the person's answer). */
   waitingFor: json<string[]>("waiting_for"),
+  // R3: missions and cleanup.
+  missionId: text("mission_id"),
+  /** On a root with a pull request: what GitHub last said about it. */
+  prState: text("pr_state", { enum: ["open", "merged", "closed"] }),
+  /** When the tree's worktrees and branches were removed (after its pull request was merged or closed). */
+  cleanedAt: integer("cleaned_at"),
 }, (t) => [
   index("runs_agent_idx").on(t.agentId, t.createdAt),
   index("runs_status_idx").on(t.status),
@@ -143,6 +149,7 @@ export const runs = sqliteTable("runs", {
   uniqueIndex("runs_task_branch_uq").on(t.projectId, t.branch).where(sql`kind = 'task'`),
   index("runs_tree_idx").on(t.treeId),
   index("runs_parent_idx").on(t.parentRunId),
+  index("runs_mission_idx").on(t.missionId),
 ]);
 
 export const runEvents = sqliteTable("run_events", {
@@ -169,3 +176,57 @@ export const gitPushes = sqliteTable("git_pushes", {
   reason: text("reason"),
   createdAt: integer("created_at").notNull(),
 }, (t) => [index("git_pushes_project_idx").on(t.projectId, t.id)]);
+
+export const MISSION_STAGES = [
+  "intake", "research", "discussion", "planning", "awaiting_approval", "building", "verifying", "awaiting_merge", "retro", "done", "cancelled",
+] as const;
+export type MissionStage = (typeof MISSION_STAGES)[number];
+
+/** One idea pursued in one project, from your first sentence to a merged pull request (R3). */
+export const missions = sqliteTable("missions", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  title: text("title").notNull(),
+  /** Your words, as you said them; never edited. */
+  intent: text("intent").notNull(),
+  stage: text("stage", { enum: MISSION_STAGES }).notNull(),
+  fast: integer("fast", { mode: "boolean" }).notNull(),
+  leadAgentId: text("lead_agent_id").notNull().references(() => agents.id),
+  /** The lead's run: every stage is one execution of it, on one branch and worktree. */
+  rootRunId: text("root_run_id").notNull(),
+  treeId: text("tree_id").notNull(),
+  docsPath: text("docs_path").notNull(),
+  /** Set by stage_done / request_approval; applied when the lead's execution ends. */
+  pendingStage: text("pending_stage", { enum: MISSION_STAGES }),
+  /** What the lead said when it last finished a stage. */
+  stageSummary: text("stage_summary"),
+  retro: text("retro"),
+  /** The mission documents found on its branch so far (file names under docsPath). */
+  docs: json<string[]>("docs").notNull(),
+  discordThreadId: text("discord_thread_id"),
+  error: text("error"),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+  endedAt: integer("ended_at"),
+}, (t) => [index("missions_project_idx").on(t.projectId, t.createdAt), index("missions_stage_idx").on(t.stage)]);
+
+export const missionMessages = sqliteTable("mission_messages", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  missionId: text("mission_id").notNull().references(() => missions.id, { onDelete: "cascade" }),
+  author: text("author", { enum: ["user", "lead", "system"] }).notNull(),
+  /** question: the lead waits for an answer; approval: the plan waits for yours. */
+  kind: text("kind", { enum: ["text", "question", "stage", "approval", "error"] }).notNull(),
+  text: text("text").notNull(),
+  /** Where you wrote it (user messages): dashboard or discord. */
+  source: text("source", { enum: ["dashboard", "discord", "agentswarm"] }).notNull(),
+  discordMessageId: text("discord_message_id"),
+  createdAt: integer("created_at").notNull(),
+}, (t) => [index("mission_messages_idx").on(t.missionId, t.id)]);
+
+/** Small settings rows (id "discord": the bot). Secrets are sealed. */
+export const settings = sqliteTable("settings", {
+  id: text("id").primaryKey(),
+  value: json<Record<string, unknown>>("value").notNull(),
+  secretSealed: text("secret_sealed"),
+  updatedAt: integer("updated_at").notNull(),
+});

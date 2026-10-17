@@ -13,7 +13,9 @@ import { createServices, type Services } from "../src/app/services.ts";
 import { buildApp, SESSION_COOKIE } from "../src/http/app.ts";
 import { LocalBackend } from "../src/workstations/backend.ts";
 import { createGitRunner } from "../src/github/git.ts";
-import type { GitHubClient } from "../src/github/github-client.ts";
+import { type GitHubClient, type PullRequestState } from "../src/github/github-client.ts";
+import type { WebAccess } from "../src/web/web-access.ts";
+import { FakeDiscord } from "./fake-discord.ts";
 import type { RunLimits } from "../src/db/schema.ts";
 
 const LOCAL_MAIN = fileURLToPath(new URL("../../../packages/ws-exec/src/local-main.ts", import.meta.url));
@@ -28,6 +30,11 @@ export interface Harness {
   readonly db: DbHandle;
   readonly protectedBranches: Set<string>;
   readonly pullRequests: { repo: string; head: string; base: string; title: string; body: string }[];
+  /** What the fake GitHub says about pull request N (default open). */
+  readonly prStates: Map<number, PullRequestState>;
+  readonly discord: FakeDiscord;
+  /** Pages web_fetch can read, by URL; web_search answers with `searchResult`. */
+  readonly web: { pages: Map<string, string>; searches: string[]; searchResult: string };
   /** Scripted model replies, consumed one per model request. */
   script(steps: FauxResponseStep[]): void;
   /** One script per agent name (read from "You are <name>," in the system prompt); order across agents does not matter. */
@@ -59,7 +66,7 @@ function makeRemote(base: string): string {
   return remote;
 }
 
-export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: number; webDist?: string } = {}): Promise<Harness> {
+export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: number; webDist?: string; prPollMs?: number } = {}): Promise<Harness> {
   const base = realpathSync(mkdtempSync(join(tmpdir(), "swarmd-test-")));
   const volume = join(base, "SwarmWS");
   const layout: Layout = {
@@ -80,6 +87,20 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
   const faux = createFauxCore({ models: [{ id: "fake-model", input: ["text", "image"] }] });
   const protectedBranches = new Set<string>();
   const pullRequests: { repo: string; head: string; base: string; title: string; body: string }[] = [];
+  const prStates = new Map<number, PullRequestState>();
+  const discord = new FakeDiscord();
+  const webState = { pages: new Map<string, string>(), searches: [] as string[], searchResult: "Results:\n1. Example\n   https://example.com/csv\n   CSV parsing notes" };
+  const web: WebAccess = {
+    fetch: async (url) => {
+      const text = webState.pages.get(url);
+      if (text === undefined) throw new Error(`no such page ${url}`);
+      return { url, status: 200, title: "Page", text };
+    },
+    search: async (query) => {
+      webState.searches.push(query);
+      return { text: webState.searchResult, costUsd: 0.007 };
+    },
+  };
   const github: GitHubClient = {
     whoami: async () => ({ login: "tester", expiresAt: null }),
     repo: async (_t, fullName) => ({ fullName, defaultBranch: "main", private: true, canAdmin: true, cloneUrl: remote }),
@@ -88,6 +109,10 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
     createPullRequest: async (_t, fullName, input) => {
       pullRequests.push({ repo: fullName, ...input });
       return `https://github.com/${fullName}/pull/${pullRequests.length}`;
+    },
+    pullRequestState: async (_t, _fullName, number) => prStates.get(number) ?? "open",
+    deleteBranch: async () => {
+      throw new Error("the test remote is local; branches are deleted with git");
     },
   };
   const db = openDatabase(":memory:");
@@ -107,6 +132,10 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
     remoteUrl: () => remote,
     refreshMirror: false,
     ...(opts.limits ? { limits: opts.limits } : {}),
+    web: () => web,
+    transport: discord,
+    dashboardUrl: "http://127.0.0.1:4399",
+    ...(opts.prPollMs ? { prPollMs: opts.prPollMs } : {}),
   });
   await services.pool.sync();
   const app = await buildApp({ services, webDist: opts.webDist ?? null, check: { dataDir: layout.swarmdData, volume: null }, allowedHosts: ["localhost:80", "127.0.0.1:4399"] });
@@ -129,7 +158,7 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
   };
 
   return {
-    base, layout, remote, services, app, db, protectedBranches, pullRequests,
+    base, layout, remote, services, app, db, protectedBranches, pullRequests, prStates, discord, web: webState,
     script: (steps) => faux.setResponses(steps),
     scriptAgents(scripts) {
       const queues = new Map(Object.entries(scripts).map(([k, v]) => [k, [...v]]));
@@ -159,6 +188,8 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
     },
     remoteBranches: () => execFileSync("/usr/bin/git", ["for-each-ref", "--format=%(refname:short)", "refs/heads"], { cwd: remote }).toString().trim().split("\n"),
     async close() {
+      services.watcher.stop();
+      await services.discord.stop();
       await services.runs.stopAll();
       await app.close();
       db.close();

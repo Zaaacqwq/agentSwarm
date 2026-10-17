@@ -21,6 +21,17 @@ export interface GitHubClient {
   protect(token: string, fullName: string, branch: string): Promise<void>;
   /** Opens (or finds the open) pull request from `head` into `base`; returns its URL. Never merges. */
   createPullRequest(token: string, fullName: string, input: { head: string; base: string; title: string; body: string }): Promise<string>;
+  pullRequestState(token: string, fullName: string, number: number): Promise<PullRequestState>;
+  /** Deletes a swarm/… branch; false if it was already gone. */
+  deleteBranch(token: string, fullName: string, branch: string): Promise<boolean>;
+}
+
+export type PullRequestState = "open" | "merged" | "closed";
+
+/** The repository and number of a github.com pull request URL. */
+export function parsePullRequestUrl(url: string): { repo: string; number: number } | null {
+  const m = /^https:\/\/github\.com\/([A-Za-z0-9-]+\/[A-Za-z0-9._-]+)\/pull\/([0-9]+)$/.exec(url);
+  return m ? { repo: m[1]!, number: Number(m[2]) } : null;
 }
 
 export class GitHubError extends Error {
@@ -85,6 +96,24 @@ export class GitHubRest implements GitHubClient {
       const owner = fullName.split("/")[0];
       const open = (await (await this.call(token, "GET", `/repos/${fullName}/pulls?state=open&head=${encodeURIComponent(`${owner}:${input.head}`)}`)).json()) as { html_url: string }[];
       if (open[0]) return open[0].html_url;
+      throw error;
+    }
+  }
+
+  async pullRequestState(token: string, fullName: string, number: number): Promise<PullRequestState> {
+    const body = (await (await this.call(token, "GET", `/repos/${fullName}/pulls/${number}`)).json()) as { state: string; merged?: boolean; merged_at?: string | null };
+    if (body.merged || body.merged_at) return "merged";
+    return body.state === "open" ? "open" : "closed";
+  }
+
+  async deleteBranch(token: string, fullName: string, branch: string): Promise<boolean> {
+    if (!branch.startsWith("swarm/") || branch.split("/").some((p) => p === "" || p === "." || p === "..")) throw new Error(`Refusing to delete ${branch}: only swarm/ branches`);
+    try {
+      await this.call(token, "DELETE", `/repos/${fullName}/git/refs/heads/${branch.split("/").map(encodeURIComponent).join("/")}`);
+      return true;
+    } catch (error) {
+      // 422 "Reference does not exist" (GitHub may delete merged branches itself), or 404.
+      if (error instanceof GitHubError && (error.status === 422 || error.status === 404)) return false;
       throw error;
     }
   }

@@ -16,6 +16,12 @@ import { AgentService } from "../agents/agent-service.ts";
 import { DEFAULT_LIMITS, RunService } from "../agents/run-service.ts";
 import { TreeService } from "../agents/tree-service.ts";
 import type { RunLimits } from "../db/schema.ts";
+import { TreeCleanup } from "../agents/cleanup.ts";
+import { PullRequestWatcher } from "../github/pr-watcher.ts";
+import { MissionService } from "../missions/mission-service.ts";
+import { createWebAccess, type WebAccess } from "../web/web-access.ts";
+import { DiscordBridge } from "../discord/bridge.ts";
+import type { ChatTransport } from "../discord/transport.ts";
 
 export type Logger = (level: "info" | "warn" | "error", msg: string, extra?: Record<string, unknown>) => void;
 
@@ -33,6 +39,12 @@ export interface ServiceDeps {
   readonly remoteUrl?: (fullName: string) => string;
   readonly refreshMirror?: boolean;
   readonly limits?: RunLimits;
+  /** Tests fake the web and Discord; production uses the real ones. */
+  readonly web?: (endpoints: EndpointService) => WebAccess;
+  readonly transport: ChatTransport;
+  /** Links in Discord messages point here. */
+  readonly dashboardUrl: string;
+  readonly prPollMs?: number;
 }
 
 export interface Services {
@@ -47,6 +59,10 @@ export interface Services {
   readonly relay: Relay;
   readonly runs: RunService;
   readonly tree: TreeService;
+  readonly cleanup: TreeCleanup;
+  readonly missions: MissionService;
+  readonly watcher: PullRequestWatcher;
+  readonly discord: DiscordBridge;
 }
 
 export function createServices(d: ServiceDeps): Services {
@@ -65,5 +81,21 @@ export function createServices(d: ServiceDeps): Services {
     log: (msg, extra) => d.log("warn", msg, extra),
     ...(d.limits ? { limits: d.limits } : {}),
   });
-  return { bus, auth: new AuthService(d.db), endpoints, gateway, github, projects, pool, agents, relay, runs, tree };
+  const warn = (msg: string, extra?: Record<string, unknown>) => d.log("warn", msg, extra);
+  const cleanup = new TreeCleanup({ db: d.db, backend: d.backend, projects, github, git: d.git, log: warn, isActive: (id) => runs.isActive(id) });
+  const missions = new MissionService({
+    db: d.db, bus, runs, tree, projects, agents, git: d.git, web: d.web?.(endpoints) ?? createWebAccess(endpoints), cleanup, log: warn,
+  });
+  runs.attach(missions);
+  const watcher = new PullRequestWatcher({
+    db: d.db, github, log: warn, ...(d.prPollMs ? { intervalMs: d.prPollMs } : {}),
+    // Ended missions whose cleanup never finished (a timeout, a restart, an unhealthy workstation).
+    sweep: () => missions.sweep(),
+    settle: async (root, state) => {
+      if (root.missionId) return missions.pullRequestSettled(root, state);
+      await cleanup.clean(root.treeId!);
+    },
+  });
+  const discord = new DiscordBridge({ db: d.db, secrets: d.secrets, bus, missions, projects, transport: d.transport, dashboardUrl: d.dashboardUrl, log: warn });
+  return { bus, auth: new AuthService(d.db), endpoints, gateway, github, projects, pool, agents, relay, runs, tree, cleanup, missions, watcher, discord };
 }

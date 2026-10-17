@@ -1,6 +1,6 @@
 import { basename } from "node:path";
-import { and, asc, desc, eq, gt } from "drizzle-orm";
-import { Agent, type AgentEvent, type AgentMessage } from "@earendil-works/pi-agent-core";
+import { and, asc, desc, eq, gt, isNotNull } from "drizzle-orm";
+import { Agent, type AgentEvent, type AgentMessage, type AgentTool } from "@earendil-works/pi-agent-core";
 import type { CreateRun, RunEventView, RunReport, RunView, TreeView } from "@agentswarm/contracts";
 import type { Db } from "../db/client.ts";
 import { schema } from "../db/client.ts";
@@ -21,6 +21,28 @@ import { TERMINAL, TREE_LIMITS, TreeError, type TreeService } from "./tree-servi
 import { treeTools, verdictTool, type TreeToolOps } from "./tree-tools.ts";
 
 export type RunRow = typeof schema.runs.$inferSelect;
+
+/** In waitingFor: the run waits for the person's answer (ask_user), not for other runs. */
+export const WAIT_FOR_USER = "@user";
+
+/** What one execution of a run lets an extension do. */
+export interface RunBinding {
+  readonly signal: AbortSignal;
+  /** End this execution after the current turn and wait for the person's next message. */
+  waitForUser(): void;
+  /** Charges something other than model tokens (a web search) to the run. */
+  addCost(usd: number): void;
+}
+
+/** Missions extend runs through these; RunService knows nothing else about them. */
+export interface RunHooks {
+  /** Tools to add, and which standard tools to keep (default: all). */
+  tools(run: RunRow, binding: RunBinding): { add: AgentTool<any, undefined>[]; keep?: (name: string) => boolean } | null;
+  /** Prompt additions for this run: a section to append, and what replaces "finish with report". */
+  prompt(run: RunRow): { section: string[]; finish: string } | null;
+  /** An execution ended: the run finished, failed, was cancelled, or is waiting. */
+  ended(run: RunRow): void;
+}
 
 export const DEFAULT_LIMITS: RunLimits = { maxTurns: 40, maxDurationMs: 30 * 60_000, maxCostUsd: 1 };
 /** A failed model request is retried this many times before the run fails. */
@@ -49,7 +71,9 @@ export interface RunDeps {
   readonly log: (msg: string, extra?: Record<string, unknown>) => void;
 }
 
-type StopReason = "cancelled" | "turns" | "time" | "cost";
+/** "shutdown": swarmd is stopping; the run is interrupted like a crash, not cancelled by anyone. */
+type StopReason = "cancelled" | "shutdown" | "turns" | "time" | "cost";
+const RESTART_TEXT = "Interrupted by an agentSwarm restart; send a message to continue";
 
 interface Active {
   readonly controller: AbortController;
@@ -63,6 +87,7 @@ interface Active {
 }
 
 const STOP_TEXT: Record<Exclude<StopReason, "cancelled">, string> = {
+  shutdown: RESTART_TEXT,
   turns: "Stopped: the run reached its turn limit",
   time: "Stopped: the run reached its time limit",
   cost: "Stopped: the run reached its cost limit",
@@ -73,9 +98,14 @@ export class RunService {
   private readonly active = new Map<string, Active>();
   private scheduling = false;
   private rescheduled = false;
+  private hooks: RunHooks | null = null;
 
   constructor(deps: RunDeps) {
     this.deps = deps;
+  }
+
+  attach(hooks: RunHooks): void {
+    this.hooks = hooks;
   }
 
   // ---- queries --------------------------------------------------------------------------
@@ -89,6 +119,11 @@ export class RunService {
     const row = this.deps.db.select().from(schema.runs).where(eq(schema.runs.id, id)).get();
     if (!row) throw notFound("No such run");
     return row;
+  }
+
+  /** True while an execution holds the run (including the moment after it ends, before its workstation is released). */
+  isActive(id: string): boolean {
+    return this.active.has(id);
   }
 
   view(id: string): RunView {
@@ -111,7 +146,7 @@ export class RunService {
 
   // ---- commands -------------------------------------------------------------------------
 
-  create(actor: string, agentId: string, input: CreateRun, now = Date.now()): RunView {
+  create(actor: string, agentId: string, input: CreateRun, now = Date.now(), missionId: string | null = null): RunView {
     const agent = this.deps.agents.get(agentId);
     const project = this.deps.projects.get(agent.projectId);
     const names = this.deps.tree.rootNames(project, input.title);
@@ -122,6 +157,7 @@ export class RunService {
       limits: this.deps.limits ?? DEFAULT_LIMITS, createdAt: now, startedAt: null, endedAt: null,
       treeId: names.treeId, parentRunId: null, depth: 0, baseBranch: null, budgetUsd: input.budgetUsd ?? TREE_LIMITS.defaultRootBudgetUsd,
       kind: "task", reviewOf: null, review: null, mergedAt: null, prUrl: null, waitingFor: null, reviewSha: null,
+      missionId, prState: null, cleanedAt: null,
     };
     this.deps.db.insert(schema.runs).values(row).run();
     audit(this.deps.db, actor, "run.create", row.id, { agentId, branch: row.branch }, now);
@@ -132,14 +168,21 @@ export class RunService {
   }
 
   /** While running, steers the agent; afterwards, queues a follow-up on the same worktree. */
-  message(actor: string, runId: string, text: string, now = Date.now()): RunView {
+  message(actor: string, runId: string, text: string, now = Date.now(), from: "person" | "agentswarm" = "person"): RunView {
     const run = this.get(runId);
-    this.deps.bus.runEvent(runId, "user", { text }, now);
+    if (run.cleanedAt) throw conflict("This run's worktree was removed after its pull request closed; start a new run");
+    this.deps.bus.runEvent(runId, "user", { text, ...(from === "agentswarm" ? { from } : {}) }, now);
     const active = this.active.get(runId);
     if (active?.agent?.state.isStreaming) {
       active.agent.steer({ role: "user", content: text, timestamp: now });
-    } else if (active) {
+    } else if (active && run.status === "running") {
       active.inbox.push(text);
+    } else if (active) {
+      // The execution has ended and is releasing its workstation: keep the message in the database,
+      // so a restart in this moment cannot lose it; the release delivers it.
+      this.appendPending(runId, text);
+    } else if (run.status === "waiting" && run.waitingFor?.includes(WAIT_FOR_USER)) {
+      this.answer(runId, text);
     } else if (run.status === "waiting" || run.status === "queued") {
       // Delivered when it runs next (for a waiting run: with its children's results).
       this.appendPending(runId, text);
@@ -170,12 +213,14 @@ export class RunService {
     for (const r of [...this.deps.tree.descendants(runId).reverse(), this.get(runId)]) {
       if (TERMINAL.has(r.status)) continue;
       const active = this.active.get(r.id);
-      if (active) {
+      if (active && r.status === "running") {
         active.reason = "cancelled";
         active.controller.abort();
         active.agent?.abort();
         if (r.workstationId) void this.deps.pool.reap(r.workstationId).catch(() => undefined);
       } else {
+        // Not executing, or its execution already ended (waiting) and is only releasing its workstation.
+        if (active) active.reason = "cancelled";
         this.finish(r.id, "cancelled", r.report, null, now);
       }
     }
@@ -184,7 +229,9 @@ export class RunService {
   /** After a restart nothing is running: interrupted runs become failed and can be resumed with a message. */
   recover(now = Date.now()): void {
     const stale = this.deps.db.select().from(schema.runs).where(eq(schema.runs.status, "running")).all();
-    for (const run of stale) this.finish(run.id, "failed", null, "Interrupted by an agentSwarm restart; send a message to continue", now);
+    for (const run of stale) this.finish(run.id, "failed", null, RESTART_TEXT, now);
+    // Messages that were stored for a run as its execution ended, but not yet delivered.
+    for (const run of this.deps.db.select().from(schema.runs).where(isNotNull(schema.runs.pendingMessage)).all()) this.deliverPending(run.id);
     const trees = new Set(this.deps.db.select({ t: schema.runs.treeId }).from(schema.runs).where(eq(schema.runs.status, "waiting")).all().map((r) => r.t));
     for (const t of trees) this.resumeWaiters(t);
     this.schedule();
@@ -193,7 +240,7 @@ export class RunService {
   /** Cancels everything running and waits for it to wind down (shutdown and tests). */
   async stopAll(): Promise<void> {
     for (const [id, active] of this.active) {
-      active.reason = "cancelled";
+      active.reason = "shutdown";
       active.controller.abort();
       active.agent?.abort();
       this.deps.log("run cancelled for shutdown", { runId: id });
@@ -258,6 +305,7 @@ export class RunService {
     active.done = this.execute(run.id, ws, active)
       .catch((error: Error) => {
         if (active.reason === "cancelled") return this.finish(run.id, "cancelled", null, null);
+        if (active.reason === "shutdown") return this.finish(run.id, "failed", null, RESTART_TEXT);
         this.deps.log("run failed", { runId: run.id, error: error.message });
         this.finish(run.id, "failed", null, error.message.slice(0, 500));
       })
@@ -268,11 +316,9 @@ export class RunService {
         this.active.delete(run.id);
         // A message that arrived as the run ended: a waiting or resumed run gets it with its next
         // message; a finished one starts a follow-up.
-        if (active.inbox.length && active.reason !== "cancelled") {
-          const text = active.inbox.splice(0).join("\n\n");
-          const status = this.get(run.id).status;
-          if (status === "waiting" || status === "queued") this.appendPending(run.id, text);
-          else this.requeue(run.id, text);
+        if (active.reason !== "cancelled" && active.reason !== "shutdown") {
+          if (active.inbox.length) this.appendPending(run.id, active.inbox.splice(0).join("\n\n"));
+          this.deliverPending(run.id);
         }
         this.schedule();
       });
@@ -301,6 +347,7 @@ export class RunService {
       bus.runEvent(runId, "status", { status: "worktree", branch: run.branch, base });
     }
 
+    const counters = { turns: run.turns, tokensIn: run.tokensIn, tokensOut: run.tokensOut, costUsd: run.costUsd };
     let report: RunReport | null = null;
     let verdict = false;
     const wsTools = workstationTools({
@@ -317,11 +364,23 @@ export class RunService {
         report = { summary: `${approved ? "Approved" : "Changes requested"}: ${comments}`, tests: "", unfinished: [] };
       })]
       : [...wsTools, ...treeTools(this.treeOps(runId, active), { canSpawn, isRoot: run.depth === 0 })];
+    const extension = isReview ? null : this.hooks?.tools(run, {
+      signal,
+      waitForUser: () => (active.waitFor = [...(active.waitFor ?? []), WAIT_FOR_USER]),
+      addCost: (usd) => {
+        counters.costUsd += usd;
+        db.update(schema.runs).set({ costUsd: counters.costUsd }).where(eq(schema.runs.id, runId)).run();
+        this.emit(runId);
+      },
+    });
+    if (extension) tools.splice(0, tools.length, ...tools.filter((t) => extension.keep?.(t.name) ?? true), ...extension.add);
+    const missionPrompt = isReview ? null : this.hooks?.prompt(run) ?? null;
     const prompt = isReview
       ? reviewerPrompt({ name: agentRow.name, repo: project.githubRepo, branch: run.branch })
       : systemPrompt({
         name: agentRow.name, role: agentRow.role, instructions: agentRow.instructions, repo: project.githubRepo, defaultBranch: project.defaultBranch, branch: run.branch,
         tree: { canSpawn, isRoot: run.depth === 0, depth: run.depth },
+        ...(missionPrompt ? { extra: missionPrompt.section, finish: missionPrompt.finish } : {}),
       });
     const agent = new Agent({
       initialState: {
@@ -337,7 +396,6 @@ export class RunService {
     signal.addEventListener("abort", () => agent.abort(), { once: true });
     if (signal.aborted) agent.abort();
 
-    const counters = { turns: run.turns, tokensIn: run.tokensIn, tokensOut: run.tokensOut, costUsd: run.costUsd };
     const base = { turns: run.turns, costUsd: run.costUsd };
     const stop = (reason: StopReason) => {
       active.reason ??= reason;
@@ -363,6 +421,11 @@ export class RunService {
           lastError = modelError(agent);
         }
         next = !lastError && active.inbox.length ? active.inbox.splice(0).join("\n\n") : undefined;
+        // A message that continues this execution answers any question it asked.
+        if (next !== undefined && active.waitFor) {
+          const rest = active.waitFor.filter((id) => id !== WAIT_FOR_USER);
+          active.waitFor = rest.length ? rest : null;
+        }
       }
     } finally {
       clearTimeout(deadline);
@@ -418,6 +481,25 @@ export class RunService {
     }
   }
 
+  /**
+   * A stored message for a run that is not executing: a finished run takes it as a follow-up, a run
+   * waiting for the person takes it as the answer; one waiting for sub-agents gets it when they finish.
+   */
+  private deliverPending(runId: string): void {
+    const run = this.get(runId);
+    if (!run.pendingMessage || run.cleanedAt || this.active.has(runId)) return;
+    if (run.status === "succeeded" || run.status === "failed") this.requeue(runId, run.pendingMessage);
+    else if (run.status === "waiting" && run.waitingFor?.includes(WAIT_FOR_USER)) this.answer(runId, "");
+  }
+
+  /** The answer a run asked for (ask_user): it goes on now, with whatever else arrived meanwhile. */
+  private answer(runId: string, text: string): void {
+    if (text) this.appendPending(runId, text);
+    this.deps.db.update(schema.runs).set({ status: "queued", waitingFor: null }).where(eq(schema.runs.id, runId)).run();
+    this.emit(runId);
+    queueMicrotask(() => this.schedule());
+  }
+
   private appendPending(runId: string, text: string): void {
     const run = this.get(runId);
     this.deps.db.update(schema.runs).set({ pendingMessage: run.pendingMessage ? `${run.pendingMessage}\n\n${text}` : text }).where(eq(schema.runs.id, runId)).run();
@@ -440,6 +522,15 @@ export class RunService {
     this.deps.bus.runEvent(runId, "status", { status, ...(error ? { error } : {}) }, now);
     this.emit(runId);
     this.resumeWaiters(this.get(runId).treeId);
+    this.notifyEnded(runId);
+  }
+
+  private notifyEnded(runId: string): void {
+    try {
+      this.hooks?.ended(this.get(runId));
+    } catch (error) {
+      this.deps.log("run hook failed", { runId, error: (error as Error).message });
+    }
   }
 
   /** Ends this execution without finishing: the workstation is freed until the awaited runs are done. */
@@ -448,6 +539,7 @@ export class RunService {
     this.deps.bus.runEvent(runId, "status", { status: "waiting", for: ids }, now);
     this.emit(runId);
     this.resumeWaiters(this.get(runId).treeId);
+    this.notifyEnded(runId);
   }
 
   /** Waiting runs whose awaited runs have all finished get their results and go back in the queue. */
@@ -456,6 +548,8 @@ export class RunService {
     const waiting = this.deps.db.select().from(schema.runs).where(and(eq(schema.runs.treeId, treeId), eq(schema.runs.status, "waiting"))).all();
     for (const run of waiting) {
       const ids = run.waitingFor ?? [];
+      // Waiting for the person: only their message resumes it.
+      if (ids.includes(WAIT_FOR_USER)) continue;
       if (!ids.every((id) => TERMINAL.has(this.deps.tree.run(id).status))) continue;
       const results = this.deps.tree.resultsMessage(ids);
       this.deps.bus.runEvent(run.id, "results", { text: results, runs: ids });
@@ -530,7 +624,7 @@ export class RunService {
       tokensIn: row.tokensIn, tokensOut: row.tokensOut, costUsd: row.costUsd, createdAt: row.createdAt, startedAt: row.startedAt, endedAt: row.endedAt,
       agentName: agent?.name ?? "?", agentRole: agent?.role ?? "?", treeId: row.treeId, parentRunId: row.parentRunId, depth: row.depth,
       kind: row.kind, baseBranch: row.baseBranch, budgetUsd: row.budgetUsd, review: row.review, reviewOf: row.reviewOf,
-      mergedAt: row.mergedAt, prUrl: row.prUrl, waitingFor: row.waitingFor,
+      mergedAt: row.mergedAt, prUrl: row.prUrl, waitingFor: row.waitingFor, missionId: row.missionId, prState: row.prState, cleanedAt: row.cleanedAt,
     };
   }
 

@@ -4,7 +4,7 @@ import cookie from "@fastify/cookie";
 import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import {
-  CreateAgent, CreateEndpoint, CreateProject, CreateRun, Credentials, RunMessage, SetGitHubToken, type Me,
+  CreateAgent, CreateEndpoint, CreateMission, CreateProject, CreateRun, Credentials, MissionBudget, MissionReply, RunMessage, SetDiscord, SetGitHubToken, type Me,
 } from "@agentswarm/contracts";
 import type { Services } from "../app/services.ts";
 import { RateLimiter } from "../auth/rate-limit.ts";
@@ -135,6 +135,25 @@ export async function buildApp(o: AppOptions): Promise<FastifyInstance> {
   app.get<{ Params: { id: string }; Querystring: { after?: string } }>("/api/runs/:id/events", async (req) => s.runs.events(req.params.id, Number(req.query.after ?? 0) || 0));
   app.post<{ Params: { id: string }; Body: RunMessage }>("/api/runs/:id/messages", { schema: { body: RunMessage } }, async (req) => s.runs.message(actor(req), req.params.id, req.body.text));
   app.post<{ Params: { id: string } }>("/api/runs/:id/cancel", async (req) => s.runs.cancel(actor(req), req.params.id));
+
+  // ---- missions -----------------------------------------------------------------------------
+  app.get("/api/missions", async () => s.missions.list());
+  app.post<{ Body: CreateMission }>("/api/missions", { schema: { body: CreateMission } }, async (req) => s.missions.create(actor(req), req.body, "dashboard"));
+  app.get<{ Params: { id: string } }>("/api/missions/:id", async (req) => s.missions.view(req.params.id));
+  app.get<{ Params: { id: string }; Querystring: { after?: string } }>("/api/missions/:id/messages", async (req) => s.missions.messages(req.params.id, Number(req.query.after ?? 0) || 0));
+  app.post<{ Params: { id: string }; Body: MissionReply }>("/api/missions/:id/messages", { schema: { body: MissionReply } }, async (req) => s.missions.reply(actor(req), req.params.id, req.body.text, "dashboard"));
+  app.post<{ Params: { id: string } }>("/api/missions/:id/approve", async (req) => s.missions.approve(actor(req), req.params.id));
+  app.post<{ Params: { id: string }; Body: MissionReply }>("/api/missions/:id/changes", { schema: { body: MissionReply } }, async (req) => s.missions.requestChanges(actor(req), req.params.id, req.body.text));
+  app.post<{ Params: { id: string } }>("/api/missions/:id/cancel", async (req) => s.missions.cancel(actor(req), req.params.id));
+  app.put<{ Params: { id: string }; Body: MissionBudget }>("/api/missions/:id/budget", { schema: { body: MissionBudget } }, async (req) => s.missions.setBudget(actor(req), req.params.id, req.body.budgetUsd));
+
+  // ---- Discord ------------------------------------------------------------------------------
+  app.get("/api/discord", async () => s.discord.status());
+  app.put<{ Body: SetDiscord }>("/api/discord", { schema: { body: SetDiscord } }, async (req) => s.discord.configure(actor(req), req.body));
+  app.post("/api/discord/test", async () => {
+    await s.discord.test();
+    return { ok: true };
+  });
 
   // ---- live updates -------------------------------------------------------------------------
   app.get("/api/ws", { websocket: true }, (socket) => {

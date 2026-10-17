@@ -1,6 +1,6 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { dispatch } from "../src/dispatch.ts";
 import { parsePasswdLine } from "../src/passwd.ts";
@@ -151,6 +151,13 @@ describe("git (sandboxed)", () => {
       assert.equal(pushed.inbox, join(f.layout.inbox, "ws-1.git"));
       const status = await call<{ status: string }>(f.env, { op: "git.status", scope });
       assert.match(status.status, /swarm\/demo\/fix-readme/);
+      // Cleanup removes the worktree with its own HOME and TMPDIR, and is safe to repeat.
+      const home = join(f.env.root, ".homes", scope.replaceAll("/", "__"));
+      assert.ok(existsSync(home));
+      assert.deepEqual(await call(f.env, { op: "git.remove", scope }), { removed: true });
+      assert.ok(!existsSync(join(f.env.root, scope)) && !existsSync(home) && !existsSync(join(f.env.root, "worktrees/demo")));
+      assert.deepEqual(await call(f.env, { op: "git.remove", scope }), { removed: false });
+      await assert.rejects(call(f.env, { op: "git.remove", scope: "worktrees/../x" }), { code: "bad_request" });
     } finally {
       f.cleanup();
     }

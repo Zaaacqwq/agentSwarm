@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { LiveMessage } from "@agentswarm/contracts";
 import { api } from "./api.ts";
 
@@ -51,16 +51,38 @@ export function useReconnect(fn: () => void): void {
   }, []);
 }
 
-/** Loads a resource and reloads it on demand; `set` lets live updates patch it in place. */
-export function useResource<T>(path: string | null): { data: T | null; error: string | null; reload: () => void; set: (fn: (prev: T | null) => T | null) => void } {
+type Patch<T> = (prev: T | null) => T | null;
+
+/**
+ * Loads a resource and reloads it on demand; `set` lets live updates patch it in place. Live updates
+ * that arrive while a load is in flight are replayed onto its result, so a slow response cannot
+ * drop them.
+ */
+export function useResource<T>(path: string | null): { data: T | null; error: string | null; reload: () => void; set: (fn: Patch<T>) => void } {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
+  const inFlight = useRef<Patch<T>[] | null>(null);
   useEffect(() => {
     if (!path) return;
     let alive = true;
-    api<T>("GET", path).then((d) => alive && (setData(d), setError(null))).catch((e: Error) => alive && setError(e.message));
+    const patches: Patch<T>[] = [];
+    inFlight.current = patches;
+    api<T>("GET", path)
+      .then((d) => {
+        if (!alive) return;
+        setData(patches.reduce<T | null>((acc, fn) => fn(acc), d));
+        setError(null);
+      })
+      .catch((e: Error) => alive && setError(e.message))
+      .finally(() => {
+        if (inFlight.current === patches) inFlight.current = null;
+      });
     return () => void (alive = false);
   }, [path, tick]);
-  return { data, error, reload: () => setTick((t) => t + 1), set: setData };
+  const set = useCallback((fn: Patch<T>) => {
+    inFlight.current?.push(fn);
+    setData(fn);
+  }, []);
+  return { data, error, reload: () => setTick((t) => t + 1), set };
 }

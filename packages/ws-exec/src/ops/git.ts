@@ -3,7 +3,7 @@ import { dirname, join, relative } from "node:path";
 import type { ExecEnv } from "../layout.ts";
 import { OpError } from "../protocol.ts";
 import { resolveScope } from "../paths.ts";
-import { prepareSpace } from "../space.ts";
+import { prepareSpace, space } from "../space.ts";
 import { runProcess } from "../process.ts";
 import { sandboxed } from "../sandbox.ts";
 
@@ -122,12 +122,16 @@ export async function merge(env: ExecEnv, scope: string, branch: string, sha: st
   return { merged: false, head: null, conflicts };
 }
 
+/** Deletes a worktree with its own HOME and TMPDIR (after its pull request is merged or closed). Idempotent. */
 export function remove(env: ExecEnv, scope: string) {
-  const dir = worktreeDir(env, scope);
-  rmSync(dir, { recursive: true, force: true });
+  if (!WORKTREE_SCOPE.test(scope)) throw new OpError("bad_request", "Not a worktree scope");
+  const dir = resolveScope(env.root, scope);
+  const existed = existsSync(dir);
+  const s = space(env, scope);
+  for (const d of [dir, s.home, s.tmp]) rmSync(d, { recursive: true, force: true });
   const repoDir = dirname(dir);
-  if (readdirSync(repoDir).length === 0) rmSync(repoDir, { recursive: true, force: true });
-  return { removed: scope };
+  if (existsSync(repoDir) && readdirSync(repoDir).length === 0) rmSync(repoDir, { recursive: true, force: true });
+  return { removed: existed };
 }
 
 function worktreeDir(env: ExecEnv, scope: string): string {

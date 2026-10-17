@@ -1,7 +1,7 @@
-# R3 implementation plan: the pipeline and Discord (draft, awaiting your confirmation)
+# R3 implementation plan: the pipeline and Discord (confirmed 2026-10-17)
 
 > Based on `PLAN.md` sections 4, 10 and 14 (R3), and on R1 and R2 as built.
-> Section 9 lists the decisions I need from you. Items marked **[verify]** get checked before they are relied on.
+> You accepted every recommendation in section 9 ("按建议，开始 R3").
 
 ## 0. Goal and acceptance
 
@@ -88,7 +88,7 @@ New tools for the lead: `ask_user` (posts a question in the thread and waits for
 Researchers need to read the web; agents in R1/R2 only have their workstation.
 
 - `web_fetch({url})`: fetched **by swarmd**, not the workstation. Only `https` URLs on public addresses (the SSRF checks from the old P5 browser work: block private, loopback, link-local and similar ranges, re-check after redirects), size and time limits, HTML turned into text. The result is marked as untrusted data.
-- `web_search({query})`: through OpenRouter's web search plugin on the same OpenRouter key. **[verify]** the plugin's current pricing (I expect roughly $0.02 per search) and response format before relying on it.
+- `web_search({query})`: through OpenRouter's web search plugin (Exa engine) on the same OpenRouter key and the agent's own model. Checked 2026-10-17: Exa costs $0.007 per search (up to 10 results); a real search with qwen3.8-omni-flash cost $0.008 in total, returned 6 results with excerpts, and took about 25 s. The cost is charged to the agent's run.
 - Only researchers and the lead in the research stage get these two tools.
 
 ## 6. Dashboard

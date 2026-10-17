@@ -10,6 +10,8 @@ import { RunPage } from "./pages/Run.tsx";
 import { ProjectsPage } from "./pages/Projects.tsx";
 import { WorkstationsPage } from "./pages/Workstations.tsx";
 import { SettingsPage } from "./pages/Settings.tsx";
+import { MissionsPage } from "./pages/Missions.tsx";
+import { MissionPage } from "./pages/Mission.tsx";
 
 const Mark = () => (
   <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 2l12 7v14l-12 7-12-7V9z" fill="var(--signal)" /><path d="M16 9l6 3.5v7L16 23l-6-3.5v-7z" fill="var(--paper)" /></svg>
@@ -32,6 +34,8 @@ export function App() {
   let page;
   if (section === "agents" && id && sub === "runs" && subId) page = <RunPage id={subId} />;
   else if (section === "agents" && id) page = <AgentPage id={id} />;
+  else if (section === "missions" && id) page = <MissionPage id={id} />;
+  else if (section === "missions") page = <MissionsPage />;
   else if (section === "agents") page = <AgentsPage />;
   else if (section === "projects") page = <ProjectsPage />;
   else if (section === "workstations") page = <WorkstationsPage />;
@@ -43,6 +47,7 @@ export function App() {
       <nav className="nav" aria-label="Main">
         <div className="brand"><Mark /> agentSwarm</div>
         <Link to="/">Overview</Link>
+        <Link to="/missions">Missions</Link>
         <Link to="/agents">Agents</Link>
         <Link to="/projects">Projects</Link>
         <Link to="/workstations">Workstations</Link>
