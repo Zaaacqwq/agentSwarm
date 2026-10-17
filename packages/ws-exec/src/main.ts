@@ -1,5 +1,5 @@
 // ws-exec: runs one workstation operation as the invoking OS user, reached only through
-// `sudo -n -H -u ws-N /usr/local/libexec/hive/ws-exec`. The workstation comes from the OS user,
+// `sudo -n -H -u ws-N /usr/local/libexec/agentswarm/ws-exec`. The workstation comes from the OS user,
 // never from the request.
 import { lstatSync } from "node:fs";
 import { PRODUCTION_LAYOUT, WS_USER_PATTERN, type ExecEnv } from "./layout.ts";

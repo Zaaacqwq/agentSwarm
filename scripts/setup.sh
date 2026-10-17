@@ -1,24 +1,24 @@
 #!/bin/zsh
-# Hive workstation setup. Run from your own account:
+# agentSwarm workstation setup. Run from your own account:
 #   sudo zsh scripts/setup.sh                 install (8 workstations) or repair
 #   sudo zsh scripts/setup.sh --update-exec   reinstall ws-exec and its Node runtime only
-#   sudo zsh scripts/setup.sh --uninstall     remove users, group, sudoers and /usr/local/libexec/hive
+#   sudo zsh scripts/setup.sh --uninstall     remove users, group, sudoers and /usr/local/libexec/agentswarm
 #
-# Creates: the HiveWS APFS volume (ownership on) next to /Volumes/Data, the hive-ws group, hidden users
-# ws-1..ws-N, their directories, Hive's own Node runtime, ws-exec, and one sudoers rule that lets you
+# Creates: the SwarmWS APFS volume (ownership on) next to /Volumes/Data, the swarm-ws group, hidden users
+# ws-1..ws-N, their directories, agentSwarm's own Node runtime, ws-exec, and one sudoers rule that lets you
 # (and nothing else) start ws-exec as those users, each inside its own launchd session (ws-launch).
-# hived itself never runs as root.
+# swarmd itself never runs as root.
 set -euo pipefail
 
 COUNT=8
-VOLUME_NAME="HiveWS"
+VOLUME_NAME="SwarmWS"
 VOLUME="/Volumes/${VOLUME_NAME}"
 DATA_VOLUME="/Volumes/Data"
-LIBEXEC="/usr/local/libexec/hive"
+LIBEXEC="/usr/local/libexec/agentswarm"
 EXEC="${LIBEXEC}/ws-exec"
 LAUNCH="${LIBEXEC}/ws-launch"
-SUDOERS="/etc/sudoers.d/hive"
-GROUP="hive-ws"
+SUDOERS="/etc/sudoers.d/agentswarm"
+GROUP="swarm-ws"
 NODE_VERSION="24.22.0"
 NODE_SHA256="75ddfb875bbd868ebe57536f4442225f54dd10f6d2178dd439de869a5c648dc3"   # node-v24.22.0-darwin-arm64.tar.xz
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
@@ -57,7 +57,7 @@ preflight() {
 # ---- the volume ------------------------------------------------------------------------------
 ensure_volume() {
   if ! diskutil info "$VOLUME" >/dev/null 2>&1; then
-    mount | grep -q " on ${DATA_VOLUME} " || die "${DATA_VOLUME} is not mounted; HiveWS lives in its APFS container."
+    mount | grep -q " on ${DATA_VOLUME} " || die "${DATA_VOLUME} is not mounted; SwarmWS lives in its APFS container."
     local container
     container="$(diskutil info "$DATA_VOLUME" | awk -F': *' '/APFS Container:/ {print $2}')"
     [[ "$container" == disk* ]] || die "Could not find the APFS container of ${DATA_VOLUME}."
@@ -75,17 +75,17 @@ ensure_volume() {
   diskutil info "$VOLUME" | grep -q "Owners:.*Enabled" || die "${VOLUME} still does not enforce ownership."
   if mount | grep " on ${VOLUME} " | grep -q noowners; then die "${VOLUME} is mounted with noowners."; fi
   chown root:wheel "$VOLUME" && chmod 0755 "$VOLUME"
-  mkdir -p "${VOLUME}/ws" "${VOLUME}/inbox" "${VOLUME}/mirrors" "${VOLUME}/hived"
+  mkdir -p "${VOLUME}/ws" "${VOLUME}/inbox" "${VOLUME}/mirrors" "${VOLUME}/swarmd"
   chown root:wheel "${VOLUME}/ws" "${VOLUME}/inbox" && chmod 0755 "${VOLUME}/ws" "${VOLUME}/inbox"
   chown "${OWNER}:staff" "${VOLUME}/mirrors" && chmod 0755 "${VOLUME}/mirrors"
-  chown "${OWNER}:staff" "${VOLUME}/hived" && chmod 0700 "${VOLUME}/hived"
+  chown "${OWNER}:staff" "${VOLUME}/swarmd" && chmod 0700 "${VOLUME}/swarmd"
   say "Volume ready: ${VOLUME} (ownership enforced)"
 }
 
 # ---- users -----------------------------------------------------------------------------------
 ensure_group() {
   if ! dscl . -read "/Groups/${GROUP}" >/dev/null 2>&1; then
-    dseditgroup -o create -r "Hive workstations" "$GROUP"
+    dseditgroup -o create -r "agentSwarm workstations" "$GROUP"
   fi
   dscl . -read "/Groups/${GROUP}" PrimaryGroupID | awk '{print $2}'
 }
@@ -94,7 +94,7 @@ ensure_user() {
   local user="$1" gid="$2" n="$3"
   if ! dscl . -read "/Users/${user}" >/dev/null 2>&1; then
     say "Creating user ${user}"
-    sysadminctl -addUser "$user" -fullName "Hive Workstation ${n}" -password "$(openssl rand -base64 24)" -home "/Users/${user}" >/dev/null 2>&1 \
+    sysadminctl -addUser "$user" -fullName "agentSwarm Workstation ${n}" -password "$(openssl rand -base64 24)" -home "/Users/${user}" >/dev/null 2>&1 \
       || die "Could not create ${user}"
     createhomedir -c -u "$user" >/dev/null 2>&1 || true
   fi
@@ -107,12 +107,12 @@ ensure_user() {
   chown "${user}:${GROUP}" "/Users/${user}" && chmod 0700 "/Users/${user}"
   mkdir -p "${VOLUME}/ws/${user}"
   chown "${user}:${GROUP}" "${VOLUME}/ws/${user}" && chmod 0700 "${VOLUME}/ws/${user}"
-  # The inbox: written by the workstation, read by hived (you are in staff).
+  # The inbox: written by the workstation, read by swarmd (you are in staff).
   mkdir -p "${VOLUME}/inbox/${user}.git"
   chown "${user}:staff" "${VOLUME}/inbox/${user}.git" && chmod 2750 "${VOLUME}/inbox/${user}.git"
 }
 
-# ---- Hive's Node runtime and ws-exec ---------------------------------------------------------
+# ---- agentSwarm's Node runtime and ws-exec ---------------------------------------------------------
 install_node() {
   local current=""
   [[ -x "${LIBEXEC}/node/bin/node" ]] && current="$("${LIBEXEC}/node/bin/node" --version 2>/dev/null || true)"
@@ -145,7 +145,7 @@ install_exec() {
   cat > "$EXEC" <<EOF
 #!/bin/sh
 # Installed by agentswarm scripts/setup.sh. An empty environment: nothing from the caller reaches ws-exec.
-exec /usr/bin/env -i /usr/local/libexec/hive/node/bin/node --disable-warning=ExperimentalWarning ${dest}/main.ts
+exec /usr/bin/env -i /usr/local/libexec/agentswarm/node/bin/node --disable-warning=ExperimentalWarning ${dest}/main.ts
 EOF
   # ws-launch: the only thing sudo runs as root. It checks the user, then runs ws-exec as that user in the
   # user's own launchd session; plain `sudo -u` would keep your GUI session (clipboard, Apple Events, screen).
@@ -216,6 +216,6 @@ case "$mode" in
     install_exec
     write_sudoers
     for n in $(seq 1 "$COUNT"); do verify "ws-${n}"; done
-    say "Done. Next: npm run check (as yourself), then start hived."
+    say "Done. Next: npm run check (as yourself), then start swarmd."
     ;;
 esac

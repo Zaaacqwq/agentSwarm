@@ -1,4 +1,4 @@
-import type { WorkstationView } from "@hive/contracts";
+import type { WorkstationView } from "@agentswarm/contracts";
 import { api, ago } from "../api.ts";
 import { useLive, useResource } from "../live.ts";
 import { Badge, Empty, PageHead } from "../components/ui.tsx";

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { Me } from "@hive/contracts";
+import type { Me } from "@agentswarm/contracts";
 import { api, ApiError } from "./api.ts";
 import { Link, usePath } from "./router.tsx";
 import { Login } from "./pages/Login.tsx";
@@ -41,7 +41,7 @@ export function App() {
   return (
     <div className="shell">
       <nav className="nav" aria-label="Main">
-        <div className="brand"><Mark /> Hive</div>
+        <div className="brand"><Mark /> agentSwarm</div>
         <Link to="/">Overview</Link>
         <Link to="/agents">Agents</Link>
         <Link to="/projects">Projects</Link>

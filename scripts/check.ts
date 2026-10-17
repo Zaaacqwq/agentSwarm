@@ -1,9 +1,9 @@
-// Checks the real workstations through the same sudo + ws-exec path hived uses. No sudo password needed.
+// Checks the real workstations through the same sudo + ws-exec path swarmd uses. No sudo password needed.
 //   npm run check
 import { homedir } from "node:os";
-import type { ExecResult } from "@hive/ws-exec";
-import { PRODUCTION_LAYOUT } from "@hive/ws-exec";
-import { SudoBackend } from "../apps/hived/src/workstations/backend.ts";
+import type { ExecResult } from "@agentswarm/ws-exec";
+import { PRODUCTION_LAYOUT } from "@agentswarm/ws-exec";
+import { SudoBackend } from "../apps/swarmd/src/workstations/backend.ts";
 
 const backend = new SudoBackend();
 const results: { name: string; ok: boolean; detail: string }[] = [];
@@ -27,7 +27,7 @@ for (const user of users) {
 const ws = users[0];
 const other = users[1];
 if (ws) {
-  const scope = "hive-check";
+  const scope = "agentswarm-check";
   const run = (command: string) => backend.call<ExecResult>(ws, { op: "exec", scope, command, timeoutMs: 30_000 });
   const denied = async (name: string, command: string) => {
     const r = await run(command);
@@ -43,7 +43,7 @@ if (ws) {
     record(`commands run as ${ws}, not in staff`, id.output.startsWith(ws) && !/\bstaff\b/.test(id.output), id.output.replace(/\n/g, " | ").trim());
     await denied("cannot read your home", `cat ${JSON.stringify(`${homedir()}/.zshrc`)}`);
     await denied("cannot read /Volumes/Data", "ls /Volumes/Data");
-    await denied("cannot read hived data", `ls ${PRODUCTION_LAYOUT.hivedData}`);
+    await denied("cannot read swarmd data", `ls ${PRODUCTION_LAYOUT.swarmdData}`);
     if (other) {
       await denied(`cannot read ${other}'s workstation`, `ls ${PRODUCTION_LAYOUT.wsRoot}/${other}`);
       await denied(`cannot read ${other}'s inbox`, `ls ${PRODUCTION_LAYOUT.inbox}/${other}.git`);
@@ -55,19 +55,19 @@ if (ws) {
     const [manager, managerUid, uid] = session.output.trim().split("\n");
     record("commands run in the workstation's own session, not yours", manager !== "Aqua" && managerUid === uid, session.output.replace(/\n/g, " ").trim());
     const node = await run("node --version && which node");
-    record("Hive's Node runtime is on PATH", node.exitCode === 0 && node.output.includes("/usr/local/libexec/hive/node/bin/node"), node.output.replace(/\n/g, " ").trim());
+    record("agentSwarm's Node runtime is on PATH", node.exitCode === 0 && node.output.includes("/usr/local/libexec/agentswarm/node/bin/node"), node.output.replace(/\n/g, " ").trim());
     const net = await run("curl -s -o /dev/null -w '%{http_code}' https://github.com");
     record("network is allowed", net.output.trim() === "200", net.output.trim());
     const api = await run("curl -s -m 3 -o /dev/null -w '%{http_code}' http://127.0.0.1:4318/api/health; echo \" exit=$?\"");
-    record("cannot reach hived's API", !api.output.includes("200"), api.output.trim());
-    const clip = await run("pbpaste > /dev/null 2>&1; echo pbpaste=$?; osascript -e 'return 1' > /dev/null 2>&1; echo osascript=$?");
+    record("cannot reach swarmd's API", !api.output.includes("200"), api.output.trim());
+    const clip = await run("pbpaste > /dev/null 2>&1; echo pbpaste=$?; osascript -e 'tell application \"Finder\" to count windows' > /dev/null 2>&1; echo osascript=$?");
     record("no clipboard or AppleScript access", !/pbpaste=0/.test(clip.output) && !/osascript=0/.test(clip.output), clip.output.replace(/\n/g, " ").trim());
     const escape = await backend.call(ws, { op: "fs.read", scope, path: "../../ws-2/x" }).then(() => false, () => true);
     record("path traversal is refused", escape);
   } catch (e) {
     record("workstation checks", false, (e as Error).message);
   } finally {
-    await run("cd .. && rm -rf hive-check").catch(() => undefined);
+    await run("cd .. && rm -rf agentswarm-check").catch(() => undefined);
   }
 }
 

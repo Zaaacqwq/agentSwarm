@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { GitHubStatus, ProjectView, PushView } from "@hive/contracts";
+import type { GitHubStatus, ProjectView, PushView } from "@agentswarm/contracts";
 import { api, ago } from "../api.ts";
 import { useResource } from "../live.ts";
 import { Badge, Empty, Field, Form, PageHead } from "../components/ui.tsx";
@@ -10,7 +10,7 @@ export function ProjectsPage() {
   const [repo, setRepo] = useState("");
   return (
     <div className="stack">
-      <PageHead title="Projects" sub="A project is a GitHub repository. Hive mirrors it and protects its default branch." />
+      <PageHead title="Projects" sub="A project is a GitHub repository. agentSwarm mirrors it and protects its default branch." />
       {github.data && !github.data.configured && <div className="card">Add a GitHub token in Settings first.</div>}
       <section className="card">
         <Form submit="Add project" onSubmit={async () => {
@@ -18,7 +18,7 @@ export function ProjectsPage() {
           setRepo("");
           projects.reload();
         }}>
-          <Field label="GitHub repository" hint="owner/name, readable with Hive's token"><input value={repo} onChange={(e) => setRepo(e.target.value)} placeholder="Zaaacqwq/hive-playground" required /></Field>
+          <Field label="GitHub repository" hint="owner/name, readable with agentSwarm's token"><input value={repo} onChange={(e) => setRepo(e.target.value)} placeholder="Zaaacqwq/agentswarm-playground" required /></Field>
         </Form>
       </section>
       {projects.data?.length === 0 && <Empty>No projects yet.</Empty>}

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { Me } from "@hive/contracts";
+import type { Me } from "@agentswarm/contracts";
 import { api } from "../api.ts";
 import { Field, Form } from "../components/ui.tsx";
 
@@ -12,7 +12,7 @@ export function Login({ onDone }: { onDone: (me: Me) => void }) {
   return (
     <div className="auth">
       <div className="card">
-        <h1>Hive</h1>
+        <h1>agentSwarm</h1>
         <p className="muted">{setup ? "Create the admin account for this Mac." : "Sign in to your agents."}</p>
         <Form submit={setup ? "Create account" : "Sign in"} onSubmit={async () => onDone(await api<Me>("POST", setup ? "/setup" : "/auth/login", { username, password }))}>
           <Field label="Username"><input autoComplete="username" value={username} onChange={(e) => setUsername(e.target.value)} required /></Field>

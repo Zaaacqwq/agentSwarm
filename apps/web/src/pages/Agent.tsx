@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { AgentView, ProjectView, RunView } from "@hive/contracts";
+import type { AgentView, ProjectView, RunView } from "@agentswarm/contracts";
 import { api, ago, money } from "../api.ts";
 import { useLive, useResource } from "../live.ts";
 import { Badge, Empty, Field, Form, PageHead } from "../components/ui.tsx";

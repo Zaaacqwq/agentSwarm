@@ -2,9 +2,9 @@ import { expect, test } from "@playwright/test";
 
 const SHOTS = "test-results/screens";
 
-test("set up Hive, add a project and an agent, and watch a run fix a bug", async ({ page }) => {
+test("set up agentSwarm, add a project and an agent, and watch a run fix a bug", async ({ page }) => {
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Hive" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "agentSwarm" })).toBeVisible();
   await page.getByLabel("Username").fill("admin");
   await page.getByLabel("Password").fill("correct horse battery staple");
   await page.getByRole("button", { name: "Create account" }).click();

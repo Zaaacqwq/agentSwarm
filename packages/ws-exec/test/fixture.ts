@@ -4,25 +4,25 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExecEnv, Layout } from "../src/layout.ts";
 
-/** A throwaway HiveWS look-alike: two workstation roots, a mirror with one commit, inboxes. */
+/** A throwaway SwarmWS look-alike: two workstation roots, a mirror with one commit, inboxes. */
 export function fixture(sandbox = true): { env: ExecEnv; other: string; layout: Layout; cleanup: () => void } {
   const base = realpathSync(mkdtempSync(join(tmpdir(), "ws-exec-test-")));
-  const volume = join(base, "HiveWS");
+  const volume = join(base, "SwarmWS");
   const layout: Layout = {
     volume,
     wsRoot: join(volume, "ws"),
     mirrors: join(volume, "mirrors"),
     inbox: join(volume, "inbox"),
-    hivedData: join(volume, "hived"),
+    swarmdData: join(volume, "swarmd"),
     nodeBin: process.execPath.replace(/\/node$/, ""),
-    hivedPort: 4318,
+    swarmdPort: 4318,
   };
   const root = join(layout.wsRoot, "ws-1");
   const other = join(layout.wsRoot, "ws-2");
   const home = join(base, "home");
-  for (const d of [root, other, home, layout.mirrors, join(layout.inbox, "ws-1.git"), layout.hivedData]) mkdirSync(d, { recursive: true });
+  for (const d of [root, other, home, layout.mirrors, join(layout.inbox, "ws-1.git"), layout.swarmdData]) mkdirSync(d, { recursive: true });
   writeFileSync(join(other, "secret.txt"), "other workstation\n");
-  writeFileSync(join(layout.hivedData, "master.key"), "not for agents\n");
+  writeFileSync(join(layout.swarmdData, "master.key"), "not for agents\n");
 
   const src = join(base, "src");
   mkdirSync(src);

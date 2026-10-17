@@ -7,7 +7,7 @@
 set -u
 
 PROBE="ws-probe"
-SUDOERS="/etc/sudoers.d/hive-r0"
+SUDOERS="/etc/sudoers.d/agentswarm-r0"
 say() { print -r -- "== $*"; }
 die() { print -r -- "!! $*"; exit 1; }
 
@@ -32,7 +32,7 @@ fi
 
 if ! dscl . -read "/Users/${PROBE}" >/dev/null 2>&1; then
   say "Creating hidden user ${PROBE}"
-  sysadminctl -addUser "$PROBE" -fullName "Hive R0 probe" -password "$(openssl rand -base64 24)" -home "/Users/${PROBE}" >/dev/null 2>&1 \
+  sysadminctl -addUser "$PROBE" -fullName "agentSwarm R0 probe" -password "$(openssl rand -base64 24)" -home "/Users/${PROBE}" >/dev/null 2>&1 \
     || die "Could not create ${PROBE}"
   dscl . -create "/Users/${PROBE}" IsHidden 1
 fi

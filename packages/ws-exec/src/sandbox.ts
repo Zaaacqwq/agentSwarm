@@ -18,7 +18,7 @@ export function sandboxProfile(env: ExecEnv, scope?: string): string {
     `(deny file-read* file-write* (subpath "/Volumes"))`,
     `(deny file-read* file-write* (regex #"^/Users/[^/]+/"))`,
     `(deny file-read* file-write* (subpath ${q(layout.volume)}))`,
-    `(deny file-read* file-write* (subpath ${q(layout.hivedData)}))`,
+    `(deny file-read* file-write* (subpath ${q(layout.swarmdData)}))`,
     `(allow file-read* file-write* (subpath ${q(env.home)}))`,
     `(allow file-read* file-write* (subpath ${q(env.root)}))`,
     ...(mirror ? [`(allow file-read* (subpath ${q(mirror)}))`] : []),
@@ -29,7 +29,7 @@ export function sandboxProfile(env: ExecEnv, scope?: string): string {
     `(deny appleevent-send)`,
     `(deny mach-lookup (global-name "com.apple.pasteboard.1") (global-name-regex #"^com\\.apple\\.windowserver"))`,
     // The dashboard API is not for agents (logins, rate limits, run data).
-    `(deny network-outbound (remote ip ${q(`localhost:${layout.hivedPort}`)}))`,
+    `(deny network-outbound (remote ip ${q(`localhost:${layout.swarmdPort}`)}))`,
   ].join("\n");
 }
 

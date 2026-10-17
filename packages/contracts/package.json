@@ -1,5 +1,5 @@
 {
-  "name": "@hive/contracts",
+  "name": "@agentswarm/contracts",
   "private": true,
   "type": "module",
   "exports": {

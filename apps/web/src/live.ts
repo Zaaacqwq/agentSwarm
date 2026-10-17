@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { LiveMessage } from "@hive/contracts";
+import type { LiveMessage } from "@agentswarm/contracts";
 import { api } from "./api.ts";
 
 type Listener = (msg: LiveMessage) => void;
@@ -28,7 +28,7 @@ function connect(): void {
   };
 }
 
-/** Every live message from hived, for as long as the component is mounted. */
+/** Every live message from swarmd, for as long as the component is mounted. */
 export function useLive(listener: Listener): void {
   const ref = useRef(listener);
   ref.current = listener;

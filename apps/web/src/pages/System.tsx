@@ -1,4 +1,4 @@
-import type { CheckItem, RunView } from "@hive/contracts";
+import type { CheckItem, RunView } from "@agentswarm/contracts";
 import { useResource } from "../live.ts";
 import { Badge, PageHead } from "../components/ui.tsx";
 import { money } from "../api.ts";

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { EndpointKind, EndpointView, GitHubStatus } from "@hive/contracts";
+import type { EndpointKind, EndpointView, GitHubStatus } from "@agentswarm/contracts";
 import { api, when } from "../api.ts";
 import { useResource } from "../live.ts";
 import { Badge, Field, Form, PageHead } from "../components/ui.tsx";
@@ -55,7 +55,7 @@ export function SettingsPage() {
             setToken("");
             github.reload();
           }}>
-            <Field label="Fine-grained token" hint="Only your Hive repositories: Contents, Pull requests and Administration (read and write).">
+            <Field label="Fine-grained token" hint="Only your agentSwarm repositories: Contents, Pull requests and Administration (read and write).">
               <input type="password" autoComplete="off" value={token} onChange={(e) => setToken(e.target.value)} required />
             </Field>
           </Form>

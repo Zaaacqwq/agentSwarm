@@ -5,7 +5,7 @@ import type { ExecResult } from "./protocol.ts";
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const running = new Set<ChildProcess>();
 
-/** When hived cancels (sudo relays the signal), take every command's whole process group down. */
+/** When swarmd cancels (sudo relays the signal), take every command's whole process group down. */
 export function killAllOnSignal(): void {
   for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
     process.on(signal, () => {
@@ -24,7 +24,7 @@ function killGroup(child: ChildProcess): void {
   }
 }
 
-/** A minimal, explicit environment: nothing from hived or sudo leaks into agent commands. */
+/** A minimal, explicit environment: nothing from swarmd or sudo leaks into agent commands. */
 export function childEnv(env: ExecEnv): Record<string, string> {
   const cache = `${env.root}/cache`;
   return {
@@ -40,7 +40,7 @@ export function childEnv(env: ExecEnv): Record<string, string> {
     npm_config_cache: `${cache}/npm`,
     GIT_TERMINAL_PROMPT: "0",
     GIT_CONFIG_NOSYSTEM: "1",
-    // Mirrors belong to the hived user; trust exactly that directory.
+    // Mirrors belong to the swarmd user; trust exactly that directory.
     GIT_CONFIG_COUNT: "1",
     GIT_CONFIG_KEY_0: "safe.directory",
     GIT_CONFIG_VALUE_0: `${env.layout.mirrors}/*`,

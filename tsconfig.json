@@ -1,4 +1,4 @@
 {
   "extends": "./tsconfig.base.json",
-  "include": ["packages/*/src", "packages/*/test", "apps/hived/src", "apps/hived/test", "scripts", "e2e", "playwright.config.ts"]
+  "include": ["packages/*/src", "packages/*/test", "apps/swarmd/src", "apps/swarmd/test", "scripts", "e2e", "playwright.config.ts"]
 }

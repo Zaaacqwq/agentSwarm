@@ -1,9 +1,9 @@
-// R0 probe: can a Discord bot do what Hive needs? Send, thread, buttons, slash command, and read replies.
+// R0 probe: can a Discord bot do what agentSwarm needs? Send, thread, buttons, slash command, and read replies.
 //
 //   node probe.mjs [minutes]
 //
-// Reads the bot token from ~/.config/hive-r0/claude-token (the "discord:" part; never printed).
-// Waits for a person to reply, click a button and run /hive, then exits.
+// Reads the bot token from ~/.config/agentswarm-r0/claude-token (the "discord:" part; never printed).
+// Waits for a person to reply, click a button and run /agentswarm, then exits.
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -13,7 +13,7 @@ import {
 } from "discord.js";
 
 const minutes = Number(process.argv[2] ?? 10);
-const raw = readFileSync(join(homedir(), ".config/hive-r0/claude-token"), "utf8");
+const raw = readFileSync(join(homedir(), ".config/agentswarm-r0/claude-token"), "utf8");
 const token = raw.match(/discord:([\s\S]*)$/)?.[1].replace(/\s+/g, "");
 if (!token) throw new Error("No discord: token in the file");
 
@@ -36,18 +36,18 @@ client.once(Events.ClientReady, async (c) => {
   if (!channel) return finish("no text channel the bot can post in");
   log(`channel: #${channel.name} · can create threads: ${channel.permissionsFor(me).has(PermissionFlagsBits.CreatePublicThreads)} · manage channels: ${me.permissions.has(PermissionFlagsBits.ManageChannels)}`);
 
-  const cmd = new SlashCommandBuilder().setName("hive").setDescription("Hive R0 probe: show status");
+  const cmd = new SlashCommandBuilder().setName("agentswarm").setDescription("agentSwarm R0 probe: show status");
   await guild.commands.set([cmd.toJSON()]);
-  log("registered /hive in this server");
+  log("registered /agentswarm in this server");
 
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId("approve").setLabel("批准").setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId("revise").setLabel("要修改").setStyle(ButtonStyle.Secondary),
   );
   const t0 = Date.now();
-  const msg = await channel.send({ content: "**Hive R0 实测**：请在下面的线程里回复任意一句话，点一个按钮，再输入 `/hive`。", components: [row] });
+  const msg = await channel.send({ content: "**agentSwarm R0 实测**：请在下面的线程里回复任意一句话，点一个按钮，再输入 `/agentswarm`。", components: [row] });
   log(`posted a message with buttons (${Date.now() - t0} ms)`);
-  thread = await msg.startThread({ name: "Hive R0 实测线程", autoArchiveDuration: 60 });
+  thread = await msg.startThread({ name: "agentSwarm R0 实测线程", autoArchiveDuration: 60 });
   await thread.send("这是线程里的第一条消息。在这里回复我。");
   log(`started thread ${thread.name}`);
 });
@@ -65,11 +65,11 @@ client.on(Events.InteractionCreate, async (i) => {
   if (i.isButton()) {
     seen.button = { user: i.user.tag, id: i.user.id, choice: i.customId };
     log(`button ${i.customId} by ${i.user.tag} (${i.user.id})`);
-    await i.update({ content: `**Hive R0 实测**：${i.user.username} 选择了「${i.customId === "approve" ? "批准" : "要修改"}」。`, components: [] });
-  } else if (i.isChatInputCommand() && i.commandName === "hive") {
+    await i.update({ content: `**agentSwarm R0 实测**：${i.user.username} 选择了「${i.customId === "approve" ? "批准" : "要修改"}」。`, components: [] });
+  } else if (i.isChatInputCommand() && i.commandName === "agentswarm") {
     seen.slash = { user: i.user.tag, id: i.user.id };
-    log(`/hive by ${i.user.tag} (${i.user.id})`);
-    await i.reply({ content: "Hive R0：机器人在线，斜杠命令可用。", flags: MessageFlags.Ephemeral });
+    log(`/agentswarm by ${i.user.tag} (${i.user.id})`);
+    await i.reply({ content: "agentSwarm R0：机器人在线，斜杠命令可用。", flags: MessageFlags.Ephemeral });
   } else return;
   check();
 });

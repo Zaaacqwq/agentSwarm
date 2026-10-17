@@ -1,29 +1,29 @@
 /** Fixed on-disk layout. Built into ws-exec; never taken from a request. */
 export interface Layout {
-  /** The HiveWS volume (APFS, ownership enabled). */
+  /** The SwarmWS volume (APFS, ownership enabled). */
   readonly volume: string;
   /** Workstation roots: <wsRoot>/<os-user>, owned by that user, mode 0700. */
   readonly wsRoot: string;
-  /** Bare mirrors kept by hived; workstations may read them. */
+  /** Bare mirrors kept by swarmd; workstations may read them. */
   readonly mirrors: string;
-  /** Push inboxes: <inbox>/<os-user>.git, written by that user, read by hived. */
+  /** Push inboxes: <inbox>/<os-user>.git, written by that user, read by swarmd. */
   readonly inbox: string;
-  /** hived's private data; always denied to workstations. */
-  readonly hivedData: string;
-  /** Hive's own Node runtime for agent commands. */
+  /** swarmd's private data; always denied to workstations. */
+  readonly swarmdData: string;
+  /** agentSwarm's own Node runtime for agent commands. */
   readonly nodeBin: string;
-  /** hived's port on loopback; agent commands may not connect to it. */
-  readonly hivedPort: number;
+  /** swarmd's port on loopback; agent commands may not connect to it. */
+  readonly swarmdPort: number;
 }
 
 export const PRODUCTION_LAYOUT: Layout = {
-  volume: "/Volumes/HiveWS",
-  wsRoot: "/Volumes/HiveWS/ws",
-  mirrors: "/Volumes/HiveWS/mirrors",
-  inbox: "/Volumes/HiveWS/inbox",
-  hivedData: "/Volumes/HiveWS/hived",
-  nodeBin: "/usr/local/libexec/hive/node/bin",
-  hivedPort: 4318,
+  volume: "/Volumes/SwarmWS",
+  wsRoot: "/Volumes/SwarmWS/ws",
+  mirrors: "/Volumes/SwarmWS/mirrors",
+  inbox: "/Volumes/SwarmWS/inbox",
+  swarmdData: "/Volumes/SwarmWS/swarmd",
+  nodeBin: "/usr/local/libexec/agentswarm/node/bin",
+  swarmdPort: 4318,
 };
 
 export const WS_USER_PATTERN = /^ws-[0-9]{1,2}$/;

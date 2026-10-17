@@ -12,7 +12,7 @@ export type Request =
   | { op: "git.commit"; scope: string; message: string }
   | { op: "git.pushInbox"; scope: string; branch: string }
   | { op: "git.remove"; scope: string }
-  /** Kill every process of this workstation user: the run ended, was cancelled, or hived restarted. */
+  /** Kill every process of this workstation user: the run ended, was cancelled, or swarmd restarted. */
   | { op: "reap" };
 
 export type Op = Request["op"];

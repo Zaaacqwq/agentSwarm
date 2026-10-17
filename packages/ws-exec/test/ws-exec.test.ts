@@ -65,25 +65,25 @@ describe("files", () => {
 describe("commands (sandboxed)", () => {
   test("run in the scope with a clean environment", async () => {
     const f = fixture();
-    process.env.HIVE_TEST_SECRET = "leak-me";
+    process.env.SWARM_TEST_SECRET = "leak-me";
     try {
       mkdirSync(join(f.env.root, "work"));
-      const r = await call<{ exitCode: number; output: string }>(f.env, { op: "exec", scope: "work", command: "pwd; echo \"secret=${HIVE_TEST_SECRET:-none}\"; echo $HOME" });
+      const r = await call<{ exitCode: number; output: string }>(f.env, { op: "exec", scope: "work", command: "pwd; echo \"secret=${SWARM_TEST_SECRET:-none}\"; echo $HOME" });
       assert.equal(r.exitCode, 0);
       assert.match(r.output, /\/ws\/ws-1\/work\n/);
       assert.match(r.output, /secret=none/);
       assert.match(r.output, new RegExp(`${f.env.home}\\n`));
     } finally {
-      delete process.env.HIVE_TEST_SECRET;
+      delete process.env.SWARM_TEST_SECRET;
       f.cleanup();
     }
   });
 
-  test("cannot read another workstation, hived data or the user's home", async () => {
+  test("cannot read another workstation, swarmd data or the user's home", async () => {
     const f = fixture();
     try {
       mkdirSync(join(f.env.root, "work"));
-      for (const target of [join(f.other, "secret.txt"), join(f.layout.hivedData, "master.key"), join(process.env.HOME ?? "/Users/nobody", ".zshrc")]) {
+      for (const target of [join(f.other, "secret.txt"), join(f.layout.swarmdData, "master.key"), join(process.env.HOME ?? "/Users/nobody", ".zshrc")]) {
         const r = await call<{ exitCode: number; output: string }>(f.env, { op: "exec", scope: "work", command: `cat ${JSON.stringify(target)}` });
         assert.notEqual(r.exitCode, 0, `read ${target}`);
         assert.match(r.output, /Operation not permitted|No such file/);
@@ -125,30 +125,30 @@ describe("git (sandboxed)", () => {
     const f = fixture();
     try {
       const scope = "worktrees/demo/fix";
-      const cloned = await call<{ head: string }>(f.env, { op: "git.clone", scope, mirror: "demo.git", branch: "hive/demo/fix-readme", base: "main" });
+      const cloned = await call<{ head: string }>(f.env, { op: "git.clone", scope, mirror: "demo.git", branch: "swarm/demo/fix-readme", base: "main" });
       assert.match(cloned.head, /^[0-9a-f]{40}$/);
       writeFileSync(join(f.env.root, scope, "README.md"), "hello world\n");
       const committed = await call<{ head: string }>(f.env, { op: "git.commit", scope, message: "Fix README" });
       assert.ok(committed.head);
       await assert.rejects(call(f.env, { op: "git.commit", scope, message: "again" }), { code: "conflict" });
-      const pushed = await call<{ inbox: string; head: string }>(f.env, { op: "git.pushInbox", scope, branch: "hive/demo/fix-readme" });
+      const pushed = await call<{ inbox: string; head: string }>(f.env, { op: "git.pushInbox", scope, branch: "swarm/demo/fix-readme" });
       assert.equal(pushed.inbox, join(f.layout.inbox, "ws-1.git"));
       const status = await call<{ status: string }>(f.env, { op: "git.status", scope });
-      assert.match(status.status, /hive\/demo\/fix-readme/);
+      assert.match(status.status, /swarm\/demo\/fix-readme/);
     } finally {
       f.cleanup();
     }
   });
 
-  test("branch names follow hive/<project>/<part>", () => {
-    for (const ok of ["hive/demo/fix", "hive/demo/login/oauth", "hive/my-app/part-1/sub-2/leaf"]) assert.ok(BRANCH_PATTERN.test(ok), ok);
-    for (const bad of ["main", "hive/demo", "hive/Demo/fix", "hive/demo/../x", "hive/demo/a.lock", "hive/demo/a/b/c/d/e/f", "feature/x"]) assert.ok(!BRANCH_PATTERN.test(bad), bad);
+  test("branch names follow swarm/<project>/<part>", () => {
+    for (const ok of ["swarm/demo/fix", "swarm/demo/login/oauth", "swarm/my-app/part-1/sub-2/leaf"]) assert.ok(BRANCH_PATTERN.test(ok), ok);
+    for (const bad of ["main", "swarm/demo", "swarm/Demo/fix", "swarm/demo/../x", "swarm/demo/a.lock", "swarm/demo/a/b/c/d/e/f", "feature/x"]) assert.ok(!BRANCH_PATTERN.test(bad), bad);
   });
 });
 
 describe("identity and profile", () => {
   test("parses id -P and rejects junk", () => {
-    assert.deepEqual(parsePasswdLine("ws-1:********:503:501::0:0:Hive 1:/Users/ws-1:/usr/bin/false\n"), { username: "ws-1", uid: 503, home: "/Users/ws-1" });
+    assert.deepEqual(parsePasswdLine("ws-1:********:503:501::0:0:agentSwarm 1:/Users/ws-1:/usr/bin/false\n"), { username: "ws-1", uid: 503, home: "/Users/ws-1" });
     assert.throws(() => parsePasswdLine("ws-1:*:x:501::0:0:g:/Users/ws-1:/bin/sh"));
   });
 

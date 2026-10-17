@@ -6,11 +6,11 @@ import { resolveScope } from "../paths.ts";
 import { runProcess } from "../process.ts";
 import { sandboxed } from "../sandbox.ts";
 
-/** hive/<project>/<part>[/<sub-part>...]: one segment per level of the agent tree (R2). */
-export const BRANCH_PATTERN = /^hive\/[a-z0-9][a-z0-9-]{0,39}(\/[a-z0-9][a-z0-9-]{0,59}){1,4}$/;
+/** swarm/<project>/<part>[/<sub-part>...]: one segment per level of the agent tree (R2). */
+export const BRANCH_PATTERN = /^swarm\/[a-z0-9][a-z0-9-]{0,39}(\/[a-z0-9][a-z0-9-]{0,59}){1,4}$/;
 const BASE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._\/-]{0,99}$/;
 const WORKTREE_SCOPE = /^worktrees\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
-const AUTHOR = { name: "Hive Agent", email: "agent@hive.local" };
+const AUTHOR = { name: "agentSwarm Agent", email: "agent@agentswarm.local" };
 
 async function git(env: ExecEnv, cwd: string, args: string[], stdin?: string, timeoutMs = 120_000, scope?: string) {
   return runProcess(env, sandboxed(env, ["/usr/bin/git", ...args], scope), { cwd, timeoutMs, ...(stdin !== undefined ? { stdin } : {}) });
@@ -27,7 +27,7 @@ function inboxPath(env: ExecEnv): string {
 
 export async function clone(env: ExecEnv, scope: string, mirror: string, branch: string, base: string, author = AUTHOR) {
   if (!WORKTREE_SCOPE.test(scope)) throw new OpError("bad_request", "Worktrees live at worktrees/<repo>/<name>");
-  if (!BRANCH_PATTERN.test(branch)) throw new OpError("bad_request", `Branch must look like hive/<project>/<part>: ${branch}`);
+  if (!BRANCH_PATTERN.test(branch)) throw new OpError("bad_request", `Branch must look like swarm/<project>/<part>: ${branch}`);
   if (!BASE_PATTERN.test(base) || base.includes("..")) throw new OpError("bad_request", "Invalid base branch");
   const mirrorPath = checkMirror(env, mirror);
   const parent = join(env.root, dirname(scope));
@@ -75,7 +75,7 @@ export async function commit(env: ExecEnv, scope: string, message: string) {
   return { head };
 }
 
-/** Pushes HEAD to this workstation's private inbox; hived's Git Relay takes it from there. */
+/** Pushes HEAD to this workstation's private inbox; swarmd's Git Relay takes it from there. */
 export async function pushInbox(env: ExecEnv, scope: string, branch: string) {
   if (!BRANCH_PATTERN.test(branch)) throw new OpError("bad_request", "Invalid branch");
   const dir = worktreeDir(env, scope);
