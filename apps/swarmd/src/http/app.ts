@@ -4,12 +4,13 @@ import cookie from "@fastify/cookie";
 import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import {
-  CreateAgent, CreateEndpoint, CreateMission, CreateProject, CreateRun, Credentials, MissionBudget, MissionReply, RunMessage, SetCli, SetDiscord, SetLinear, SetGitHubToken, SetProjectProfile, PutProjectFile, CreateLocalProject, MachineSettings, type Me,
+  CreateAgent, CreateEndpoint, CreateMission, CreateProject, CreateRun, Credentials, MissionBudget, MissionReply, RunMessage, SetCli, SetDiscord, SetLinear, SetGitHubToken, SetProjectProfile, PutProjectFile, CreateLocalProject, MachineSettings, CreateTicket, UpdateTicket, MoveTicket, TicketSettings, PromoteTicket, type Me,
 } from "@agentswarm/contracts";
 import type { Services } from "../app/services.ts";
 import { RateLimiter } from "../auth/rate-limit.ts";
 import { SESSION_TTL_MS } from "../auth/auth-service.ts";
-import { HttpError, forbidden, unauthorized } from "../errors.ts";
+import { HttpError, badRequest, forbidden, unauthorized } from "../errors.ts";
+import { MAX_UPLOAD_BYTES } from "../tickets/attachments.ts";
 import { systemCheck, type CheckOptions } from "../system/system-check.ts";
 
 export const SESSION_COOKIE = "swarm_session";
@@ -46,6 +47,8 @@ function sameSite(origin: string, hosts: ReadonlySet<string>): boolean {
 export async function buildApp(o: AppOptions): Promise<FastifyInstance> {
   const s = o.services;
   const app = Fastify({ logger: o.logger ?? false, bodyLimit: 1024 * 1024, trustProxy: false });
+  // Ticket pictures arrive as raw bytes (R7); only that route accepts a body this large.
+  app.addContentTypeParser(["image/jpeg", "image/png", "image/heic", "image/heif", "application/octet-stream"], { parseAs: "buffer" }, (_req, body, done) => done(null, body));
   await app.register(cookie);
   await app.register(websocket);
   app.decorateRequest("me", null);
@@ -66,7 +69,10 @@ export async function buildApp(o: AppOptions): Promise<FastifyInstance> {
     if (origin && !sameSite(origin, hosts)) throw forbidden("Cross-origin request refused");
     // CSRF: state changes must be JSON (forms cannot send JSON cross-site).
     if (req.method !== "GET" && req.method !== "HEAD") {
-      if (req.headers["content-length"] !== "0" && req.headers["content-length"] !== undefined && !String(req.headers["content-type"] ?? "").startsWith("application/json")) {
+      const type = String(req.headers["content-type"] ?? "");
+      // A ticket's picture is sent as itself: a type no form can send, and that a cross-site fetch would have to preflight.
+      const picture = /^\/api\/tickets\/[^/]+\/attachments(\?|$)/.test(req.url) && /^(image\/(jpeg|png|heic|heif)|application\/octet-stream)$/.test(type);
+      if (req.headers["content-length"] !== "0" && req.headers["content-length"] !== undefined && !type.startsWith("application/json") && !picture) {
         throw new HttpError(415, "Send JSON");
       }
     }
@@ -175,6 +181,30 @@ export async function buildApp(o: AppOptions): Promise<FastifyInstance> {
   app.post<{ Params: { id: string } }>("/api/runs/:id/cancel", async (req) => s.runs.cancel(actor(req), req.params.id));
 
   // ---- missions -----------------------------------------------------------------------------
+  // ---- the board (R7) ----
+  app.get("/api/tickets", async () => s.tickets.list());
+  app.post<{ Body: CreateTicket }>("/api/tickets", { schema: { body: CreateTicket } }, async (req) => s.tickets.create(actor(req), req.body));
+  app.get("/api/tickets/settings", async () => s.tickets.settings());
+  app.put<{ Body: TicketSettings }>("/api/tickets/settings", { schema: { body: TicketSettings } }, async (req) => s.tickets.setSettings(actor(req), req.body));
+  app.get<{ Params: { key: string } }>("/api/tickets/:key", async (req) => s.tickets.view(req.params.key));
+  app.patch<{ Params: { key: string }; Body: UpdateTicket }>("/api/tickets/:key", { schema: { body: UpdateTicket } }, async (req) => s.tickets.update(actor(req), req.params.key, req.body));
+  app.post<{ Params: { key: string }; Body: MoveTicket }>("/api/tickets/:key/move", { schema: { body: MoveTicket } }, async (req) => s.tickets.move(actor(req), req.params.key, req.body));
+  app.delete<{ Params: { key: string } }>("/api/tickets/:key", async (req, reply) => {
+    s.tickets.remove(actor(req), req.params.key);
+    return reply.code(204).send();
+  });
+  app.get<{ Params: { key: string } }>("/api/tickets/:key/events", async (req) => s.tickets.events(req.params.key));
+  app.post<{ Params: { key: string }; Body: PromoteTicket }>("/api/tickets/:key/promote", { schema: { body: PromoteTicket } }, async (req) => s.tickets.promote(actor(req), req.params.key, req.body.repo ?? null));
+  // Pictures: the raw image as the body (the browser's type and the name are not trusted; the bytes are checked).
+  app.post<{ Params: { key: string }; Querystring: { name?: string }; Body: Buffer }>("/api/tickets/:key/attachments", { bodyLimit: MAX_UPLOAD_BYTES + 1024 }, async (req) => {
+    if (!Buffer.isBuffer(req.body)) throw badRequest("Send the picture itself as the body");
+    return s.tickets.attach(actor(req), req.params.key, String(req.query.name ?? "picture"), req.body);
+  });
+  app.get<{ Params: { key: string; id: string } }>("/api/tickets/:key/attachments/:id", async (req, reply) => {
+    const t = s.tickets.row(req.params.key);
+    return reply.type("image/jpeg").header("x-content-type-options", "nosniff").header("cache-control", "private, max-age=86400").send(s.tickets.picture(t.id, req.params.id));
+  });
+  app.delete<{ Params: { key: string; id: string } }>("/api/tickets/:key/attachments/:id", async (req) => s.tickets.detach(actor(req), req.params.key, req.params.id));
   app.get("/api/missions", async () => s.missions.list());
   app.post<{ Body: CreateMission }>("/api/missions", { schema: { body: CreateMission } }, async (req) => s.missions.create(actor(req), req.body, "dashboard"));
   app.get<{ Params: { id: string } }>("/api/missions/:id", async (req) => s.missions.view(req.params.id));

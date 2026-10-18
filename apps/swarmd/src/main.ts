@@ -38,6 +38,7 @@ async function main(): Promise<void> {
     maxConcurrentRuns: config.maxConcurrentRuns,
     heavySlots: config.heavySlots,
     screensDir: join(config.dataDir, "screens"),
+    attachmentsDir: join(config.dataDir, "attachments"),
     log,
     transport: new DiscordJsTransport(),
     linearPort: config.linearPort,
@@ -54,6 +55,7 @@ async function main(): Promise<void> {
   // Installed CLI versions and Codex sign-ins (R4); failures only show in the dashboard.
   void services.cli.refresh().catch(() => undefined);
   services.runs.recover();
+  services.tickets.recover();
   services.auth.pruneExpired();
   // Screenshots shown in the dashboard (R6) are kept for a month after their run ended.
   const pruneScreens = () => services.runs.pruneScreens(SCREENS_KEPT_MS);

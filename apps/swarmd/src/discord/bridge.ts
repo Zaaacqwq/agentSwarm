@@ -217,6 +217,8 @@ export class DiscordBridge {
     const m = this.deps.missions.row(message.missionId);
     // Linear missions talk in their ticket (R5): Discord only says when the person is needed.
     if (m.origin === "linear") return this.notify(message, m);
+    // Board tickets (R7) talk on the dashboard; the ticket service sends its own notes (notifyTicket).
+    if (m.origin === "ticket") return this.deps.missions.markDelivered(message.id, "ticket");
     // The idea itself opens the thread.
     if (message.author === "user" && message.text === m.intent && message.createdAt === m.createdAt) {
       this.deps.missions.markDelivered(message.id, await this.ensureThread(m.id));
@@ -355,6 +357,15 @@ export class DiscordBridge {
       id = await this.deps.transport.send(s.channelId, { content: `**${m.title}** ${what}.${link ? ` ${link}` : ""}` });
     }
     this.deps.missions.markDelivered(message.id, id);
+  }
+
+  /** One line to the channel about a board ticket (R7), with a link to it on the dashboard. */
+  notifyTicket(ticket: { key: string; title: string }, what: string): void {
+    const s = this.stored();
+    if (!s || !this.connected) return;
+    const link = `${this.deps.dashboardUrl.replace(/\/$/, "")}/tickets/${ticket.key}`;
+    this.deps.transport.send(s.channelId, { content: `**${ticket.key}** ${ticket.title.slice(0, 120)} ${what}. ${link}` })
+      .catch((e: Error) => this.deps.log("discord ticket note failed", { ticket: ticket.key, error: e.message }));
   }
 
   private stored(): Stored | null {

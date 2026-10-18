@@ -14,11 +14,11 @@ import type { ProjectService } from "../projects/project-service.ts";
 import type { AgentService } from "../agents/agent-service.ts";
 import { TERMINAL, TreeError, type TreeService } from "../agents/tree-service.ts";
 import type { TreeCleanup } from "../agents/cleanup.ts";
-import { WAIT_FOR_USER, type RunBinding, type RunHooks, type RunRow, type RunService } from "../agents/run-service.ts";
+import { WAIT_FOR_USER, type RunBinding, type RunHooks, type RunOpening, type RunRow, type RunService } from "../agents/run-service.ts";
 import { pageWindow, type WebAccess } from "../web/web-access.ts";
 import { FetchError } from "../web/web-fetch.ts";
 import { MISSION_FINISH, changesBrief, intakeBrief, missionPromptSection, stageBrief, type BriefContext } from "./briefs.ts";
-import { missionTools, webTools, type WebToolOps } from "./mission-tools.ts";
+import { fileTicketTool, missionTools, webTools, type WebToolOps } from "./mission-tools.ts";
 import { ENDED, GATES, STAGE_LABEL, WORKING, afterStageDone, canMove, requiredDocs, stageTools, DOC_NAMES, type Actor, type Flow } from "./stages.ts";
 
 export type MissionRow = typeof schema.missions.$inferSelect;
@@ -67,6 +67,25 @@ function fenced(text: string): string {
  */
 export class MissionService implements RunHooks {
   private readonly deps: MissionDeps;
+
+  private openingSource: ((m: MissionRow) => Promise<RunOpening | null>) | null = null;
+  private ticketFiler: ((m: MissionRow, agent: string, input: { title: string; description: string; kind: "feature" | "bug" | "research" }) => string) | null = null;
+
+  /** R7: lets a ticket's lead put follow-ups in the backlog (file_ticket). */
+  onFileTicket(filer: NonNullable<MissionService["ticketFiler"]>): void {
+    this.ticketFiler = filer;
+  }
+
+  /** R7: where a mission's lead gets what came with the request (a ticket's pictures). */
+  onOpening(source: (m: MissionRow) => Promise<RunOpening | null>): void {
+    this.openingSource = source;
+  }
+
+  async opening(run: RunRow): Promise<RunOpening | null> {
+    const m = this.missionOf(run);
+    if (!m || run.id !== m.rootRunId || !this.openingSource) return null;
+    return this.openingSource(m);
+  }
 
   constructor(deps: MissionDeps) {
     this.deps = deps;
@@ -319,7 +338,9 @@ export class MissionService implements RunHooks {
       stageDone: (summary: string) => this.finishStage(m.id, summary, false),
       requestApproval: (summary: string) => this.finishStage(m.id, summary, true),
     };
-    return { keep, add: [...missionTools(ops, t), ...(t.web ? webTools(this.webOps(run, binding)) : [])] };
+    const filer = this.ticketFiler;
+    const file = m.origin === "ticket" && filer ? [fileTicketTool((input) => filer(m, this.deps.agents.get(run.agentId).name, input))] : [];
+    return { keep, add: [...missionTools(ops, t), ...(t.web ? webTools(this.webOps(run, binding)) : []), ...file] };
   }
 
   ended(run: RunRow): void {

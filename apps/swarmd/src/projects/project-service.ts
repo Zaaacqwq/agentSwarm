@@ -32,6 +32,17 @@ const SEGMENT = /^[A-Za-z0-9._@+ -]{1,100}$/;
  * A project file path: relative, segments of safe characters, no "." / ".." / empty segments, and no
  * ".git" segment in any case (APFS is case-insensitive). The same rule as ws-exec's projectFilePath.
  */
+/** Prefixes of tickets that have no project of their own yet (R7). */
+export const RESERVED_PREFIXES = new Set(["SBX", "IDEA"]);
+
+/** A project's ticket prefix: the one set, else its name's first letters (Fridgy → FRI). */
+export function ticketPrefixOf(row: { ticketPrefix: string | null; name: string }): string {
+  if (row.ticketPrefix) return row.ticketPrefix;
+  const letters = row.name.toUpperCase().replace(/[^A-Z0-9]/g, "").replace(/^[0-9]+/, "");
+  const prefix = (letters || "P").slice(0, 3);
+  return RESERVED_PREFIXES.has(prefix) ? `${prefix}P` : prefix;
+}
+
 export function projectFilePath(path: string): string | null {
   if (path.length < 1 || path.length > 200) return null;
   const parts = path.split("/");
@@ -93,7 +104,7 @@ export class ProjectService {
     }
     const row: ProjectRow = {
       id: newId("prj"), slug, name, githubRepo: `local/${slug}`, remoteUrl: "", defaultBranch: "main", mirrorPath,
-      protectedAt: null, lastFetchedAt: now, createdAt: now, kind: "local", profile: null, linearProjectId: null,
+      protectedAt: null, lastFetchedAt: now, createdAt: now, kind: "local", profile: null, linearProjectId: null, ticketPrefix: null,
     };
     db.insert(schema.projects).values(row).run();
     audit(db, actor, "project.create_local", row.id, { name }, now);
@@ -106,8 +117,15 @@ export class ProjectService {
       const other = this.byLinearProject(input.linearProjectId);
       if (other && other.id !== id) throw conflict(`That Linear project already goes to ${other.name}`);
     }
-    this.deps.db.update(schema.projects).set({ profile: input.profile, ...(input.linearProjectId !== undefined ? { linearProjectId: input.linearProjectId } : {}) })
-      .where(eq(schema.projects.id, id)).run();
+    if (input.ticketPrefix) {
+      const taken = this.list().find((p) => p.id !== id && p.ticketPrefix === input.ticketPrefix);
+      if (taken || RESERVED_PREFIXES.has(input.ticketPrefix)) throw conflict(`The ticket prefix ${input.ticketPrefix} is already used${taken ? ` by ${taken.name}` : ""}`);
+    }
+    this.deps.db.update(schema.projects).set({
+      profile: input.profile,
+      ...(input.linearProjectId !== undefined ? { linearProjectId: input.linearProjectId } : {}),
+      ...(input.ticketPrefix !== undefined ? { ticketPrefix: input.ticketPrefix } : {}),
+    }).where(eq(schema.projects.id, id)).run();
     audit(this.deps.db, actor, "project.profile", id, { linearProjectId: input.linearProjectId ?? null }, now);
     return this.view(id);
   }
@@ -166,7 +184,7 @@ export class ProjectService {
     return {
       id: row.id, slug: row.slug, name: row.name, githubRepo: row.githubRepo, defaultBranch: row.defaultBranch,
       protectedAt: row.protectedAt, lastFetchedAt: row.lastFetchedAt, createdAt: row.createdAt,
-      kind: row.kind, profile: row.profile ?? {}, linearProjectId: row.linearProjectId,
+      kind: row.kind, profile: row.profile ?? {}, linearProjectId: row.linearProjectId, ticketPrefix: ticketPrefixOf(row),
       files: this.fileRows(row.id).map((f) => ({ path: f.path, updatedAt: f.updatedAt })),
     };
   }
@@ -194,7 +212,7 @@ export class ProjectService {
     const row: ProjectRow = {
       id: newId("prj"), slug, name: input.name ?? info.fullName.split("/")[1] ?? slug, githubRepo: info.fullName, remoteUrl,
       defaultBranch: info.defaultBranch, mirrorPath, protectedAt: null, lastFetchedAt: now, createdAt: now,
-      kind: "github", profile: null, linearProjectId: null,
+      kind: "github", profile: null, linearProjectId: null, ticketPrefix: null,
     };
     db.insert(schema.projects).values(row).run();
     audit(db, actor, "project.create", row.id, { repo: row.githubRepo }, now);

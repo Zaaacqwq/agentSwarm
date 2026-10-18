@@ -53,7 +53,7 @@ export interface Harness {
   pending(): number;
   /** Signs in (running first-time setup) and returns a cookie header. */
   login(): Promise<string>;
-  api<T = any>(method: "GET" | "POST" | "PUT" | "DELETE", url: string, body?: unknown, cookie?: string): Promise<{ status: number; body: T }>;
+  api<T = any>(method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE", url: string, body?: unknown, cookie?: string): Promise<{ status: number; body: T }>;
   /** Token, project, endpoint and one agent, ready to run. */
   ready(): Promise<{ cookie: string; projectId: string; agentId: string }>;
   remoteBranches(): string[];
@@ -153,6 +153,7 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
     layout,
     maxConcurrentRuns: opts.maxConcurrentRuns ?? 2,
     screensDir: join(base, "screens"),
+    attachmentsDir: join(base, "attachments"),
     ...(opts.heavySlots ? { heavySlots: opts.heavySlots } : {}),
     ...(opts.memoryPressure ? { memoryPressure: opts.memoryPressure } : {}),
     log: () => {},

@@ -75,6 +75,8 @@ export interface ProjectView {
   readonly kind: "github" | "local";
   readonly profile: ProjectProfile;
   readonly linearProjectId: string | null;
+  /** R7: its tickets' ids start with this, e.g. FRI. */
+  readonly ticketPrefix: string;
   /** Paths of the local files (not their contents) written into every worktree. */
   readonly files: readonly { readonly path: string; readonly updatedAt: number }[];
 }
@@ -105,6 +107,7 @@ export type ProjectProfile = Static<typeof ProjectProfile>;
 export const SetProjectProfile = Type.Object({
   profile: ProjectProfile,
   linearProjectId: Type.Optional(Type.Union([Type.String({ minLength: 1, maxLength: 64 }), Type.Null()])),
+  ticketPrefix: Type.Optional(Type.String({ pattern: "^[A-Z][A-Z0-9]{0,5}$" })),
 });
 export type SetProjectProfile = Static<typeof SetProjectProfile>;
 
@@ -336,7 +339,7 @@ export interface MissionView {
   readonly updatedAt: number;
   readonly endedAt: number | null;
   readonly kind: MissionKind;
-  readonly origin: "dashboard" | "discord" | "linear";
+  readonly origin: "dashboard" | "discord" | "linear" | "ticket";
   /** The Linear ticket it came from. */
   readonly linear: { readonly key: string; readonly url: string } | null;
 }
@@ -377,7 +380,8 @@ export type LiveMessage =
   | { readonly kind: "workstation"; readonly workstation: WorkstationView }
   | { readonly kind: "cli"; readonly cli: CliStatusView }
   | { readonly kind: "mission"; readonly mission: MissionView }
-  | { readonly kind: "mission_message"; readonly message: MissionMessageView };
+  | { readonly kind: "mission_message"; readonly message: MissionMessageView }
+  | { readonly kind: "ticket"; readonly ticket: TicketView };
 
 // ---- CLI workers (R4) --------------------------------------------------------------------
 export type AgentRuntime = "native" | "claude_code" | "codex";
@@ -489,3 +493,110 @@ export interface CheckItem {
   readonly ok: boolean;
   readonly detail: string;
 }
+
+// ---- the board (R7) ----------------------------------------------------------------------------
+/** Backlog and todo are yours; in progress, needs you and done follow the ticket's mission. */
+export type TicketStatus = "backlog" | "todo" | "in_progress" | "needs_you" | "done" | "canceled";
+export const TICKET_STATUSES: readonly TicketStatus[] = ["backlog", "todo", "in_progress", "needs_you", "done", "canceled"];
+/** A registered project, a fresh local sandbox (experiments), or an idea with no repository yet. */
+export type TicketSpace = "project" | "sandbox" | "ideas";
+/** What the ticket waits for you to do, when it does. */
+export type TicketNeed = "answer" | "approve" | "merge" | "failed";
+
+export interface TicketAttachmentView {
+  readonly id: string;
+  readonly name: string;
+  readonly width: number;
+  readonly height: number;
+  readonly bytes: number;
+  readonly url: string;
+}
+
+export interface TicketView {
+  readonly id: string;
+  /** e.g. FRI-12 */
+  readonly key: string;
+  readonly space: TicketSpace;
+  readonly projectId: string | null;
+  readonly projectName: string | null;
+  readonly githubRepo: string | null;
+  readonly title: string;
+  readonly description: string;
+  readonly kind: MissionKind;
+  /** 0 none, 1 urgent, 2 high, 3 medium, 4 low. */
+  readonly priority: number;
+  readonly status: TicketStatus;
+  readonly position: number;
+  readonly missionId: string | null;
+  readonly createdBy: string;
+  readonly fromTicket: string | null;
+  readonly commitAttachments: boolean;
+  readonly external: { readonly key: string; readonly url: string } | null;
+  readonly attachments: readonly TicketAttachmentView[];
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  readonly startedAt: number | null;
+  readonly endedAt: number | null;
+  /** From its mission, once started. */
+  readonly stage: MissionStage | null;
+  readonly need: TicketNeed | null;
+  readonly costUsd: number;
+  readonly prUrl: string | null;
+  /** Agents of its mission running right now. */
+  readonly working: number;
+  /** Todo tickets: how many are ahead of it. */
+  readonly queuePosition: number | null;
+}
+
+const TicketKindT = Type.Union([Type.Literal("feature"), Type.Literal("bug"), Type.Literal("research"), Type.Literal("experiment")]);
+const TicketSpaceT = Type.Union([Type.Literal("project"), Type.Literal("sandbox"), Type.Literal("ideas")]);
+const PriorityT = Type.Integer({ minimum: 0, maximum: 4 });
+
+export const CreateTicket = Type.Object({
+  space: TicketSpaceT,
+  /** Required for space "project". */
+  projectId: Type.Optional(Type.String({ maxLength: 64 })),
+  title: Type.String({ minLength: 1, maxLength: 200 }),
+  description: Type.String({ maxLength: 8000 }),
+  kind: TicketKindT,
+  priority: Type.Optional(PriorityT),
+  status: Type.Optional(Type.Union([Type.Literal("backlog"), Type.Literal("todo")])),
+  commitAttachments: Type.Optional(Type.Boolean()),
+});
+export type CreateTicket = Static<typeof CreateTicket>;
+
+/** Only before it starts: after that, add to it by talking to its lead. */
+export const UpdateTicket = Type.Object({
+  title: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
+  description: Type.Optional(Type.String({ maxLength: 8000 })),
+  kind: Type.Optional(TicketKindT),
+  priority: Type.Optional(PriorityT),
+  space: Type.Optional(TicketSpaceT),
+  projectId: Type.Optional(Type.Union([Type.String({ maxLength: 64 }), Type.Null()])),
+  commitAttachments: Type.Optional(Type.Boolean()),
+});
+export type UpdateTicket = Static<typeof UpdateTicket>;
+
+/** Where you put it: a column you own (backlog, todo, canceled) and, for the order, its neighbours there. */
+export const MoveTicket = Type.Object({
+  status: Type.Union([Type.Literal("backlog"), Type.Literal("todo"), Type.Literal("canceled")]),
+  after: Type.Optional(Type.Union([Type.String({ maxLength: 64 }), Type.Null()])),
+  before: Type.Optional(Type.Union([Type.String({ maxLength: 64 }), Type.Null()])),
+});
+export type MoveTicket = Static<typeof MoveTicket>;
+
+export interface TicketEventView {
+  readonly id: number;
+  readonly ticketId: string;
+  readonly actor: string;
+  readonly kind: "created" | "edited" | "status" | "started" | "ended" | "attachment" | "promoted";
+  readonly data: Record<string, unknown>;
+  readonly createdAt: number;
+}
+
+/** 立项: a research or experiment ticket becomes a project. repo: an existing empty one to use (owner/name). */
+export const PromoteTicket = Type.Object({ repo: Type.Optional(Type.String({ pattern: "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", maxLength: 140 })) });
+export type PromoteTicket = Static<typeof PromoteTicket>;
+
+export const TicketSettings = Type.Object({ maxActive: Type.Integer({ minimum: 1, maximum: 8 }) });
+export type TicketSettings = Static<typeof TicketSettings>;

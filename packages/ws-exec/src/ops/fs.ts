@@ -40,15 +40,17 @@ export function read(env: ExecEnv, scope: string, path: string, offset = 1, limi
   return { path, fromLine: from, totalLines: lines.length, content: slice.join("\n"), truncated: from - 1 + limit < lines.length };
 }
 
-export function write(env: ExecEnv, scope: string, path: string, content: string) {
-  if (Buffer.byteLength(content) > MAX_WRITE_BYTES) throw new OpError("bad_request", "Content too large");
+export function write(env: ExecEnv, scope: string, path: string, content: string, encoding: "utf8" | "base64" = "utf8") {
+  // base64 carries binary files (R7: the pictures attached to a ticket).
+  const data = encoding === "base64" ? Buffer.from(content, "base64") : Buffer.from(content, "utf8");
+  if (data.byteLength > MAX_WRITE_BYTES) throw new OpError("bad_request", "Content too large");
   const scopeDir = resolveScope(env.root, scope);
   mkdirSync(scopeDir, { recursive: true, mode: 0o700 });
   const file = resolveInScope(scopeDir, path);
   if (isGitInternal(env, scope, file)) throw new OpError("out_of_scope", "Writing inside .git is not allowed");
   mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, content);
-  return { path, bytes: Buffer.byteLength(content) };
+  writeFileSync(file, data);
+  return { path, bytes: data.byteLength };
 }
 
 export function edit(env: ExecEnv, scope: string, path: string, oldText: string, newText: string, replaceAll = false) {

@@ -43,6 +43,11 @@ export interface RunBinding {
   addCost(usd: number): void;
 }
 
+export interface RunOpening {
+  readonly files: readonly { readonly path: string; readonly base64: string }[];
+  readonly images: readonly { readonly data: string; readonly mimeType: string }[];
+}
+
 /** Missions extend runs through these; RunService knows nothing else about them. */
 export interface RunHooks {
   /** Tools to add, and which standard tools to keep (default: all). */
@@ -51,6 +56,11 @@ export interface RunHooks {
   prompt(run: RunRow): { section: string[]; finish: string } | null;
   /** An execution ended: the run finished, failed, was cancelled, or is waiting. */
   ended(run: RunRow): void;
+  /**
+   * R7: what a run gets on its very first execution besides its brief: files written into its worktree
+   * (a ticket's pictures, base64) and images in its first message.
+   */
+  opening?(run: RunRow): Promise<RunOpening | null>;
   /** The pull request a root opens: what the extension adds (a Linear ticket key, "Fixes ZAC-42"). */
   pullRequest?(run: RunRow, title: string, body: string): { title: string; body: string };
 }
@@ -438,6 +448,10 @@ export class RunService {
       await backend.call(ws, { op: "git.clone", scope: run.worktreeScope, mirror: basename(project.mirrorPath), branch: run.branch, base, files: await projects.files(project.id) }, { signal });
       bus.runEvent(runId, "status", { status: "worktree", branch: run.branch, base });
     }
+    const opening = session || run.kind === "review" ? null : await this.hooks?.opening?.(run) ?? null;
+    for (const f of opening?.files ?? []) {
+      await backend.call(ws, { op: "fs.write", scope: run.worktreeScope, path: f.path, content: f.base64, encoding: "base64" }, { signal });
+    }
 
     const counters = { turns: run.turns, tokensIn: run.tokensIn, tokensOut: run.tokensOut, costUsd: run.costUsd };
     let report: RunReport | null = null;
@@ -509,8 +523,10 @@ export class RunService {
     let lastError: string | null = null;
     try {
       let next: string | undefined = [message, ...active.inbox.splice(0)].join("\n\n");
+      let images = opening?.images.map((i) => ({ type: "image" as const, data: i.data, mimeType: i.mimeType })) ?? [];
       while (next !== undefined && !active.reason) {
-        await agent.prompt(next);
+        await (images.length ? agent.prompt(next, images) : agent.prompt(next));
+        images = [];
         lastError = modelError(agent);
         for (let retry = 1; lastError && !active.reason && retry <= MODEL_RETRIES; retry++) {
           bus.runEvent(runId, "error", { message: `Model request failed (${lastError}); retry ${retry} of ${MODEL_RETRIES}` });

@@ -80,3 +80,19 @@ export function webTools(ops: WebToolOps): AgentTool<any, undefined>[] {
     },
   ];
 }
+
+const FileTicket = Type.Object({
+  title: Type.String({ minLength: 3, maxLength: 200 }),
+  description: Type.String({ minLength: 10, maxLength: 4000, description: "What you found and why it matters; the person decides whether to do it" }),
+  kind: Type.Union([Type.Literal("feature"), Type.Literal("bug"), Type.Literal("research")]),
+});
+
+/** R7: a follow-up the lead noticed goes into the person's backlog; it never starts by itself. */
+export function fileTicketTool(file: (input: { title: string; description: string; kind: "feature" | "bug" | "research" }) => string): AgentTool<typeof FileTicket, undefined> {
+  return {
+    name: "file_ticket", label: "file_ticket", parameters: FileTicket,
+    description: "Write down something worth doing that is outside this ticket (a bug you noticed, a follow-up): it goes into the person's backlog for them to decide. Do not use it for this ticket's own work.",
+    prepareArguments: clipToSchema(FileTicket),
+    execute: async (_id, p) => text(file(p)),
+  };
+}

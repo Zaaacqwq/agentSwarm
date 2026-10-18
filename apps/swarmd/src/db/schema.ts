@@ -66,6 +66,8 @@ export const projects = sqliteTable("projects", {
   profile: json<ProjectProfile>("profile"),
   /** The Linear project whose tickets come here. */
   linearProjectId: text("linear_project_id"),
+  /** R7: ticket ids look like <prefix>-<n>, e.g. FRI-12. */
+  ticketPrefix: text("ticket_prefix"),
 }, (t) => [uniqueIndex("projects_slug_uq").on(t.slug), uniqueIndex("projects_repo_uq").on(t.githubRepo)]);
 
 export interface ProjectProfile {
@@ -260,7 +262,7 @@ export const missions = sqliteTable("missions", {
   /** Which flow it follows (missions/stages.ts). */
   kind: text("kind", { enum: MISSION_KINDS }).notNull().default("feature"),
   /** Where it was started; Linear missions talk in their ticket, Discord only notifies. */
-  origin: text("origin", { enum: ["dashboard", "discord", "linear"] }).notNull().default("dashboard"),
+  origin: text("origin", { enum: ["dashboard", "discord", "linear", "ticket"] }).notNull().default("dashboard"),
 }, (t) => [index("missions_project_idx").on(t.projectId, t.createdAt), index("missions_stage_idx").on(t.stage)]);
 
 export const missionMessages = sqliteTable("mission_messages", {
@@ -319,3 +321,66 @@ export const settings = sqliteTable("settings", {
   secretSealed: text("secret_sealed"),
   updatedAt: integer("updated_at").notNull(),
 });
+
+// ---- R7: the built-in board ------------------------------------------------------------------
+export const TICKET_STATUSES = ["backlog", "todo", "in_progress", "needs_you", "done", "canceled"] as const;
+export type TicketStatus = (typeof TICKET_STATUSES)[number];
+/** Where a ticket's work happens: a registered project, a fresh local sandbox, or an idea with no repository yet. */
+export const TICKET_SPACES = ["project", "sandbox", "ideas"] as const;
+
+/** Your tasks. One becomes a mission when it starts (todo, a free slot); after that the mission drives its status. */
+export const tickets = sqliteTable("tickets", {
+  id: text("id").primaryKey(),
+  prefix: text("prefix").notNull(),
+  number: integer("number").notNull(),
+  space: text("space", { enum: TICKET_SPACES }).notNull(),
+  /** The project it belongs to (space "project"), or the local one made for it when it started. */
+  projectId: text("project_id").references(() => projects.id, { onDelete: "set null" }),
+  title: text("title").notNull(),
+  description: text("description").notNull(),
+  kind: text("kind", { enum: MISSION_KINDS }).notNull(),
+  /** 0 none, 1 urgent, 2 high, 3 medium, 4 low. */
+  priority: integer("priority").notNull().default(0),
+  status: text("status", { enum: TICKET_STATUSES }).notNull(),
+  /** Manual order within a status: smallest first. */
+  position: real("position").notNull(),
+  missionId: text("mission_id"),
+  /** "you", or the agent that filed it from another ticket. */
+  createdBy: text("created_by").notNull(),
+  fromTicketId: text("from_ticket_id"),
+  /** Attachments go into the repository (docs/agentswarm/<task>/request/) when it starts. */
+  commitAttachments: integer("commit_attachments", { mode: "boolean" }).notNull().default(true),
+  /** Imported from elsewhere (Linear): its old id and link. */
+  external: json<{ key: string; url: string }>("external"),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+  startedAt: integer("started_at"),
+  endedAt: integer("ended_at"),
+}, (t) => [
+  uniqueIndex("tickets_key_uq").on(t.prefix, t.number),
+  index("tickets_status_idx").on(t.status, t.position),
+  uniqueIndex("tickets_mission_uq").on(t.missionId),
+]);
+
+/** What happened to a ticket and who did it: created, edited, moved, started, ended. */
+export const ticketEvents = sqliteTable("ticket_events", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  ticketId: text("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+  actor: text("actor").notNull(),
+  kind: text("kind", { enum: ["created", "edited", "status", "started", "ended", "attachment", "promoted"] }).notNull(),
+  data: json<Record<string, unknown>>("data").notNull(),
+  createdAt: integer("created_at").notNull(),
+}, (t) => [index("ticket_events_ticket_idx").on(t.ticketId, t.id)]);
+
+/** Pictures you attach (a bug's screenshot): kept in swarmd's data, given to the lead when the ticket starts. */
+export const ticketAttachments = sqliteTable("ticket_attachments", {
+  id: text("id").primaryKey(),
+  ticketId: text("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  /** The stored file under <data>/attachments/<ticket>/ (always a JPEG). */
+  file: text("file").notNull(),
+  bytes: integer("bytes").notNull(),
+  width: integer("width").notNull(),
+  height: integer("height").notNull(),
+  createdAt: integer("created_at").notNull(),
+}, (t) => [index("ticket_attachments_ticket_idx").on(t.ticketId)]);
