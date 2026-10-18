@@ -74,9 +74,7 @@ export class ProjectService {
     return this.toView(this.get(id));
   }
 
-  byLinearProject(linearProjectId: string): ProjectRow | null {
-    return this.deps.db.select().from(schema.projects).where(eq(schema.projects.linearProjectId, linearProjectId)).get() ?? null;
-  }
+
 
   /**
    * A project that lives only on this Mac (R5): a sandbox experiment or an idea. Its mirror starts with
@@ -104,7 +102,7 @@ export class ProjectService {
     }
     const row: ProjectRow = {
       id: newId("prj"), slug, name, githubRepo: `local/${slug}`, remoteUrl: "", defaultBranch: "main", mirrorPath,
-      protectedAt: null, lastFetchedAt: now, createdAt: now, kind: "local", profile: null, linearProjectId: null, ticketPrefix: null,
+      protectedAt: null, lastFetchedAt: now, createdAt: now, kind: "local", profile: null, ticketPrefix: null,
     };
     db.insert(schema.projects).values(row).run();
     audit(db, actor, "project.create_local", row.id, { name }, now);
@@ -113,20 +111,15 @@ export class ProjectService {
 
   setProfile(actor: string, id: string, input: SetProjectProfile, now = Date.now()): ProjectView {
     this.get(id);
-    if (input.linearProjectId) {
-      const other = this.byLinearProject(input.linearProjectId);
-      if (other && other.id !== id) throw conflict(`That Linear project already goes to ${other.name}`);
-    }
     if (input.ticketPrefix) {
       const taken = this.list().find((p) => p.id !== id && p.ticketPrefix === input.ticketPrefix);
       if (taken || RESERVED_PREFIXES.has(input.ticketPrefix)) throw conflict(`The ticket prefix ${input.ticketPrefix} is already used${taken ? ` by ${taken.name}` : ""}`);
     }
     this.deps.db.update(schema.projects).set({
       profile: input.profile,
-      ...(input.linearProjectId !== undefined ? { linearProjectId: input.linearProjectId } : {}),
       ...(input.ticketPrefix !== undefined ? { ticketPrefix: input.ticketPrefix } : {}),
     }).where(eq(schema.projects.id, id)).run();
-    audit(this.deps.db, actor, "project.profile", id, { linearProjectId: input.linearProjectId ?? null }, now);
+    audit(this.deps.db, actor, "project.profile", id, { ticketPrefix: input.ticketPrefix ?? null }, now);
     return this.view(id);
   }
 
@@ -184,7 +177,7 @@ export class ProjectService {
     return {
       id: row.id, slug: row.slug, name: row.name, githubRepo: row.githubRepo, defaultBranch: row.defaultBranch,
       protectedAt: row.protectedAt, lastFetchedAt: row.lastFetchedAt, createdAt: row.createdAt,
-      kind: row.kind, profile: row.profile ?? {}, linearProjectId: row.linearProjectId, ticketPrefix: ticketPrefixOf(row),
+      kind: row.kind, profile: row.profile ?? {}, ticketPrefix: ticketPrefixOf(row),
       files: this.fileRows(row.id).map((f) => ({ path: f.path, updatedAt: f.updatedAt })),
     };
   }
@@ -212,7 +205,7 @@ export class ProjectService {
     const row: ProjectRow = {
       id: newId("prj"), slug, name: input.name ?? info.fullName.split("/")[1] ?? slug, githubRepo: info.fullName, remoteUrl,
       defaultBranch: info.defaultBranch, mirrorPath, protectedAt: null, lastFetchedAt: now, createdAt: now,
-      kind: "github", profile: null, linearProjectId: null, ticketPrefix: null,
+      kind: "github", profile: null, ticketPrefix: null,
     };
     db.insert(schema.projects).values(row).run();
     audit(db, actor, "project.create", row.id, { repo: row.githubRepo }, now);

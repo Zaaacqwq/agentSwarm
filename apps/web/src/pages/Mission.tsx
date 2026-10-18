@@ -11,7 +11,7 @@ import { Link } from "../router.tsx";
 export function MissionPage({ id }: { id: string }) {
   return (
     <MissionDetails id={id} header={(m, ended) => (
-      <PageHead title={m.title} sub={<><span className={m.waitingForYou ? "needs-you" : "muted"}>{m.waitingForYou ? "Needs you · " : ""}{STAGE_LABEL[m.stage]}</span> · {m.githubRepo} · <span className="mono">{m.branch}</span>{m.linear && <> · <a href={m.linear.url} target="_blank" rel="noreferrer">{m.linear.key} ↗</a></>}</>}
+      <PageHead title={m.title} sub={<><span className={m.waitingForYou ? "needs-you" : "muted"}>{m.waitingForYou ? "Needs you · " : ""}{STAGE_LABEL[m.stage]}</span> · {m.githubRepo} · <span className="mono">{m.branch}</span></>}
         action={ended ? undefined : <StopMission id={id} />} />
     )} />
   );
@@ -143,7 +143,7 @@ function Conversation({ mission, messages, ended }: { mission: MissionView; mess
     <section className="card stack chat-card" aria-labelledby="chat-head">
       <div className="row" style={{ justifyContent: "space-between" }}>
         <h2 id="chat-head">Conversation</h2>
-        <span className="faint">{mission.origin === "ticket" ? "Discord tells you when it needs you" : mission.linear ? "Also in its Linear ticket" : mission.discordThreadId ? "Also in its Discord thread" : "Dashboard only"}</span>
+        <span className="faint">{mission.origin === "ticket" ? "Discord tells you when it needs you" : mission.discordThreadId ? "Also in its Discord thread" : "Dashboard only"}</span>
       </div>
       <ol className="chat" ref={list}>
         {messages.map((x) => <Message key={x.id} m={x} />)}

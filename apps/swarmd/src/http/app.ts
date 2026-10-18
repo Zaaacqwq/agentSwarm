@@ -4,7 +4,7 @@ import cookie from "@fastify/cookie";
 import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import {
-  CreateAgent, CreateEndpoint, CreateMission, CreateProject, CreateRun, Credentials, MissionBudget, MissionReply, RunMessage, SetCli, SetDiscord, SetLinear, SetGitHubToken, SetProjectProfile, PutProjectFile, CreateLocalProject, MachineSettings, CreateTicket, UpdateTicket, MoveTicket, TicketSettings, PromoteTicket, type Me,
+  CreateAgent, CreateEndpoint, CreateMission, CreateProject, CreateRun, Credentials, MissionBudget, MissionReply, RunMessage, SetCli, SetDiscord, SetGitHubToken, SetProjectProfile, PutProjectFile, CreateLocalProject, MachineSettings, CreateTicket, UpdateTicket, MoveTicket, TicketSettings, PromoteTicket, type Me,
 } from "@agentswarm/contracts";
 import type { Services } from "../app/services.ts";
 import { RateLimiter } from "../auth/rate-limit.ts";
@@ -14,9 +14,7 @@ import { MAX_UPLOAD_BYTES } from "../tickets/attachments.ts";
 import { systemCheck, type CheckOptions } from "../system/system-check.ts";
 
 export const SESSION_COOKIE = "swarm_session";
-// The Linear OAuth callback arrives as a cross-site navigation (no SameSite=Strict cookie); its one-time
-// state, issued only to a signed-in session, is what authorises it.
-const PUBLIC = new Set(["/api/health", "/api/setup", "/api/auth/login", "/api/linear/callback"]);
+const PUBLIC = new Set(["/api/health", "/api/setup", "/api/auth/login"]);
 
 export interface AppOptions {
   readonly services: Services;
@@ -25,8 +23,6 @@ export interface AppOptions {
   /** Host headers the dashboard answers to (DNS rebinding); Origins must match one of them. */
   readonly allowedHosts: readonly string[];
   readonly logger?: boolean;
-  /** The dashboard's own address; Linear's OAuth callback comes back to it. */
-  readonly dashboardUrl?: string;
 }
 
 declare module "fastify" {
@@ -236,33 +232,6 @@ export async function buildApp(o: AppOptions): Promise<FastifyInstance> {
     return s.cli.status();
   });
   app.post<{ Params: { ws: string } }>("/api/cli/codex/:ws/logout", { schema: { params: WS_ID } }, async (req) => s.cli.codexLogout(actor(req), req.params.ws));
-
-  // ---- Linear (R5) --------------------------------------------------------------------------
-  const linearCallback = `${o.dashboardUrl ?? "http://127.0.0.1:4318"}/api/linear/callback`;
-  app.get("/api/linear", async () => ({ ...(await s.linear.status()), redirectUri: linearCallback }));
-  app.put<{ Body: SetLinear }>("/api/linear", { schema: { body: SetLinear } }, async (req) => {
-    const v = await s.linear.configure(actor(req), req.body);
-    // A new owner or more room may let queued tickets start.
-    void s.linearBridge.pump().catch(() => undefined);
-    return { ...v, redirectUri: linearCallback };
-  });
-  app.get("/api/linear/options", async () => s.linear.options());
-  app.get("/api/linear/connect", async () => ({ url: s.linear.connectUrl(linearCallback) }));
-  app.post("/api/linear/disconnect", async (req) => s.linear.disconnect(actor(req)));
-  app.get<{ Querystring: { code?: string; state?: string; error?: string } }>("/api/linear/callback", async (req, reply) => {
-    let message = "Linear is connected.";
-    try {
-      if (req.query.error || !/^[0-9a-f]{32}$/.test(String(req.query.state ?? ""))) throw new Error("refused or invalid");
-      await s.linear.callback("linear-oauth", String(req.query.code ?? ""), String(req.query.state ?? ""), linearCallback);
-    } catch (error) {
-      // A fixed text: anyone can send a browser to this page with any query.
-      void s.linear.noteError(`Linear sign-in failed: ${(error as Error).message.slice(0, 200)}`);
-      message = "Linear was not connected (the link expired or was refused). Start again from the settings.";
-    }
-    const safe = message.replace(/[<>&"]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" })[c]!);
-    // A page of our own, so the way back to the settings is a same-site navigation (the session cookie is Strict).
-    return reply.type("text/html; charset=utf-8").send(`<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="2;url=/settings"><title>agentSwarm</title><p>${safe}</p><p><a href="/settings">Back to the settings</a></p>`);
-  });
 
   // ---- live updates -------------------------------------------------------------------------
   app.get("/api/ws", { websocket: true }, (socket) => {

@@ -9,9 +9,7 @@ export interface Config {
   readonly maxConcurrentRuns: number;
   /** R6: runs with a simulator or browser at once (SWARM_HEAVY_SLOTS, default 2 for 16 GB). */
   readonly heavySlots: number;
-  /** Linear webhooks (R5): their own loopback port, the only one Tailscale Funnel exposes. */
-  readonly linearPort: number;
-  /** Where people open the dashboard, for links in Linear and Discord (e.g. through Tailscale serve). */
+  /** Where people open the dashboard, for links in Discord (e.g. through Tailscale serve). */
   readonly dashboardUrl: string | null;
   /** More Host names the dashboard answers to (e.g. mac-mini.tailnet.ts.net:8444). */
   readonly extraHosts: readonly string[];
@@ -30,8 +28,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (!Number.isInteger(maxConcurrentRuns) || maxConcurrentRuns < 1 || maxConcurrentRuns > 16) throw new Error(`Invalid SWARM_MAX_RUNS: ${env.SWARM_MAX_RUNS}`);
   const heavySlots = Number(env.SWARM_HEAVY_SLOTS ?? "2");
   if (!Number.isInteger(heavySlots) || heavySlots < 1 || heavySlots > 8) throw new Error(`Invalid SWARM_HEAVY_SLOTS: ${env.SWARM_HEAVY_SLOTS}`);
-  const linearPort = Number(env.SWARM_LINEAR_PORT ?? "4319");
-  if (!Number.isInteger(linearPort) || linearPort < 1 || linearPort > 65535 || linearPort === port) throw new Error(`Invalid SWARM_LINEAR_PORT: ${env.SWARM_LINEAR_PORT}`);
   const repo = resolve(import.meta.dirname, "../../..");
   return {
     host,
@@ -40,7 +36,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     webDist: env.SWARM_WEB_DIST === "" ? null : resolve(env.SWARM_WEB_DIST ?? join(repo, "apps/web/dist")),
     maxConcurrentRuns,
     heavySlots,
-    linearPort,
     dashboardUrl: env.SWARM_DASHBOARD_URL ? new URL(env.SWARM_DASHBOARD_URL).origin : null,
     extraHosts: (env.SWARM_EXTRA_HOSTS ?? "").split(",").map((h) => h.trim().toLowerCase()).filter(Boolean),
   };

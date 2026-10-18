@@ -28,7 +28,7 @@ type Source = MessageRow["source"];
 /** How a mission was started, beyond what you asked (R5). */
 export interface CreateOptions {
   readonly origin?: MissionRow["origin"];
-  /** A title instead of the idea's first line (Linear: "ZAC-42 the ticket's title"). */
+  /** A title instead of the idea's first line (a ticket: "FRI-12 the ticket's title"). */
   readonly title?: string;
 }
 
@@ -37,6 +37,11 @@ const flowOf = (m: Pick<MissionRow, "kind" | "fast">): Flow => ({ kind: m.kind, 
 const KINDS_FOR: Record<"github" | "local", readonly MissionKind[]> = { github: ["feature", "bug", "research"], local: ["research", "experiment"] };
 
 export const DEFAULT_MISSION_BUDGET_USD = 3;
+
+/** A board ticket's mission is titled "<KEY> <title>" (R7): its key, for commits and the pull request. */
+export function ticketKey(m: Pick<MissionRow, "origin" | "title">): string | null {
+  return m.origin === "ticket" ? /^([A-Z][A-Z0-9]{0,5}-\d+) /.exec(m.title)?.[1] ?? null : null;
+}
 const TREE_TOOLS = new Set(["spawn_agent", "wait_agents", "message_agent", "cancel_agent", "review_agent", "merge_agent"]);
 /** Taken away in the read-only stages (intake, retro). */
 const WRITE_TOOLS = new Set(["ws_write", "ws_edit", "git_commit", "git_push"]);
@@ -145,7 +150,7 @@ export class MissionService implements RunHooks {
     this.deps.db.insert(schema.missions).values({
       id, projectId: project.id, title, intent: idea, stage: "intake", fast, leadAgentId: lead.id, rootRunId: run.id, treeId: run.treeId!,
       docsPath, pendingStage: null, stageSummary: null, retro: null, docs: [], discordThreadId: null, error: null,
-      createdAt: now, updatedAt: now, endedAt: null, kind, origin: opts.origin ?? (source === "discord" ? "discord" : source === "linear" ? "linear" : "dashboard"),
+      createdAt: now, updatedAt: now, endedAt: null, kind, origin: opts.origin ?? (source === "discord" ? "discord" : "dashboard"),
     }).run();
     audit(this.deps.db, actor, "mission.create", id, { projectId: project.id, fast, kind, source }, now);
     this.emit(id);
@@ -300,20 +305,16 @@ export class MissionService implements RunHooks {
   prompt(run: RunRow): { section: string[]; finish: string } | null {
     const m = this.missionOf(run);
     if (!m || m.rootRunId !== run.id) return null;
-    const key = this.linearKey(m.id);
+    const key = ticketKey(m);
     const section = missionPromptSection(m.docsPath);
-    return { section: key ? [...section, `- This mission is Linear ticket ${key}: start every commit message with "${key}: ".`] : section, finish: MISSION_FINISH };
+    return { section: key ? [...section, `- This mission is ticket ${key}: start every commit message with "${key}: ".`] : section, finish: MISSION_FINISH };
   }
 
   pullRequest(run: RunRow, title: string, body: string): { title: string; body: string } {
     const m = this.missionOf(run);
-    const key = m && m.rootRunId === run.id ? this.linearKey(m.id) : null;
+    const key = m && m.rootRunId === run.id ? ticketKey(m) : null;
     if (!key) return { title, body };
-    return { title: title.startsWith(key) ? title : `${key} ${title}`, body: `${body.trim()}\n\nFixes ${key}` };
-  }
-
-  private linearKey(missionId: string): string | null {
-    return this.deps.db.select({ key: schema.linearSessions.issueKey }).from(schema.linearSessions).where(eq(schema.linearSessions.missionId, missionId)).get()?.key ?? null;
+    return { title: title.startsWith(key) ? title : `${key} ${title}`, body: `${body.trim()}\n\nTicket ${key}` };
   }
 
   tools(run: RunRow, binding: RunBinding): ReturnType<RunHooks["tools"]> {
@@ -475,8 +476,6 @@ export class MissionService implements RunHooks {
     const docUrl = (name: string) => project.kind === "local"
       ? `/api/projects/${project.id}/blob?ref=${encodeURIComponent(root.branch)}&path=${encodeURIComponent(`${m.docsPath}/${name}`)}`
       : `https://github.com/${project.githubRepo}/blob/${ref}/${m.docsPath}/${name}`;
-    const link = this.deps.db.select({ key: schema.linearSessions.issueKey, url: schema.linearSessions.issueUrl }).from(schema.linearSessions)
-      .where(eq(schema.linearSessions.missionId, m.id)).get();
     const waitingForYou = GATES.has(m.stage)
       || (root.status === "waiting" && (root.waitingFor ?? []).includes(WAIT_FOR_USER))
       || (WORKING.has(m.stage) && TERMINAL.has(root.status) && !m.pendingStage && !this.deps.runs.isActive(root.id));
@@ -487,7 +486,7 @@ export class MissionService implements RunHooks {
       budgetUsd: root.budgetUsd ?? 0, costUsd: tree.subtreeCost(root), leadStatus: root.status, waitingForYou: waitingForYou && !ENDED.has(m.stage),
       stageSummary: m.stageSummary, prUrl: root.prUrl, prState: root.prState, retro: m.retro, discordThreadId: m.discordThreadId, error: m.error,
       createdAt: m.createdAt, updatedAt: m.updatedAt, endedAt: m.endedAt,
-      kind: m.kind, origin: m.origin, linear: link ? { key: link.key, url: link.url } : null,
+      kind: m.kind, origin: m.origin,
     };
   }
 }

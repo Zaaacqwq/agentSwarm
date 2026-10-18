@@ -158,19 +158,16 @@ test("connect Claude Code and Codex, then watch a Claude Code sub-agent do the w
   await page.screenshot({ path: `${SHOTS}/cli-settings-375.png`, fullPage: true });
 });
 
-test("set up Linear, a project's profile and local files, and the ports agents may not reach", async ({ page }) => {
+test("the board's limit, a project's profile and local files, and the ports agents may not reach", async ({ page }) => {
   await page.goto("/settings");
   await page.getByLabel("Password").fill("correct horse battery staple");
   await page.getByRole("button", { name: "Sign in" }).click();
-  const linear = page.getByRole("region", { name: "Linear" });
-  await expect(linear.getByText("not installed")).toBeVisible();
-  await expect(linear.getByText("/api/linear/callback")).toBeVisible();
-  await linear.getByLabel("Client ID").fill("client-id-e2e");
-  await linear.getByLabel("Client secret").fill("client-secret-e2e");
-  await linear.getByLabel("Webhook signing secret").fill("webhook-secret-e2e");
-  await linear.getByRole("button", { name: "Save" }).click();
-  await expect(linear.getByRole("button", { name: "Install in Linear" })).toBeEnabled();
-  await expect(linear.getByText("Stored; leave empty to keep it.").first()).toBeVisible();
+  await expect(page.getByRole("region", { name: "Linear" })).toHaveCount(0);
+  const board = page.getByRole("region", { name: "Tickets" });
+  await board.getByLabel("Tickets worked on at once").fill("2");
+  await board.getByRole("button", { name: "Save" }).click();
+  await page.reload();
+  await expect(page.getByRole("region", { name: "Tickets" }).getByLabel("Tickets worked on at once")).toHaveValue("2");
 
   const mac = page.getByRole("region", { name: "This Mac" });
   await expect(mac.getByText("simulators and browsers in use", { exact: false })).toBeVisible();
@@ -178,7 +175,7 @@ test("set up Linear, a project's profile and local files, and the ports agents m
   await mac.getByRole("button", { name: "Save" }).click();
   await page.reload();
   await expect(page.getByRole("region", { name: "This Mac" }).getByLabel("Local ports agents may not connect to")).toHaveValue("3000, 5432");
-  await page.screenshot({ path: `${SHOTS}/linear-settings-1440.png`, fullPage: true });
+  await page.screenshot({ path: `${SHOTS}/settings-1440.png`, fullPage: true });
 
   await page.getByRole("link", { name: "Projects" }).click();
   await page.getByRole("button", { name: "Profile and files" }).first().click();
@@ -201,7 +198,7 @@ test("set up Linear, a project's profile and local files, and the ports agents m
   await page.setViewportSize({ width: 375, height: 812 });
   await page.screenshot({ path: `${SHOTS}/project-profile-375.png`, fullPage: true });
   await page.goto("/settings");
-  await page.screenshot({ path: `${SHOTS}/linear-settings-375.png`, fullPage: true });
+  await page.screenshot({ path: `${SHOTS}/settings-375.png`, fullPage: true });
 });
 
 test("the board: a ticket with a picture, dragged into Todo, answered on the phone, and stopped", async ({ page }) => {

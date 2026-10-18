@@ -64,8 +64,6 @@ export const projects = sqliteTable("projects", {
   kind: text("kind", { enum: ["github", "local"] }).notNull().default("github"),
   /** The project's profile (platform, commands, rules); shown to every agent working in it. */
   profile: json<ProjectProfile>("profile"),
-  /** The Linear project whose tickets come here. */
-  linearProjectId: text("linear_project_id"),
   /** R7: ticket ids look like <prefix>-<n>, e.g. FRI-12. */
   ticketPrefix: text("ticket_prefix"),
 }, (t) => [uniqueIndex("projects_slug_uq").on(t.slug), uniqueIndex("projects_repo_uq").on(t.githubRepo)]);
@@ -261,7 +259,7 @@ export const missions = sqliteTable("missions", {
   // R5
   /** Which flow it follows (missions/stages.ts). */
   kind: text("kind", { enum: MISSION_KINDS }).notNull().default("feature"),
-  /** Where it was started; Linear missions talk in their ticket, Discord only notifies. */
+  /** Where it was started. "linear": the R5 Linear integration, since removed (R7); "ticket": the board. */
   origin: text("origin", { enum: ["dashboard", "discord", "linear", "ticket"] }).notNull().default("dashboard"),
 }, (t) => [index("missions_project_idx").on(t.projectId, t.createdAt), index("missions_stage_idx").on(t.stage)]);
 
@@ -276,45 +274,8 @@ export const missionMessages = sqliteTable("mission_messages", {
   source: text("source", { enum: ["dashboard", "discord", "agentswarm", "linear"] }).notNull(),
   discordMessageId: text("discord_message_id"),
   createdAt: integer("created_at").notNull(),
-  /** R5: when it was posted to the mission's Linear session (null: not yet, or not a Linear mission). */
-  linearDeliveredAt: integer("linear_delivered_at"),
 }, (t) => [index("mission_messages_idx").on(t.missionId, t.id)]);
 
-/** R5: Linear webhook deliveries, stored before they are answered and handled after (5-second limit). */
-export const linearEvents = sqliteTable("linear_events", {
-  deliveryId: text("delivery_id").primaryKey(),
-  event: text("event").notNull(),
-  payload: json<Record<string, unknown>>("payload").notNull(),
-  receivedAt: integer("received_at").notNull(),
-  processedAt: integer("processed_at"),
-  error: text("error"),
-  /** Failed handling is retried (Linear or the network may be down for a moment). */
-  attempts: integer("attempts").notNull().default(0),
-}, (t) => [index("linear_events_pending_idx").on(t.processedAt, t.receivedAt)]);
-
-/** R5: one Linear agent session (a ticket given to agentSwarm) and the mission it became. */
-export const linearSessions = sqliteTable("linear_sessions", {
-  sessionId: text("session_id").primaryKey(),
-  issueId: text("issue_id").notNull(),
-  /** e.g. ZAC-42 */
-  issueKey: text("issue_key").notNull(),
-  issueUrl: text("issue_url").notNull(),
-  title: text("title").notNull(),
-  /** Linear priority: 1 urgent … 4 low, 0 none. */
-  priority: integer("priority").notNull(),
-  status: text("status", { enum: ["queued", "active", "ended", "refused"] }).notNull(),
-  missionId: text("mission_id"),
-  /** What to start with once it leaves the queue; `promote`: an idea or experiment on its way to a real project. */
-  request: json<{ kind: MissionKind; text: string; linearProjectId: string | null; teamId: string | null; promote?: { repo: string | null; awaitingRepo: boolean } }>("request").notNull(),
-  /** The checklist, links and ticket state last sent, to avoid resending the same. */
-  planDigest: text("plan_digest"),
-  /** When the final answer reached the ticket (ended sessions without it get it again). */
-  finalSentAt: integer("final_sent_at"),
-  createdAt: integer("created_at").notNull(),
-  updatedAt: integer("updated_at").notNull(),
-}, (t) => [index("linear_sessions_status_idx").on(t.status, t.priority, t.createdAt), index("linear_sessions_mission_idx").on(t.missionId)]);
-
-/** Small settings rows (id "discord": the bot). Secrets are sealed. */
 export const settings = sqliteTable("settings", {
   id: text("id").primaryKey(),
   value: json<Record<string, unknown>>("value").notNull(),

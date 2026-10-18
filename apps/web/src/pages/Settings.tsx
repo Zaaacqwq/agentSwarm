@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { CliStatusView, CliTestResult, CodexWorkstationView, DiscordStatus, EndpointKind, EndpointView, GitHubStatus, LinearOptionsView, LinearStatusView, MachineLoadView, MachineSettings, TicketSettings } from "@agentswarm/contracts";
+import type { CliStatusView, CliTestResult, CodexWorkstationView, DiscordStatus, EndpointKind, EndpointView, GitHubStatus, MachineLoadView, MachineSettings, TicketSettings } from "@agentswarm/contracts";
 import { api, ago, until, when } from "../api.ts";
 import { useLive, useResource } from "../live.ts";
 import { Badge, Field, Form, Meter, PageHead } from "../components/ui.tsx";
@@ -62,7 +62,6 @@ export function SettingsPage() {
         </section>
       </div>
       <Board />
-      <Linear />
       <Discord />
       <CliWorkers />
       <Machine />
@@ -70,9 +69,6 @@ export function SettingsPage() {
   );
 }
 
-type LinearView = LinearStatusView & { redirectUri: string };
-
-/** Linear: where you give agentSwarm work (R5). */
 /** The board (R7): how many tickets are worked on at once; the rest wait in Todo by priority. */
 function Board() {
   const settings = useResource<TicketSettings>("/tickets/settings");
@@ -94,84 +90,6 @@ function Board() {
   );
 }
 
-function Linear() {
-  const status = useResource<LinearView>("/linear");
-  const s = status.data;
-  const options = useResource<LinearOptionsView>(s?.connected ? "/linear/options" : null);
-  const [clientId, setClientId] = useState("");
-  const [clientSecret, setClientSecret] = useState("");
-  const [webhookSecret, setWebhookSecret] = useState("");
-  if (!s) return status.error ? <p className="error">{status.error}</p> : null;
-  const put = (body: Record<string, unknown>) => api<LinearView>("PUT", "/linear", body).then((v) => void status.set(() => v));
-  const pick = (key: "ownerUserId" | "sandboxProjectId" | "ideasProjectId") => (e: { target: { value: string } }) => void put({ [key]: e.target.value || null }).catch((err: Error) => alert(err.message));
-  return (
-    <section className="card stack" aria-labelledby="ln">
-      <div className="row" style={{ justifyContent: "space-between" }}>
-        <h2 id="ln">Linear</h2>
-        <Badge status={s.connected ? "ok" : "cancelled"}>{s.connected ? `installed in ${s.organization}` : "not installed"}</Badge>
-      </div>
-      <p className="muted">Give agentSwarm a ticket by delegating it (or mentioning it). The conversation, plan approval, progress and pull request all show in the ticket.</p>
-      {s.error && <p className="error" role="alert">{s.error}</p>}
-      <details open={!s.connected}>
-        <summary>The Linear application</summary>
-        <ol className="faint">
-          <li>In Linear: Settings → API → Applications → New. Callback URL: <span className="mono">{s.redirectUri}</span></li>
-          <li>Turn on webhooks with the URL your Tailscale Funnel gives for <span className="mono">{s.webhookPath}</span>, and select “Agent session events”.</li>
-          <li>Paste the client ID, client secret and webhook signing secret here, save, then install.</li>
-        </ol>
-        <Form submit="Save" onSubmit={async () => {
-          await put({ ...(clientId ? { clientId } : {}), ...(clientSecret ? { clientSecret } : {}), ...(webhookSecret ? { webhookSecret } : {}) });
-          setClientSecret("");
-          setWebhookSecret("");
-        }}>
-          <div className="grid">
-            <Field label="Client ID"><input value={clientId} onChange={(e) => setClientId(e.target.value)} placeholder={s.clientId ?? ""} /></Field>
-            <Field label="Client secret" hint={s.configured ? "Stored; leave empty to keep it." : undefined}><input type="password" autoComplete="off" value={clientSecret} onChange={(e) => setClientSecret(e.target.value)} /></Field>
-            <Field label="Webhook signing secret" hint={s.hasWebhookSecret ? "Stored; leave empty to keep it." : undefined}><input type="password" autoComplete="off" value={webhookSecret} onChange={(e) => setWebhookSecret(e.target.value)} /></Field>
-          </div>
-        </Form>
-        <div className="row">
-          <button className="btn" disabled={!s.configured} onClick={() => api<{ url: string }>("GET", "/linear/connect").then((r) => { location.href = r.url; }).catch((e: Error) => alert(e.message))}>{s.connected ? "Install again" : "Install in Linear"}</button>
-          {s.connected && <button className="btn ghost" onClick={() => api<LinearView>("POST", "/linear/disconnect", {}).then((v) => status.set(() => v))}>Disconnect</button>}
-        </div>
-      </details>
-      {s.connected && (
-        <div className="grid">
-          <Field label="You (the only one obeyed)">
-            <select value={s.ownerUserId ?? ""} onChange={pick("ownerUserId")}>
-              <option value="">Choose…</option>
-              {options.data?.users.map((u) => <option key={u.id} value={u.id}>{u.name} ({u.email})</option>)}
-            </select>
-          </Field>
-          <Field label="Sandbox project" hint="Experiments: a throwaway local repository each.">
-            <select value={s.sandboxProjectId ?? ""} onChange={pick("sandboxProjectId")}>
-              <option value="">None</option>
-              {options.data?.projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-            </select>
-          </Field>
-          <Field label="Ideas project" hint="Ideas without a repository: research first, then 立项.">
-            <select value={s.ideasProjectId ?? ""} onChange={pick("ideasProjectId")}>
-              <option value="">None</option>
-              {options.data?.projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-            </select>
-          </Field>
-          <Field label="Tickets at once">
-            <input type="number" min={1} max={8} defaultValue={s.maxActive} onBlur={(e) => void put({ maxActive: Number(e.target.value) })} />
-          </Field>
-        </div>
-      )}
-      {s.connected && <p className="faint">Connect each repository to its Linear project on the Projects page. Last event {ago(s.lastEventAt)}.</p>}
-      {s.queue.length > 0 && (
-        <table>
-          <thead><tr><th>Ticket</th><th>Status</th></tr></thead>
-          <tbody>{s.queue.map((q) => (
-            <tr key={q.key}><td><a href={q.url} target="_blank" rel="noreferrer">{q.key}</a> {q.title}</td><td><Badge status={q.status === "active" ? "running" : "queued"}>{q.status}</Badge></td></tr>
-          ))}</tbody>
-        </table>
-      )}
-    </section>
-  );
-}
 
 /** Settings about this Mac that agents must respect. */
 function Machine() {

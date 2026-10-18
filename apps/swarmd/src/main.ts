@@ -10,7 +10,6 @@ import { SudoBackend } from "./workstations/backend.ts";
 import { GitHubRest } from "./github/github-client.ts";
 import { createGitRunner } from "./github/git.ts";
 import { DiscordJsTransport } from "./discord/discord-js.ts";
-import { buildLinearWebhook } from "./linear/linear-webhook.ts";
 
 const log: Logger = (level, msg, extra) => {
   process.stderr.write(`${JSON.stringify({ time: new Date().toISOString(), level, msg, ...extra })}\n`);
@@ -41,7 +40,6 @@ async function main(): Promise<void> {
     attachmentsDir: join(config.dataDir, "attachments"),
     log,
     transport: new DiscordJsTransport(),
-    linearPort: config.linearPort,
     dashboardUrl: config.dashboardUrl ?? `http://${config.host === "::1" ? "[::1]" : config.host}:${config.port}`,
   });
 
@@ -63,10 +61,8 @@ async function main(): Promise<void> {
   setInterval(pruneScreens, 24 * 3600_000).unref();
   void services.github.verify().catch(() => undefined);
 
-  // Linear's OAuth callback is registered at the local address: it stays the local one.
-  const localUrl = `http://${config.host === "::1" ? "[::1]" : config.host}:${config.port}`;
   const app = await buildApp({
-    services, webDist: config.webDist, dashboardUrl: localUrl,
+    services, webDist: config.webDist,
     check: { dataDir: config.dataDir, volume: production ? PRODUCTION_LAYOUT.volume : null },
     // The Vite dev server proxies with its own Host header.
     allowedHosts: [`127.0.0.1:${config.port}`, `localhost:${config.port}`, `[::1]:${config.port}`, "localhost:5173", "127.0.0.1:5173", ...config.extraHosts],
@@ -75,11 +71,6 @@ async function main(): Promise<void> {
   log("info", "swarmd listening", { url: `http://${config.host}:${config.port}`, dataDir: config.dataDir });
   services.watcher.start();
   void services.discord.start();
-  // Linear webhooks on their own loopback port (exposed alone through Tailscale Funnel).
-  const webhook = buildLinearWebhook({ db: database.db, linear: services.linear, received: () => services.linearBridge.drain(), log: (msg, extra) => log("warn", msg, extra) });
-  await webhook.listen({ host: "127.0.0.1", port: config.linearPort });
-  services.linearBridge.start();
-  log("info", "linear webhook listening", { url: `http://127.0.0.1:${config.linearPort}/linear/webhook` });
 
   let stopping = false;
   const shutdown = async (signal: string) => {
@@ -87,8 +78,6 @@ async function main(): Promise<void> {
     stopping = true;
     log("info", "shutting down", { signal });
     services.watcher.stop();
-    services.linearBridge.stop();
-    await webhook.close();
     await services.discord.stop();
     await services.runs.stopAll();
     await app.close();

@@ -74,7 +74,6 @@ export interface ProjectView {
   /** R5: "local" projects live only on this Mac (sandbox experiments, ideas). */
   readonly kind: "github" | "local";
   readonly profile: ProjectProfile;
-  readonly linearProjectId: string | null;
   /** R7: its tickets' ids start with this, e.g. FRI. */
   readonly ticketPrefix: string;
   /** Paths of the local files (not their contents) written into every worktree. */
@@ -106,7 +105,6 @@ export type ProjectProfile = Static<typeof ProjectProfile>;
 
 export const SetProjectProfile = Type.Object({
   profile: ProjectProfile,
-  linearProjectId: Type.Optional(Type.Union([Type.String({ minLength: 1, maxLength: 64 }), Type.Null()])),
   ticketPrefix: Type.Optional(Type.String({ pattern: "^[A-Z][A-Z0-9]{0,5}$" })),
 });
 export type SetProjectProfile = Static<typeof SetProjectProfile>;
@@ -339,9 +337,8 @@ export interface MissionView {
   readonly updatedAt: number;
   readonly endedAt: number | null;
   readonly kind: MissionKind;
+  /** "linear": from the R5 Linear integration, since removed (kept for the record). */
   readonly origin: "dashboard" | "discord" | "linear" | "ticket";
-  /** The Linear ticket it came from. */
-  readonly linear: { readonly key: string; readonly url: string } | null;
 }
 
 export interface MissionMessageView {
@@ -446,45 +443,6 @@ export interface CliTestResult {
   readonly ok: boolean;
   readonly detail: string;
   readonly workstationId: string | null;
-}
-
-// ---- Linear (R5) --------------------------------------------------------------------------
-export const SetLinear = Type.Object({
-  /** From the Linear application you created; omit secrets to keep the stored ones. */
-  clientId: Type.Optional(Type.String({ minLength: 8, maxLength: 200 })),
-  clientSecret: Type.Optional(Type.String({ minLength: 8, maxLength: 500 })),
-  webhookSecret: Type.Optional(Type.String({ minLength: 8, maxLength: 500 })),
-  /** The only Linear user whose tickets agentSwarm takes. */
-  ownerUserId: Type.Optional(Type.Union([Type.String({ minLength: 1, maxLength: 64 }), Type.Null()])),
-  /** Linear projects that are not a repository: throwaway experiments, and ideas without a repository yet. */
-  sandboxProjectId: Type.Optional(Type.Union([Type.String({ minLength: 1, maxLength: 64 }), Type.Null()])),
-  ideasProjectId: Type.Optional(Type.Union([Type.String({ minLength: 1, maxLength: 64 }), Type.Null()])),
-  /** Tickets worked on at once; the rest wait, by priority. */
-  maxActive: Type.Optional(Type.Integer({ minimum: 1, maximum: 8 })),
-});
-export type SetLinear = Static<typeof SetLinear>;
-
-export interface LinearStatusView {
-  readonly configured: boolean;
-  readonly connected: boolean;
-  readonly organization: string | null;
-  readonly appUser: string | null;
-  readonly clientId: string | null;
-  readonly hasWebhookSecret: boolean;
-  readonly ownerUserId: string | null;
-  readonly sandboxProjectId: string | null;
-  readonly ideasProjectId: string | null;
-  readonly maxActive: number;
-  /** Where Linear must send webhooks (set in the Linear application). */
-  readonly webhookPath: string;
-  readonly lastEventAt: number | null;
-  readonly error: string | null;
-  readonly queue: readonly { readonly key: string; readonly title: string; readonly status: string; readonly url: string; readonly missionId: string | null }[];
-}
-
-export interface LinearOptionsView {
-  readonly users: readonly { readonly id: string; readonly name: string; readonly email: string }[];
-  readonly projects: readonly { readonly id: string; readonly name: string }[];
 }
 
 // ---- system check ------------------------------------------------------------------------
