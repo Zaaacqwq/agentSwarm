@@ -7,6 +7,12 @@ for arg in "$@"; do
     -version|-showsdks|-list|-showdestinations|-help|-usage|-license|-checkFirstLaunchStatus) exec /usr/bin/xcodebuild "$@" ;;
   esac
 done
-exec /usr/bin/xcodebuild -skipMacroValidation -skipPackagePluginValidation \
+# Xcode puts DerivedData under the real home (/Users/ws-N), which the sandbox denies: use the run's own HOME.
+for arg in "$@"; do
+  [ "$arg" = "-derivedDataPath" ] && exec /usr/bin/xcodebuild -skipMacroValidation -skipPackagePluginValidation \
+    -IDEPackageSupportDisableManifestSandbox=YES -IDEPackageSupportDisablePluginExecutionSandbox=YES \
+    'OTHER_SWIFT_FLAGS=$(inherited) -disable-sandbox' "$@"
+done
+exec /usr/bin/xcodebuild -derivedDataPath "$HOME/Library/Developer/Xcode/DerivedData" -skipMacroValidation -skipPackagePluginValidation \
   -IDEPackageSupportDisableManifestSandbox=YES -IDEPackageSupportDisablePluginExecutionSandbox=YES \
   'OTHER_SWIFT_FLAGS=$(inherited) -disable-sandbox' "$@"
