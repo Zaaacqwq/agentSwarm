@@ -18,6 +18,9 @@ import type { Relay } from "../relay/relay.ts";
 import type { AgentService } from "./agent-service.ts";
 import { REVIEW_TOOL_NAMES, workstationTools } from "./tools.ts";
 import { Eyes } from "../eyes/eyes.ts";
+import { lessonLines, type LessonService } from "../memory/lessons.ts";
+import { roleOf, type HandbookService } from "../memory/handbooks.ts";
+import { recallTool } from "../memory/tools.ts";
 import { keepRecentImages } from "../eyes/images.ts";
 import { projectLines, reviewerPrompt, systemPrompt } from "./prompts.ts";
 import { TERMINAL, TREE_LIMITS, TreeError, type TreeService } from "./tree-service.ts";
@@ -98,6 +101,8 @@ export interface RunDeps {
   readonly memoryPressure: () => number;
   /** R6: where each run's screenshots are kept for the dashboard (<dir>/<runId>/NNN.jpg). */
   readonly screensDir: string;
+  /** R8: the team's lessons and the roles' handbooks, in every prompt. */
+  readonly memory?: { readonly lessons: LessonService; readonly handbooks: HandbookService };
   readonly limits?: RunLimits;
   /** Fetch GitHub into the mirror before a run clones it (off in tests with local remotes). */
   readonly refreshMirror: boolean;
@@ -470,6 +475,11 @@ export class RunService {
         report = { summary: `${approved ? "Approved" : "Changes requested"}: ${comments}`, tests: "", unfinished: [] };
       })]
       : [...wsTools, ...treeTools(this.treeOps(runId, active), { canSpawn, isRoot: run.depth === 0 })];
+    if (this.deps.memory) tools.push(recallTool((query) => {
+      const viewer = { projectId: run.projectId, role: isReview ? "reviewer" as const : roleOf(agentRow.role, Boolean(run.missionId) && run.depth === 0) };
+      const found = this.deps.memory!.lessons.search(query, viewer, 5, { use: true });
+      return found.length ? lessonLines(found).join("\n") : "No lessons match. Try other words, or carry on.";
+    }) as AgentTool<any, undefined>);
     if (!isReview && run.needs?.length) {
       active.eyes = new Eyes({ backend, workstation: ws, scope: run.worktreeScope, needs: run.needs, profile: project.profile, screensDir: join(this.deps.screensDir, runId) });
       tools.push(...(active.eyes.tools() as AgentTool<any, undefined>[]));
@@ -486,10 +496,10 @@ export class RunService {
     if (extension) tools.splice(0, tools.length, ...tools.filter((t) => extension.keep?.(t.name) ?? true), ...extension.add);
     const missionPrompt = isReview ? null : this.hooks?.prompt(run) ?? null;
     const prompt = isReview
-      ? reviewerPrompt({ name: agentRow.name, repo: project.githubRepo, branch: run.branch, project: projectLines(project.profile) })
+      ? reviewerPrompt({ name: agentRow.name, repo: project.githubRepo, branch: run.branch, project: [...projectLines(project.profile), ...this.memoryLines(run, agentRow.role)] })
       : systemPrompt({
         name: agentRow.name, role: agentRow.role, instructions: agentRow.instructions, repo: project.githubRepo, defaultBranch: project.defaultBranch, branch: run.branch,
-        project: projectLines(project.profile),
+        project: [...projectLines(project.profile), ...this.memoryLines(run, agentRow.role)],
         tree: { canSpawn, isRoot: run.depth === 0, depth: run.depth },
         eyes: run.needs ?? [],
         ...(missionPrompt ? { extra: missionPrompt.section, finish: missionPrompt.finish } : {}),
@@ -589,7 +599,7 @@ export class RunService {
       active.controller.abort();
     }, run.limits.maxDurationMs);
     const x: CliExecution = {
-      run, runtime, name: agentRow.name, role: agentRow.role, repo: project.githubRepo, defaultBranch: project.defaultBranch, project: projectLines(project.profile),
+      run, runtime, name: agentRow.name, role: agentRow.role, repo: project.githubRepo, defaultBranch: project.defaultBranch, project: [...projectLines(project.profile), ...this.memoryLines(run, agentRow.role)],
       model: agentRow.modelId === CLI_DEFAULT_MODEL ? null : agentRow.modelId, workstation: ws, signal, message,
       event: (type, data) => bus.runEvent(run.id, type, data),
       progress: (p) => {
@@ -792,7 +802,13 @@ export class RunService {
           const available = this.deps.cli.availability(input.runtime);
           if (!available.ok) throw new TreeError(`${input.runtime} is not available: ${available.reason}. Use another runtime.`);
         }
-        const child = await tree.spawn(this.get(runId), input, () => !active.reason);
+        let child = await tree.spawn(this.get(runId), input, () => !active.reason);
+        // What earlier work learned about this kind of job, for this project and this role (R8).
+        const advice = this.lessonsFor(child, input.role, input.brief, 2);
+        if (advice) {
+          this.deps.db.update(schema.runs).set({ pendingMessage: `${child.pendingMessage ?? child.brief}\n\n${advice}` }).where(eq(schema.runs.id, child.id)).run();
+          child = this.get(child.id);
+        }
         bus.runEvent(child.id, "user", { text: child.pendingMessage ?? child.brief });
         bus.runEvent(runId, "status", { status: "spawned", child: child.id, name: child.title, branch: child.branch });
         this.emit(child.id);
@@ -891,6 +907,28 @@ export class RunService {
       removed += 1;
     }
     return removed;
+  }
+
+  /** The role's handbook and the pinned lessons, as prompt lines (R8). Stable: the prompt cache keeps working. */
+  private memoryLines(run: RunRow, role: string): string[] {
+    const memory = this.deps.memory;
+    if (!memory) return [];
+    const r = run.kind === "review" ? "reviewer" : roleOf(role, Boolean(run.missionId) && run.depth === 0);
+    const pinned = memory.lessons.pinned({ projectId: run.projectId, role: r });
+    return [
+      "", `How a ${r} works here (your handbook, from the person):`, memory.handbooks.text(r),
+      ...(pinned.length ? ["", "Lessons the person pinned for everyone:", ...lessonLines(pinned)] : []),
+      "", "recall searches the team's lessons from earlier work; use it when you are unsure how something is done here.",
+    ];
+  }
+
+  /** The best lessons for a job, as a message block (or null); counted as used. */
+  lessonsFor(run: Pick<RunRow, "projectId">, role: string, text: string, limit: number, lead = false): string | null {
+    const memory = this.deps.memory;
+    if (!memory) return null;
+    const viewer = { projectId: run.projectId, role: roleOf(role, lead) };
+    const found = memory.lessons.search(text, viewer, limit, { use: true, exclude: memory.lessons.pinned(viewer).map((l) => l.id) });
+    return found.length ? ["Lessons from earlier work that may apply (check them against this job):", ...lessonLines(found)].join("\n") : null;
   }
 
   /** A screenshot the run took (R6), for the dashboard; null when there is no such file. */

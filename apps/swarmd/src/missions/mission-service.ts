@@ -19,6 +19,11 @@ import { pageWindow, type WebAccess } from "../web/web-access.ts";
 import { FetchError } from "../web/web-fetch.ts";
 import { MISSION_FINISH, changesBrief, intakeBrief, missionPromptSection, stageBrief, type BriefContext } from "./briefs.ts";
 import { fileTicketTool, missionTools, webTools, type WebToolOps } from "./mission-tools.ts";
+import type { LessonService } from "../memory/lessons.ts";
+import type { HandbookService } from "../memory/handbooks.ts";
+import { proposeHandbookTool, recordLessonTool } from "../memory/tools.ts";
+import type { Role } from "../db/schema.ts";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { ENDED, GATES, STAGE_LABEL, WORKING, afterStageDone, canMove, requiredDocs, stageTools, DOC_NAMES, type Actor, type Flow } from "./stages.ts";
 
 export type MissionRow = typeof schema.missions.$inferSelect;
@@ -34,7 +39,7 @@ export interface CreateOptions {
 
 const flowOf = (m: Pick<MissionRow, "kind" | "fast">): Flow => ({ kind: m.kind, fast: m.fast });
 /** Which kinds each kind of project can run: local projects never reach GitHub, so no pull requests. */
-const KINDS_FOR: Record<"github" | "local", readonly MissionKind[]> = { github: ["feature", "bug", "research"], local: ["research", "experiment"] };
+const KINDS_FOR: Record<"github" | "local", readonly MissionKind[]> = { github: ["feature", "bug", "research", "marketing"], local: ["research", "experiment"] };
 
 export const DEFAULT_MISSION_BUDGET_USD = 3;
 
@@ -57,8 +62,15 @@ export interface MissionDeps {
   readonly web: WebAccess;
   readonly cleanup: TreeCleanup;
   readonly log: (msg: string, extra?: Record<string, unknown>) => void;
+  /** R8: lessons at the start, and what a retrospective records. */
+  readonly memory?: { readonly lessons: LessonService; readonly handbooks: HandbookService };
 }
 
+/** At most this many lessons and handbook proposals one mission adds (R8). */
+const MAX_LESSONS = 3;
+const MAX_PROPOSALS = 2;
+
+const money = (usd: number) => `$${usd.toFixed(usd < 0.01 ? 4 : 2)}`;
 const slug = (text: string, max: number) => text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, max).replace(/-+$/, "");
 
 /** Data from the web or other agents, fenced so it reads as information. */
@@ -144,7 +156,9 @@ export class MissionService implements RunHooks {
     const docsPath = `docs/agentswarm/${slug(title, 32) || "mission"}-${randomBytes(3).toString("hex")}`;
     // Bugs take the short path: reproduce and plan, then the gate.
     const fast = kind === "bug" ? true : input.fast ?? false;
-    const brief = intakeBrief({ intent: idea, docs: docsPath, fast, defaultBranch: project.defaultBranch, kind });
+    // What earlier work learned that fits this request (R8).
+    const advice = this.deps.runs.lessonsFor({ projectId: project.id }, "lead", `${title}\n${idea}`, 3, true);
+    const brief = [intakeBrief({ intent: idea, docs: docsPath, fast, defaultBranch: project.defaultBranch, kind }), ...(advice ? ["", advice] : [])].join("\n");
     // The run cannot reach a hook before the mission row exists: it starts executing only after an await.
     const run = this.deps.runs.create(actor, lead.id, { title, brief, budgetUsd: input.budgetUsd ?? DEFAULT_MISSION_BUDGET_USD }, now, id);
     this.deps.db.insert(schema.missions).values({
@@ -271,7 +285,7 @@ export class MissionService implements RunHooks {
         this.post(m.id, "system", "text", `The pull request is ready: ${root.prUrl}\nMerge it on GitHub when you are happy with it (or close it to drop the mission). agentSwarm checks every few minutes.`, "agentswarm");
         break;
       case "retro":
-        this.deliver(m, stageBrief("retro", brief, `The person merged the pull request ${ctx.prUrl ?? root.prUrl ?? ""}.`));
+        this.deliver(m, stageBrief("retro", brief, `The person merged the pull request ${ctx.prUrl ?? root.prUrl ?? ""}.\n\n${this.retroFacts(m)}\n`));
         break;
       case "done":
         void this.deps.cleanup.cleanWhenSettled(m.treeId).catch((e: Error) => this.deps.log("cleanup failed", { missionId: m.id, error: e.message }));
@@ -297,7 +311,9 @@ export class MissionService implements RunHooks {
 
   private briefContext(m: MissionRow): BriefContext {
     const project = this.deps.projects.get(m.projectId);
-    return { intent: m.intent, docs: m.docsPath, fast: m.fast, defaultBranch: project.defaultBranch, kind: m.kind };
+    const profile = project.profile ?? {};
+    const ios = Boolean(profile.ios?.scheme) || /\bios\b|swiftui/i.test(profile.platform ?? "");
+    return { intent: m.intent, docs: m.docsPath, fast: m.fast, defaultBranch: project.defaultBranch, kind: m.kind, product: Boolean(profile.product), ios };
   }
 
   // ---- run hooks ------------------------------------------------------------------------
@@ -340,8 +356,52 @@ export class MissionService implements RunHooks {
       requestApproval: (summary: string) => this.finishStage(m.id, summary, true),
     };
     const filer = this.ticketFiler;
+    // Lessons at the retrospective, and at the last step of the flows that have none (R8).
+    const last = m.stage === "retro" || (m.kind === "research" && m.stage === "discussion") || (m.kind === "experiment" && m.stage === "building");
+    const memory = last && this.deps.memory ? this.memoryTools(m, this.deps.agents.get(run.agentId).name, m.stage === "retro") : [];
     const file = m.origin === "ticket" && filer ? [fileTicketTool((input) => filer(m, this.deps.agents.get(run.agentId).name, input))] : [];
-    return { keep, add: [...missionTools(ops, t), ...(t.web ? webTools(this.webOps(run, binding)) : []), ...file] };
+    return { keep, add: [...missionTools(ops, t), ...(t.web ? webTools(this.webOps(run, binding)) : []), ...file, ...memory] };
+  }
+
+  private memoryTools(m: MissionRow, agent: string, retro: boolean): AgentTool<any, undefined>[] {
+    const memory = this.deps.memory!;
+    const source = ticketKey(m) ?? m.title.slice(0, 80);
+    const tools: AgentTool<any, undefined>[] = [
+      recordLessonTool((input) => {
+        const recorded = this.deps.db.select({ id: schema.lessons.id }).from(schema.lessons).where(eq(schema.lessons.source, source)).all().length;
+        if (recorded >= MAX_LESSONS) return `You have recorded ${MAX_LESSONS} lessons for ${source} already; put anything else in your retrospective.`;
+        const role = input.role as Role | undefined;
+        const { lesson, created } = memory.lessons.record(agent, {
+          scope: input.scope, title: input.title, text: input.text,
+          ...(input.scope === "project" ? { projectId: m.projectId } : {}), ...(role ? { role } : input.scope === "role" ? { role: "developer" as const } : {}),
+        }, source);
+        return created ? `Recorded: ${lesson.title}` : lesson.author === "you" ? `The person already wrote this: ${lesson.title}` : `Improved the existing lesson: ${lesson.title}`;
+      }),
+    ];
+    if (retro) tools.push(proposeHandbookTool((input) => {
+      const proposed = memory.handbooks.proposals().filter((p) => p.source === source).length;
+      if (proposed >= MAX_PROPOSALS) return `You have proposed ${MAX_PROPOSALS} changes for ${source} already.`;
+      memory.handbooks.propose(agent, source, input.role as Role, input.change, input.why);
+      return "Proposed. The person will see it on the dashboard and decide.";
+    }));
+    return tools;
+  }
+
+  /** What the retrospective should know for sure, from the record rather than memory (R8). */
+  private retroFacts(m: MissionRow, now = Date.now()): string {
+    const root = this.deps.tree.run(m.rootRunId);
+    const runs = [root, ...this.deps.tree.descendants(root.id)];
+    const rejected = runs.filter((r) => r.kind === "review" && /^Changes requested/.test(r.report?.summary ?? "")).length;
+    const failed = runs.filter((r) => r.status === "failed" && r.id !== root.id);
+    const modelErrors = runs.reduce((n, r) => n + this.deps.runs.events(r.id, 0, 2000).filter((e) => e.type === "error" && /Model request failed/.test(String(e.data.message ?? ""))).length, 0);
+    const hours = (now - m.createdAt) / 3_600_000;
+    return [
+      "Facts:",
+      `- ${hours < 1 ? `${Math.round(hours * 60)} minutes` : `${hours.toFixed(1)} hours`} from the request to now; ${money(this.deps.tree.subtreeCost(root))} spent by ${runs.length} runs.`,
+      `- Reviews that asked for changes: ${rejected}.`,
+      failed.length ? `- Sub-agents that failed: ${failed.map((r) => `${r.title} (${(r.error ?? "no reason").split("\n")[0]!.slice(0, 120)})`).join("; ")}.` : "- No sub-agent failed.",
+      `- Model requests that failed and were retried: ${modelErrors}.`,
+    ].join("\n");
   }
 
   ended(run: RunRow): void {

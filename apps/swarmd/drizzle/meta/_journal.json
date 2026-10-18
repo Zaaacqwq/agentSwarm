@@ -71,6 +71,13 @@
       "when": 1792305614061,
       "tag": "0009_remove_linear",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1792309224338,
+      "tag": "0010_memory",
+      "breakpoints": true
     }
   ]
 }

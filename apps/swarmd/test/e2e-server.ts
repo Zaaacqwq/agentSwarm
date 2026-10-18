@@ -14,7 +14,8 @@ const docsOf = (c: TranscriptContext) => /Mission documents go in (docs\/agentsw
 const writeDoc = (name: string, content: string): FauxResponseFactory => (c) => call("ws_write", { path: `${docsOf(c)}/${name}`, content });
 const builderId = (c: TranscriptContext) => /Spawned Builder: id (run_[0-9a-f]+)/.exec(JSON.stringify(c.messages))?.[1] ?? "missing";
 
-const h = await harness({ webDist: fileURLToPath(new URL("../../web/dist", import.meta.url)) });
+// Memory pressure is this Mac's, not the test's: simulator runs must not wait on whatever else is running.
+const h = await harness({ webDist: fileURLToPath(new URL("../../web/dist", import.meta.url)), memoryPressure: () => 1 });
 h.scriptAgents({
   Dev: [
     call("spawn_agent", { name: "Helper", role: "developer", brief: "square(3) must be 9: fix math.js, run node --test, commit, push and report.", needs: ["simulator"] }),
@@ -71,6 +72,9 @@ h.scriptAgents({
   "Helper-review": [call("review_verdict", { approved: true, comments: "Correct, and the test passes." })],
 });
 h.cli.script([{ write: [{ path: "math.js", content: "export const square = (x) => x * x;\n" }], commit: "Fix square", quota: { five: 0.42, seven: 0.18 }, usd: 0.0731, report: { summary: "square multiplies now.", tests: "node --test: 1 passed", unfinished: [] } }]);
+// R8: what a retrospective would have left: an agent's lesson and a handbook change waiting for you.
+h.services.lessons.record("Lead", { scope: "team", title: "SwiftUI projects: build with sim_build, not plain swiftc", text: "The sandbox breaks Swift macros unless the build goes through the wrapper; sim_build does that." }, "FRI-3");
+h.services.handbooks.propose("Lead", "FRI-3", "qa", "Check the dark theme as well as the light one.", "A button was invisible in dark mode in FRI-3.");
 // As swarmd does at startup: read the installed CLI versions and sign-ins.
 await h.services.cli.refresh();
 // The person confirms the Codex device code in their browser; here the fake does it a moment after the code shows.

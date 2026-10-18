@@ -278,6 +278,44 @@ test("the board: a ticket with a picture, dragged into Todo, answered on the pho
   await expect(page.getByText("Canceled", { exact: true }).first()).toBeVisible({ timeout: 30_000 });
 });
 
+test("memory: an agent's lesson pinned, a lesson of your own, a handbook change accepted and a handbook edited", async ({ page }) => {
+  await page.goto("/memory");
+  await page.getByLabel("Password").fill("correct horse battery staple");
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page.getByRole("heading", { name: "Memory" })).toBeVisible();
+  await expect(page.getByText("1 handbook change to decide")).toBeVisible();
+  const lesson = page.getByRole("article", { name: "SwiftUI projects: build with sim_build, not plain swiftc" });
+  await expect(lesson.getByText("advice from Lead after FRI-3")).toBeVisible();
+  await lesson.getByRole("button", { name: "Pin" }).click();
+  await expect(lesson.getByText("Pinned", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "New lesson" }).click();
+  const form = page.getByRole("region", { name: "New lesson" });
+  await form.getByLabel("Title").fill("betterUWWorks: dev servers on port 3100");
+  await form.getByLabel("Lesson").fill("3000 is the live site and is blocked.");
+  await form.getByRole("button", { name: "Keep this lesson" }).click();
+  await expect(page.getByRole("article", { name: "betterUWWorks: dev servers on port 3100" }).getByText("yours")).toBeVisible();
+  await page.getByLabel("Search lessons").fill("swiftui");
+  await expect(page.getByRole("article")).toHaveCount(1);
+  await page.screenshot({ path: `${SHOTS}/memory-lessons-1440.png`, fullPage: true });
+
+  await page.getByRole("tab", { name: /Handbooks/ }).click();
+  const proposals = page.getByRole("region", { name: "Changes agents propose" });
+  await expect(proposals.getByText("Check the dark theme as well as the light one.")).toBeVisible();
+  await proposals.getByRole("button", { name: "Accept", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Changes agents propose" })).toHaveCount(0);
+  await page.getByRole("navigation", { name: "Roles" }).getByRole("button", { name: /QA/ }).click();
+  const qa = page.getByLabel("QA handbook");
+  await expect(qa).toHaveValue(/- Check the dark theme as well as the light one\.$/);
+  await qa.fill(`${await qa.inputValue()}\n- Try the app with no network.`);
+  await page.getByRole("button", { name: "Save handbook" }).click();
+  await expect(page.getByText("Earlier versions (2)")).toBeVisible();
+  await page.screenshot({ path: `${SHOTS}/memory-handbooks-1440.png`, fullPage: true });
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.screenshot({ path: `${SHOTS}/memory-handbooks-375.png`, fullPage: true });
+  const overflow = await page.evaluate("document.documentElement.scrollWidth - document.documentElement.clientWidth") as number;
+  expect(overflow).toBeLessThanOrEqual(0);
+});
+
 /** A small orange PNG (40×24), built here so the test has no binary fixture. */
 const PNG = (() => {
   const w = 40, h = 24;

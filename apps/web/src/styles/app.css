@@ -323,3 +323,32 @@ code.copy { cursor: copy; background: var(--paper-sunk); padding: 1px var(--spac
   .ticket-card:hover, .ticket-card.dragging { transform: none; }
 }
 .warn-card { border-color: var(--warn); box-shadow: inset 3px 0 0 var(--warn), var(--shadow); }
+.kind-tag.k-marketing { color: var(--ok); }
+
+/* ---- memory (R8): lessons as index cards, handbooks as a manuscript ---- */
+.lesson-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-3); }
+.lesson { background: var(--paper-raised); border: 1px solid var(--rule); border-radius: var(--radius-sm); padding: var(--space-3) var(--space-4); display: flex; flex-direction: column; gap: var(--space-2); box-shadow: var(--shadow); }
+.lesson.pinned { border-color: var(--ink); box-shadow: inset 3px 0 0 var(--ink), var(--shadow); }
+.lesson.retired { opacity: 0.55; }
+.lesson-top { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-3); align-items: center; font-size: var(--text-xs); }
+.lesson-title { font-size: 1rem; font-family: var(--font-display); overflow-wrap: anywhere; }
+.lesson p { margin: 0; }
+.pin { font-size: var(--text-xs); font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--paper); background: var(--ink); padding: 1px var(--space-2); border-radius: var(--radius-sm); }
+.agent-note { color: var(--warn); }
+.history-list { margin-top: var(--space-2); }
+.handbooks { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: var(--space-4); align-items: start; }
+.role-list { display: flex; flex-direction: column; gap: var(--space-1); }
+.role-list button { font: inherit; text-align: left; padding: var(--space-2) var(--space-3); border: 1px solid transparent; border-radius: var(--radius-sm); background: transparent; color: var(--ink-soft); cursor: pointer; }
+.role-list button:hover { background: var(--paper-sunk); color: var(--ink); }
+.role-list button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+.role-list button:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+.handbook-text { width: 100%; min-height: 260px; line-height: 1.55; }
+.handbook-peek, .proposal-change { background: var(--paper-sunk); padding: var(--space-3); border-radius: var(--radius-sm); white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
+.proposal { border-top: 1px solid var(--rule); padding-top: var(--space-3); }
+.proposal:first-of-type { border-top: 0; padding-top: 0; }
+@media (max-width: 760px) {
+  .handbooks { grid-template-columns: minmax(0, 1fr); }
+  .role-list { flex-direction: row; overflow-x: auto; }
+  .role-list button { white-space: nowrap; }
+}
+.stack > .segmented { align-self: flex-start; }

@@ -1,8 +1,11 @@
+import { eq } from "drizzle-orm";
 import type { Layout } from "@agentswarm/ws-exec";
 import { memoryPressure } from "../system/memory.ts";
 import { TicketService } from "../tickets/ticket-service.ts";
+import { LessonService } from "../memory/lessons.ts";
+import { HandbookService } from "../memory/handbooks.ts";
 import { Attachments } from "../tickets/attachments.ts";
-import type { Db } from "../db/client.ts";
+import { schema, type Db } from "../db/client.ts";
 import type { SecretBox } from "../crypto/secret-box.ts";
 import { AuthService } from "../auth/auth-service.ts";
 import { EndpointService } from "../endpoints/endpoint-service.ts";
@@ -79,6 +82,8 @@ export interface Services {
   readonly cli: CliService;
   readonly machine: MachineService;
   readonly tickets: TicketService;
+  readonly lessons: LessonService;
+  readonly handbooks: HandbookService;
 }
 
 export function createServices(d: ServiceDeps): Services {
@@ -93,7 +98,10 @@ export function createServices(d: ServiceDeps): Services {
   // A workstation the CLI service held (sign-in, test) is free again: let queued runs have it.
   const cli = new CliService({ db: d.db, secrets: d.secrets, backend: d.backend, pool, bus, log: (msg, extra) => d.log("warn", msg, extra), onFreed: () => runs.schedule() });
   const tree = new TreeService({ db: d.db, projects, agents, github, git: d.git, backend: d.backend, limits: d.limits ?? DEFAULT_LIMITS });
+  // R8: the team's memory, read by every run and written at retrospectives.
+  const memory = { lessons: new LessonService(d.db, (id) => d.db.select({ name: schema.projects.name }).from(schema.projects).where(eq(schema.projects.id, id)).get()?.name ?? null), handbooks: new HandbookService(d.db) };
   const runs = new RunService({
+    memory,
     db: d.db, bus, pool, backend: d.backend, projects, agents, gateway, relay, tree, cli,
     maxConcurrent: d.maxConcurrentRuns, refreshMirror: d.refreshMirror ?? true,
     heavySlots: d.heavySlots ?? 2, memoryPressure: d.memoryPressure ?? memoryPressure, screensDir: d.screensDir,
@@ -103,7 +111,7 @@ export function createServices(d: ServiceDeps): Services {
   const warn = (msg: string, extra?: Record<string, unknown>) => d.log("warn", msg, extra);
   const cleanup = new TreeCleanup({ db: d.db, backend: d.backend, projects, github, git: d.git, log: warn, isActive: (id) => runs.isActive(id) });
   const missions = new MissionService({
-    db: d.db, bus, runs, tree, projects, agents, git: d.git, web: d.web?.(endpoints) ?? createWebAccess(endpoints), cleanup, log: warn,
+    db: d.db, bus, runs, tree, projects, agents, git: d.git, web: d.web?.(endpoints) ?? createWebAccess(endpoints), cleanup, log: warn, memory,
   });
   runs.attach(missions);
   const watcher = new PullRequestWatcher({
@@ -120,5 +128,5 @@ export function createServices(d: ServiceDeps): Services {
     db: d.db, bus, missions, projects, agents, runs, tree, github, git: d.git, attachments: new Attachments(d.db, d.attachmentsDir), log: warn,
     notify: (t, what) => discord.notifyTicket(t, what),
   });
-  return { bus, auth: new AuthService(d.db), endpoints, gateway, github, projects, pool, agents, relay, runs, tree, cleanup, missions, watcher, discord, cli, machine: new MachineService(d.db, d.layout.mirrors), tickets };
+  return { bus, auth: new AuthService(d.db), endpoints, gateway, github, projects, pool, agents, relay, runs, tree, cleanup, missions, watcher, discord, cli, machine: new MachineService(d.db, d.layout.mirrors), tickets, lessons: memory.lessons, handbooks: memory.handbooks };
 }

@@ -7,6 +7,7 @@ import type { MissionKind, MissionStage } from "../db/schema.ts";
  *   bug:        intake → planning (reproduce first) → [you approve] → building → verifying → [you merge] → retro → done
  *   research:   intake → research → discussion → done          (no code changes, no gates)
  *   experiment: intake → building → done                        (local sandbox only: nothing reaches GitHub)
+ *   marketing:  intake → research → building (the copy) → verifying → [you merge] → retro → done   (R8)
  * Only a person passes the gates; no agent can move a mission through them.
  */
 export type Actor = "lead" | "person" | "github" | "system";
@@ -25,6 +26,7 @@ export function stagesOf(f: Flow | boolean): MissionStage[] {
   switch (kind) {
     case "research": return ["intake", "research", "discussion", "done"];
     case "experiment": return ["intake", "building", "done"];
+    case "marketing": return ["intake", "research", "building", "verifying", "awaiting_merge", "retro", "done"];
     case "bug": return ["intake", "planning", "awaiting_approval", "building", "verifying", "awaiting_merge", "retro", "done"];
     default: return ["intake", ...(fast ? [] : ["research", "discussion"] as MissionStage[]), "planning", "awaiting_approval", "building", "verifying", "awaiting_merge", "retro", "done"];
   }
@@ -41,9 +43,9 @@ export function afterStageDone(stage: MissionStage, flow: Flow | boolean): Missi
   switch (stage) {
     case "intake":
       if (kind === "experiment") return "building";
-      if (kind === "research") return "research";
+      if (kind === "research" || kind === "marketing") return "research";
       return kind === "bug" || fast ? "planning" : "research";
-    case "research": return "discussion";
+    case "research": return kind === "marketing" ? "building" : "discussion";
     case "discussion": return kind === "research" ? "done" : "planning";
     case "building": return kind === "experiment" ? "done" : "verifying";
     case "verifying": return kind === "experiment" || kind === "research" ? null : "awaiting_merge";
@@ -77,6 +79,7 @@ export function canMove(from: MissionStage, to: MissionStage, by: Actor, flow: F
 const KIND_STEPS: readonly (readonly [MissionKind, MissionStage, MissionStage])[] = [
   ["research", "discussion", "done"],
   ["experiment", "building", "done"],
+  ["marketing", "research", "building"],
 ];
 
 /** The documents a stage must have pushed before it can end, relative to the mission's docs path. */
@@ -85,13 +88,13 @@ export function requiredDocs(stage: MissionStage, kind: MissionKind = "feature")
     case "research": return ["research.md"];
     case "discussion": return ["decisions.md"];
     case "planning": return ["plan.md"];
-    case "building": return kind === "experiment" ? ["results.md"] : [];
+    case "building": return kind === "experiment" ? ["results.md"] : kind === "marketing" ? ["marketing/positioning.md", "marketing/landing.md"] : [];
     case "verifying": return ["acceptance.md"];
     default: return [];
   }
 }
 
-export const DOC_NAMES = ["research.md", "decisions.md", "plan.md", "acceptance.md", "results.md"] as const;
+export const DOC_NAMES = ["research.md", "decisions.md", "plan.md", "acceptance.md", "results.md", "marketing/positioning.md", "marketing/landing.md", "marketing/appstore.md"] as const;
 
 /** Which tools the lead has in each stage. */
 export interface StageTools {

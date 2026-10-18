@@ -9,6 +9,10 @@ export interface BriefContext {
   readonly defaultBranch: string;
   /** R5: the flow (default feature). */
   readonly kind?: MissionKind;
+  /** R8: the project is a product: features also update the changelog (and store copy) alongside. */
+  readonly product?: boolean;
+  /** R8: an iOS app (App Store copy and simulator screenshots). */
+  readonly ios?: boolean;
 }
 
 export function missionPromptSection(docs: string): string[] {
@@ -30,6 +34,7 @@ const KIND_LINE: Record<MissionKind, string> = {
   bug: "This is a bug report: reproduce it with a failing test before fixing it.",
   research: "This is a research question: no code changes and no pull request; the result is your conclusion for the person.",
   experiment: "This is an experiment in a throwaway local repository: nothing goes to GitHub and there is no pull request; the result is what you found out.",
+  marketing: "This is marketing for the project: positioning and copy (landing page, App Store), with screenshots. No code changes; the documents go to the person in a pull request.",
 };
 
 export function intakeBrief(c: BriefContext): string {
@@ -55,8 +60,14 @@ export function stageBrief(stage: MissionStage, c: BriefContext, extra = ""): st
       "- If something important is unclear, ask_user once: at most 3 short, numbered questions. If it is clear enough, do not ask.",
       "- Then call stage_done with a short restatement of the goal (3 to 6 lines).",
     ].join("\n");
-    case "research": return [
-      "Stage: research.",
+    case "research": return c.kind === "marketing" ? [
+      "Stage: research, for the marketing.",
+      "- Find out who this is for and what they compare it with: spawn one researcher sub-agent (role \"researcher\") for competitors and how they present themselves (names, taglines, prices, App Store or landing pages, with links), and look at the repository and its documents yourself for what the product actually does.",
+      "- Claim only what the product really does; note what it does better and what it lacks.",
+      `- Write ${d}/research.md: the audience, the competitors with links, the angle you recommend. Under 120 lines.`,
+      "- git_commit and git_push, then call stage_done with the angle in at most 6 lines.",
+    ].join("\n") : [
+      "Stage: research",
       "Find out what is needed to do this well: how others solve it, libraries or approaches worth reusing, pitfalls, and what fits this repository.",
       "- For independent questions, spawn researcher sub-agents (role \"researcher\"). Each gets one precise question and reports its findings with source URLs; they do not need to change files. They have web_search and web_fetch, and so do you.",
       `- Write ${d}/research.md: the questions, the findings with source links, the options compared, and your recommendation. Under 150 lines.`,
@@ -88,7 +99,16 @@ export function stageBrief(stage: MissionStage, c: BriefContext, extra = ""): st
       "- Risks.",
       "Spawn an architect sub-agent only if the design needs more thought. git_commit and git_push, then call request_approval with a summary for the person (at most 15 lines: scope, packages, how it will be tested). Nothing is built until they approve.",
     ].join("\n");
-    case "building": return c.kind === "experiment" ? [
+    case "building": if (c.kind === "marketing") return [
+      `Stage: building, the copy. Spawn a marketer sub-agent (role "marketer") to write, from ${d}/research.md:`,
+      `- ${d}/marketing/positioning.md: one sentence that says what it is and for whom; the audience; three reasons to choose it over the alternatives.`,
+      `- ${d}/marketing/landing.md: a landing page's copy: headline, subheadline, three to five feature sections (title and two or three sentences each), a call to action.`,
+      ...(c.ios ? [`- ${d}/marketing/appstore.md: App Store copy within its limits: name (30 characters), subtitle (30), promotional text (170), description (4000), keywords (100, comma-separated), what's new (4000).`] : []),
+      `- Meanwhile spawn a QA sub-agent with needs ${c.ios ? '["simulator"]' : '["browser"]'} to take the screenshots the copy needs (save_as ${d}/marketing/screenshots/NN-what.jpg, at most 10), git_commit and git_push them.`,
+      "- Review both (review_agent) and merge them (merge_agent). Check every claim against what the product does; no invented numbers or quotes.",
+      "- git_push, then call stage_done with the headline and the one-sentence positioning.",
+    ].join("\n");
+    return c.kind === "experiment" ? [
       "Stage: building. Do the experiment.",
       "- Work in this repository (it exists only on this Mac). Spawn sub-agents only if parts are independent and big; small experiments you do yourself.",
       "- Keep what you made: commit the code, scripts and outputs worth keeping.",
@@ -98,9 +118,18 @@ export function stageBrief(stage: MissionStage, c: BriefContext, extra = ""): st
       `Stage: building. The person approved the plan. Build it as described in ${d}/plan.md:`,
       "- Spawn one developer sub-agent per work package. Each brief must be complete: the package, its files, its acceptance criteria and how to test. Do very small packages yourself.",
       "- wait_agents; review_agent each finished one; merge_agent the approved ones; message_agent the ones with requested changes and wait again.",
+      ...(c.product ? [
+        "- This project is a product: also spawn a marketer sub-agent (role \"marketer\") alongside, to add an entry for this change at the top of docs/agentswarm/CHANGELOG.md (date, a title, two to four sentences a user would understand, no internals) and, if the change is visible to users, update the store or landing copy under docs/agentswarm/marketing/ if it exists. Review and merge it like the others.",
+      ] : []),
       "- When everything is merged, run all the tests, git_push, then call stage_done with what was built.",
     ].join("\n");
-    case "verifying": return [
+    case "verifying": if (c.kind === "marketing") return [
+      "Stage: verifying the copy before it goes to the person.",
+      `- Check every claim in ${d}/marketing/ against the product (the code, its documents, the screenshots); fix anything not true or not shown. Check the App Store limits if there is an appstore.md.`,
+      `- Write ${d}/acceptance.md: what was written, the claims and where each is shown to be true, the screenshots used. git_commit, git_push.`,
+      `- open_pull_request into ${c.defaultBranch}: title = "Marketing: " and the headline; body = the positioning, links to the documents and screenshots. Then call stage_done.`,
+    ].join("\n");
+    return [
       "Stage: verifying. Check the result against the plan before it goes to the person.",
       `- Spawn one QA sub-agent (role "qa"). It starts from your last push. It runs every test, checks each acceptance criterion in ${d}/plan.md one by one, and reports pass or fail with evidence. It must not change code.`,
       `- If the result can be seen (an iOS app or a web page), give QA needs: ["simulator"] or ["browser"] and tell it to: build and start the app (for the web, the dev server), go through each acceptance criterion on screen, save one screenshot per criterion with save_as ${d}/screenshots/NN-what.jpg (at most 20), git_commit and git_push them, and report for each criterion what it did, what it saw, pass or fail, and the screenshot path.`,
@@ -111,7 +140,10 @@ export function stageBrief(stage: MissionStage, c: BriefContext, extra = ""): st
     ].join("\n");
     case "retro": return [
       `${extra} Stage: retro.`,
-      "Call stage_done with a short retrospective (at most 12 lines): what went well, what went wrong or cost the most, and what to do differently next time. Do not change any files.",
+      "1. Look at the facts above and at what happened. What would have saved time, money or a round trip next time?",
+      "2. record_lesson for what is worth keeping (at most 3): a reusable way of doing something or a pitfall, with its scope (team, this project, or one role). Search with recall first: if a lesson already says it, record the better wording (it replaces that one). Nothing if nothing is worth keeping.",
+      "3. If a role should work differently from now on (its handbook), propose_handbook_change (at most 2). The person decides.",
+      "4. Call stage_done with a short retrospective (at most 12 lines): what went well, what went wrong or cost the most, what you recorded. Do not change any files.",
     ].join("\n");
     default: return extra;
   }

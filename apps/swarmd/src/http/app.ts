@@ -4,7 +4,7 @@ import cookie from "@fastify/cookie";
 import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import {
-  CreateAgent, CreateEndpoint, CreateMission, CreateProject, CreateRun, Credentials, MissionBudget, MissionReply, RunMessage, SetCli, SetDiscord, SetGitHubToken, SetProjectProfile, PutProjectFile, CreateLocalProject, MachineSettings, CreateTicket, UpdateTicket, MoveTicket, TicketSettings, PromoteTicket, type Me,
+  CreateAgent, CreateEndpoint, CreateMission, CreateProject, CreateRun, Credentials, MissionBudget, MissionReply, RunMessage, SetCli, SetDiscord, SetGitHubToken, SetProjectProfile, PutProjectFile, CreateLocalProject, MachineSettings, CreateTicket, UpdateTicket, MoveTicket, TicketSettings, PromoteTicket, CreateLesson, UpdateLesson, SetHandbook, DecideProposal, ROLES, type Role, type Me,
 } from "@agentswarm/contracts";
 import type { Services } from "../app/services.ts";
 import { RateLimiter } from "../auth/rate-limit.ts";
@@ -177,6 +177,26 @@ export async function buildApp(o: AppOptions): Promise<FastifyInstance> {
   app.post<{ Params: { id: string } }>("/api/runs/:id/cancel", async (req) => s.runs.cancel(actor(req), req.params.id));
 
   // ---- missions -----------------------------------------------------------------------------
+  // ---- the team's memory (R8) ----
+  const role = (r: string): Role => {
+    if (!(ROLES as readonly string[]).includes(r)) throw badRequest("No such role");
+    return r as Role;
+  };
+  app.get("/api/lessons", async () => s.lessons.list());
+  app.post<{ Body: CreateLesson }>("/api/lessons", { schema: { body: CreateLesson } }, async (req) => s.lessons.record("you", req.body, null).lesson);
+  app.patch<{ Params: { id: string }; Body: UpdateLesson }>("/api/lessons/:id", { schema: { body: UpdateLesson } }, async (req) => s.lessons.update(actor(req), req.params.id, req.body));
+  app.delete<{ Params: { id: string } }>("/api/lessons/:id", async (req, reply) => {
+    s.lessons.remove(actor(req), req.params.id);
+    return reply.code(204).send();
+  });
+  app.get<{ Params: { id: string } }>("/api/lessons/:id/versions", async (req) => s.lessons.versions(req.params.id));
+  app.get("/api/handbooks", async () => ROLES.map((r) => s.handbooks.view(r)));
+  app.put<{ Params: { role: string }; Body: SetHandbook }>("/api/handbooks/:role", { schema: { body: SetHandbook } }, async (req) => s.handbooks.set(actor(req), role(req.params.role), req.body.text));
+  app.get<{ Params: { role: string; id: string } }>("/api/handbooks/:role/versions/:id", async (req) => ({ text: s.handbooks.versionText(role(req.params.role), Number(req.params.id)) }));
+  app.post<{ Params: { role: string; id: string } }>("/api/handbooks/:role/versions/:id/restore", async (req) => s.handbooks.restore(actor(req), role(req.params.role), Number(req.params.id)));
+  app.get<{ Querystring: { status?: string } }>("/api/handbook-proposals", async (req) => s.handbooks.proposals(["open", "accepted", "rejected"].includes(req.query.status ?? "") ? req.query.status as "open" : undefined));
+  app.post<{ Params: { id: string }; Body: DecideProposal }>("/api/handbook-proposals/:id", { schema: { body: DecideProposal } }, async (req) => s.handbooks.decide(actor(req), req.params.id, req.body.accept, req.body.text));
+
   // ---- the board (R7) ----
   app.get("/api/tickets", async () => s.tickets.list());
   app.post<{ Body: CreateTicket }>("/api/tickets", { schema: { body: CreateTicket } }, async (req) => s.tickets.create(actor(req), req.body));

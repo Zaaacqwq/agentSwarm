@@ -14,6 +14,7 @@ import { MissionsPage } from "./pages/Missions.tsx";
 import { MissionPage } from "./pages/Mission.tsx";
 import { TicketsPage } from "./pages/Tickets.tsx";
 import { TicketPage } from "./pages/Ticket.tsx";
+import { MemoryPage } from "./pages/Memory.tsx";
 
 const Mark = () => (
   <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 2l12 7v14l-12 7-12-7V9z" fill="var(--signal)" /><path d="M16 9l6 3.5v7L16 23l-6-3.5v-7z" fill="var(--paper)" /></svg>
@@ -44,6 +45,7 @@ export function App() {
   else if (section === "settings") page = <SettingsPage />;
   else if (section === "tickets" && id) page = <TicketPage key={id} ticketKey={decodeURIComponent(id)} />;
   else if (section === "overview") page = <SystemPage />;
+  else if (section === "memory") page = <MemoryPage />;
   // The board is home (R7).
   else page = <TicketsPage />;
 
@@ -54,6 +56,7 @@ export function App() {
         <Link to="/">Tickets</Link>
         <Link to="/overview">Overview</Link>
         <Link to="/missions">All missions</Link>
+        <Link to="/memory">Memory</Link>
         <Link to="/agents">Agents</Link>
         <Link to="/projects">Projects</Link>
         <Link to="/workstations">Workstations</Link>

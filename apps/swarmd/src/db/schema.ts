@@ -85,6 +85,8 @@ export interface ProjectProfile {
   readonly ios?: { readonly project?: string; readonly workspace?: string; readonly scheme?: string; readonly deviceType?: string };
   /** R6: origins besides localhost where the browser may click and type. */
   readonly testSites?: string[];
+  /** R8: a product: its feature tickets also update the changelog and store copy (a marketer works alongside). */
+  readonly product?: boolean;
 }
 
 /** Local files a project needs that are not in git (Local.xcconfig, .env): written into every worktree, never committed. */
@@ -227,7 +229,7 @@ export const MISSION_STAGES = [
   "intake", "research", "discussion", "planning", "awaiting_approval", "building", "verifying", "awaiting_merge", "retro", "done", "cancelled",
 ] as const;
 export type MissionStage = (typeof MISSION_STAGES)[number];
-export const MISSION_KINDS = ["feature", "bug", "research", "experiment"] as const;
+export const MISSION_KINDS = ["feature", "bug", "research", "experiment", "marketing"] as const;
 export type MissionKind = (typeof MISSION_KINDS)[number];
 
 /** One idea pursued in one project, from your first sentence to a merged pull request (R3). */
@@ -345,3 +347,70 @@ export const ticketAttachments = sqliteTable("ticket_attachments", {
   height: integer("height").notNull(),
   createdAt: integer("created_at").notNull(),
 }, (t) => [index("ticket_attachments_ticket_idx").on(t.ticketId)]);
+
+// ---- R8: the team's memory -------------------------------------------------------------------
+/** What agents are: their handbook and the lessons meant for them. */
+export const ROLES = ["lead", "researcher", "architect", "developer", "reviewer", "qa", "marketer"] as const;
+export type Role = (typeof ROLES)[number];
+
+/**
+ * Lessons the team learned: written at retrospectives (by a lead) or by you. Scope: the whole team, one
+ * project, or one role. Yours are requirements; an agent's are advice (marked so wherever they appear).
+ */
+export const lessons = sqliteTable("lessons", {
+  id: text("id").primaryKey(),
+  scope: text("scope", { enum: ["team", "project", "role"] }).notNull(),
+  projectId: text("project_id").references(() => projects.id, { onDelete: "cascade" }),
+  role: text("role", { enum: ROLES }),
+  title: text("title").notNull(),
+  text: text("text").notNull(),
+  /** "you", or the agent that wrote it. */
+  author: text("author").notNull(),
+  /** The ticket (key) or mission it came from. */
+  source: text("source"),
+  pinned: integer("pinned", { mode: "boolean" }).notNull().default(false),
+  retired: integer("retired", { mode: "boolean" }).notNull().default(false),
+  uses: integer("uses").notNull().default(0),
+  lastUsedAt: integer("last_used_at"),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+}, (t) => [index("lessons_scope_idx").on(t.scope, t.projectId, t.role)]);
+
+/** Earlier texts of a lesson, and who changed them. */
+export const lessonVersions = sqliteTable("lesson_versions", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  lessonId: text("lesson_id").notNull().references(() => lessons.id, { onDelete: "cascade" }),
+  title: text("title").notNull(),
+  text: text("text").notNull(),
+  author: text("author").notNull(),
+  createdAt: integer("created_at").notNull(),
+}, (t) => [index("lesson_versions_idx").on(t.lessonId, t.id)]);
+
+/** How each role works: Markdown in its prompt. Every change is a version; you edit, agents only propose. */
+export const handbooks = sqliteTable("handbooks", {
+  role: text("role", { enum: ROLES }).primaryKey(),
+  text: text("text").notNull(),
+  updatedBy: text("updated_by").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+});
+
+export const handbookVersions = sqliteTable("handbook_versions", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  role: text("role", { enum: ROLES }).notNull(),
+  text: text("text").notNull(),
+  author: text("author").notNull(),
+  createdAt: integer("created_at").notNull(),
+}, (t) => [index("handbook_versions_idx").on(t.role, t.id)]);
+
+/** A change to a handbook an agent suggested at a retrospective; it waits for you. */
+export const handbookProposals = sqliteTable("handbook_proposals", {
+  id: text("id").primaryKey(),
+  role: text("role", { enum: ROLES }).notNull(),
+  change: text("change").notNull(),
+  why: text("why").notNull(),
+  author: text("author").notNull(),
+  source: text("source"),
+  status: text("status", { enum: ["open", "accepted", "rejected"] }).notNull(),
+  createdAt: integer("created_at").notNull(),
+  decidedAt: integer("decided_at"),
+}, (t) => [index("handbook_proposals_status_idx").on(t.status, t.createdAt)]);

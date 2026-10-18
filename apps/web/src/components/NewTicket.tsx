@@ -11,7 +11,7 @@ const MAX_PICTURES = 6;
 function kindsFor(where: string, projects: readonly ProjectView[]): MissionKind[] {
   if (where === "sandbox") return ["experiment"];
   if (where === "ideas") return ["research"];
-  return projects.find((p) => p.id === where)?.kind === "local" ? ["research"] : ["feature", "bug", "research"];
+  return projects.find((p) => p.id === where)?.kind === "local" ? ["research"] : ["feature", "bug", "research", "marketing"];
 }
 
 /** A new ticket: your words, where it goes, and pictures if they help. It waits in the backlog unless you start it. */
