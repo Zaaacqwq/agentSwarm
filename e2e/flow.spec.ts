@@ -250,7 +250,7 @@ test("the board: a ticket with a picture, dragged into Todo, answered on the pho
   await page.getByLabel("Your answer").fill("Orange, like the logo.");
   await page.getByRole("button", { name: "Answer" }).click();
   await expect(chat.getByText("Got it: orange. Anything else?")).toBeVisible({ timeout: 30_000 });
-  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  const overflow = await page.evaluate("document.documentElement.scrollWidth - document.documentElement.clientWidth") as number;
   expect(overflow).toBeLessThanOrEqual(0);
   await page.emulateMedia({ colorScheme: "dark" });
   await page.screenshot({ path: `${SHOTS}/ticket-375-dark.png`, fullPage: true });
