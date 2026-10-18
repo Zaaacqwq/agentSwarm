@@ -16,6 +16,8 @@ const log: Logger = (level, msg, extra) => {
   process.stderr.write(`${JSON.stringify({ time: new Date().toISOString(), level, msg, ...extra })}\n`);
 };
 
+const SCREENS_KEPT_MS = 30 * 24 * 3600_000;
+
 async function main(): Promise<void> {
   if (process.getuid?.() === 0) throw new Error("swarmd must not run as root");
   process.umask(0o077);
@@ -53,6 +55,10 @@ async function main(): Promise<void> {
   void services.cli.refresh().catch(() => undefined);
   services.runs.recover();
   services.auth.pruneExpired();
+  // Screenshots shown in the dashboard (R6) are kept for a month after their run ended.
+  const pruneScreens = () => services.runs.pruneScreens(SCREENS_KEPT_MS);
+  pruneScreens();
+  setInterval(pruneScreens, 24 * 3600_000).unref();
   void services.github.verify().catch(() => undefined);
 
   // Linear's OAuth callback is registered at the local address: it stays the local one.

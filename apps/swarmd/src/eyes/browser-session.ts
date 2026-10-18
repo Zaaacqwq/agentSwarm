@@ -1,10 +1,13 @@
 import type { WorkstationBackend, WorkstationSession } from "../workstations/backend.ts";
 
 const COMMAND_TIMEOUT_MS = 90_000;
+/** Chromium starts in about 3 s on a workstation; much longer means it will not. */
+const START_TIMEOUT_MS = 60_000;
 /** The workstation side ends a session itself after 2 h, or 20 min without a command. */
 const SESSION_MS = 2 * 3600_000;
 
 interface Pending {
+  readonly live: object;
   readonly resolve: (v: unknown) => void;
   readonly reject: (e: Error) => void;
   readonly timer: NodeJS.Timeout;
@@ -52,9 +55,19 @@ export class BrowserSession {
         else p.reject(new Error(ev.error ?? "The browser command failed"));
       },
     });
+    const startTimer = setTimeout(() => {
+      failed(new Error(`The browser did not start within ${START_TIMEOUT_MS / 1000} s`));
+      session.close();
+    }, START_TIMEOUT_MS);
+    isReady.then(() => clearTimeout(startTimer), () => clearTimeout(startTimer));
     const live = { session, ready: isReady };
     session.done.then(
-      (r) => this.ended(live, new Error(`The browser session ended (${r.closed}); the next command starts a new one`)),
+      (r) => {
+        const error = new Error(`The browser session ended (${r.closed}); the next command starts a new one`);
+        // Ended before it was ever ready: whoever waits for it hears so.
+        failed(error);
+        this.ended(live, error);
+      },
       (e: Error) => {
         failed(e);
         this.ended(live, e);
@@ -67,6 +80,7 @@ export class BrowserSession {
   private ended(live: NonNullable<BrowserSession["live"]>, error: Error): void {
     if (this.live === live) this.live = null;
     for (const [id, p] of this.pending) {
+      if (p.live !== live) continue;
       clearTimeout(p.timer);
       p.reject(error);
       this.pending.delete(id);
@@ -76,14 +90,20 @@ export class BrowserSession {
   async command<T>(cmd: Record<string, unknown>, timeoutMs = COMMAND_TIMEOUT_MS): Promise<T> {
     this.live ??= this.start();
     const live = this.live;
-    await live.ready;
+    try {
+      await live.ready;
+    } catch (error) {
+      if (this.live === live) this.live = null;
+      throw error;
+    }
+    if (this.live !== live) throw new Error("The browser session ended; the next command starts a new one");
     const id = this.next++;
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`The browser did not answer within ${Math.round(timeoutMs / 1000)} s`));
       }, timeoutMs);
-      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, timer });
+      this.pending.set(id, { live, resolve: resolve as (v: unknown) => void, reject, timer });
       live.session.send({ id, ...cmd });
     });
   }

@@ -14,7 +14,7 @@ type Args = Parameters<typeof fauxToolCall>[1];
 const call = (name: string, args: Args) => fauxAssistantMessage([fauxToolCall(name, args)], { stopReason: "toolUse" });
 const done = (summary: string) => call("report", { summary, tests: "-", unfinished: [] });
 const lastResult = (c: TranscriptContext) => c.messages.at(-1) as { role: string; content: { type: string; text?: string; data?: string }[] };
-const toolNames = (c: TranscriptContext) => (c.tools ?? []).map((t) => t.name);
+const systemText = (c: TranscriptContext) => JSON.stringify(c.messages.filter((m) => (m as { role: string }).role === "system"));
 
 const screen = numberElements(trimTree(JSON.parse(readFileSync(UI_FIXTURE, "utf8"))));
 const general = screen.elements.find((e) => e.label === "General")!;
@@ -49,14 +49,20 @@ describe("eyes and hands in a run (fake simulator, real sandbox)", () => {
   test("QA builds, runs, reads, taps and photographs the app; the lead never gets a simulator; it is erased at the end", async () => {
     h = await harness();
     const { cookie, agentId } = await h.ready();
-    let leadTools: string[] = [];
+    let leadPrompt = "";
+    let leadSimResult = "";
+    let qaPrompt = "";
     let sawImage = false;
     let uiText = "";
     let cliRefused = "";
     h.scriptAgents({
       Dev: [
         (c) => {
-          leadTools = toolNames(c);
+          leadPrompt = systemText(c);
+          return call("sim_ui", {});
+        },
+        (c) => {
+          leadSimResult = JSON.stringify(lastResult(c));
           return call("spawn_agent", { name: "Coder", role: "developer", brief: "Change the settings screen title and check it in the simulator.", runtime: "claude_code", needs: ["simulator"] });
         },
         (c) => {
@@ -67,7 +73,10 @@ describe("eyes and hands in a run (fake simulator, real sandbox)", () => {
         done("QA checked it."),
       ],
       QA: [
-        call("sim_build", { scheme: "Demo", project: "App.xcodeproj" }),
+        (c) => {
+          qaPrompt = systemText(c);
+          return call("sim_build", { scheme: "Demo", project: "App.xcodeproj" });
+        },
         call("sim_launch", {}),
         call("sim_ui", {}),
         (c) => {
@@ -90,7 +99,8 @@ describe("eyes and hands in a run (fake simulator, real sandbox)", () => {
     assert.equal(h.services.runs.view(lead.id).status, "succeeded");
     assert.equal(qa.status, "succeeded", qa.error ?? "");
 
-    assert.ok(!leadTools.some((t) => t.startsWith("sim_")), "the lead has no simulator");
+    assert.ok(!leadPrompt.includes("sim_build") && qaPrompt.includes("sim_build"), "only the run with needs is told about the simulator");
+    assert.match(leadSimResult, /not found|unknown|no such tool/i, `the lead has no simulator: ${leadSimResult}`);
     assert.match(cliRefused, /for native agents/);
     assert.ok(!tree.nodes.some((n) => n.title === "Coder"), "nothing was spawned for the refused request");
     assert.deepEqual(qa.needs, ["simulator"]);
@@ -154,5 +164,91 @@ describe("eyes and hands in a run (fake simulator, real sandbox)", () => {
     assert.equal(node("A")!.status, "succeeded");
     assert.equal(node("B")!.status, "succeeded");
     assert.equal(maxHeavy, 1, "one simulator run at a time");
+    // Screenshots of long-finished runs are pruned; recent and unknown-but-live ones are kept.
+    const { mkdirSync, writeFileSync, existsSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const dir = join(h.base, "screens");
+    for (const id of [node("A")!.id, "run_gone"]) {
+      mkdirSync(join(dir, id), { recursive: true });
+      writeFileSync(join(dir, id, "001.jpg"), "x");
+    }
+    assert.equal(h.services.runs.pruneScreens(30 * 86_400_000), 1, "a run that no longer exists");
+    assert.ok(existsSync(join(dir, node("A")!.id)));
+    assert.equal(h.services.runs.pruneScreens(30 * 86_400_000, Date.now() + 31 * 86_400_000), 1);
+    assert.ok(!existsSync(join(dir, node("A")!.id)));
+  });
+});
+
+/** A backend whose answers the test decides, for the Eyes and BrowserSession units. */
+function fakeBackend(answer: (r: { op: string }) => unknown, session?: (onEvent: (e: unknown) => void) => { done: Promise<{ closed: string }>; sent: object[] }) {
+  const calls: { op: string }[] = [];
+  return {
+    calls,
+    backend: {
+      async call(_u: string, r: { op: string }) {
+        calls.push(r);
+        const out = answer(r);
+        if (out instanceof Error) throw out;
+        return out;
+      },
+      open(_u: string, _r: unknown, opts: { onEvent?: (e: unknown) => void }) {
+        const s = session!(opts.onEvent ?? (() => undefined));
+        return { send: (c: object) => void s.sent.push(c), close: () => undefined, done: s.done };
+      },
+      async listUsers() {
+        return ["ws-1"];
+      },
+    } as unknown as import("../src/workstations/backend.ts").WorkstationBackend,
+  };
+}
+
+describe("eyes, unit by unit", () => {
+  const tree = trimTree(JSON.parse(readFileSync(UI_FIXTURE, "utf8")));
+  const image = { jpeg: Buffer.from([0xff, 0xd8, 0xff]).toString("base64"), width: 460, height: 1000, sourceWidth: 1206, sourceHeight: 2622 };
+  const device = { udid: "U", name: "agentswarm-ws-1", deviceType: "x.iPhone-17", runtime: "x.iOS-27-0", bootMs: 1000 };
+
+  test("a tap never uses numbers the agent has not seen; a cut-short boot is still erased", async () => {
+    const { Eyes } = await import("../src/eyes/eyes.ts");
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const f = fakeBackend((r) => (r.op === "sim.boot" ? device : r.op === "sim.ui" ? tree : r.op === "sim.screenshot" ? image : {}));
+    const eyes = new Eyes({ backend: f.backend, workstation: "ws-1", scope: "s", needs: ["simulator"], profile: null, screensDir: join(mkdtempSync(join(tmpdir(), "eyes-")), "r"), sleep: async () => undefined });
+    const tools = new Map(eyes.tools().map((t) => [t.name, t]));
+    const run = async (name: string, args: object) => JSON.stringify((await tools.get(name)!.execute("id", args as never)).content);
+    await run("sim_screenshot", {});
+    assert.match(await run("sim_tap", { element: 3 }), /Call sim_ui first/, "the screenshot read the screen size, not a numbering");
+    assert.match(await run("sim_ui", {}), /General/);
+    assert.match(await run("sim_tap", { element: general.n }), /Tapped/);
+    assert.match(await run("sim_tap", { element: general.n }), /Call sim_ui first/, "after a tap the old numbers are gone");
+
+    const cut = fakeBackend((r) => (r.op === "sim.boot" ? new Error("Cancelled") : {}));
+    const other = new Eyes({ backend: cut.backend, workstation: "ws-1", scope: "s", needs: ["simulator"], profile: null, screensDir: "/nonexistent", sleep: async () => undefined });
+    await assert.rejects(other.tools().find((t) => t.name === "sim_ui")!.execute("id", {} as never), /Cancelled/);
+    await other.close();
+    assert.deepEqual(cut.calls.map((c) => c.op), ["sim.boot", "sim.shutdown"]);
+    await assert.rejects(other.tools().find((t) => t.name === "sim_ui")!.execute("id", {} as never), /shut down/);
+  });
+
+  test("a browser session that ends or fails before it is ready fails the command at once", async () => {
+    const { BrowserSession } = await import("../src/eyes/browser-session.ts");
+    const quiet = fakeBackend(() => ({}), () => ({ done: Promise.resolve({ closed: "browser exited: no ready" }), sent: [] }));
+    await assert.rejects(new BrowserSession(quiet.backend, "ws-1", "s", []).command({ cmd: "snapshot" }), /ended \(browser exited/);
+    const fatal = fakeBackend(() => ({}), (onEvent) => {
+      queueMicrotask(() => onEvent({ fatal: "Chromium crashed" }));
+      return { done: new Promise(() => undefined), sent: [] };
+    });
+    await assert.rejects(new BrowserSession(fatal.backend, "ws-1", "s", []).command({ cmd: "snapshot" }), /failed to start: Chromium crashed/);
+    const sent: object[] = [];
+    const ok = fakeBackend(() => ({}), (onEvent) => {
+      queueMicrotask(() => onEvent({ ready: true }));
+      const done = new Promise<{ closed: string }>(() => undefined);
+      setTimeout(() => onEvent({ id: 1, ok: true, result: { url: "http://localhost:3100/", title: "Home" } }), 5);
+      return { done, sent };
+    });
+    const b = new BrowserSession(ok.backend, "ws-1", "s", []);
+    assert.deepEqual(await b.command({ cmd: "open", url: "http://localhost:3100/" }), { url: "http://localhost:3100/", title: "Home" });
+    assert.deepEqual(sent, [{ id: 1, cmd: "open", url: "http://localhost:3100/" }]);
+    await assert.rejects(b.command({ cmd: "snapshot" }, 20), /did not answer within/);
   });
 });

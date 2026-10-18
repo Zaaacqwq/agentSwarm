@@ -36,7 +36,13 @@ const text = (t: string): AgentToolResult<Details> => ({ content: [{ type: "text
 export class Eyes {
   private readonly deps: EyesDeps;
   private device: SimDevice | null = null;
+  /** A boot was asked for (it may have been cut short): close() shuts down and erases either way. */
+  private bootRequested = false;
+  private closed = false;
+  /** The numbering sim_tap uses: only sim_ui sets it, so a tap never uses numbers the agent has not seen. */
   private screen: Screen | null = null;
+  /** The screen size in points, for screenshots and swipes. */
+  private points: { width: number; height: number } | null = null;
   private bundleId: string | null = null;
   private browser: BrowserSession | null = null;
   private last: "simulator" | "browser" | null = null;
@@ -61,9 +67,13 @@ export class Eyes {
   }
 
   private async booted(signal?: AbortSignal): Promise<string> {
+    if (this.closed) throw new Error("This run's simulator has been shut down");
     if (this.device) return "";
     const deviceType = this.deps.profile?.ios?.deviceType;
-    this.device = await this.call<SimDevice>({ op: "sim.boot", scope: this.deps.scope, ...(deviceType ? { deviceType } : {}) }, signal, 300_000);
+    this.bootRequested = true;
+    const device = await this.call<SimDevice>({ op: "sim.boot", scope: this.deps.scope, ...(deviceType ? { deviceType } : {}) }, signal, 300_000);
+    if (this.closed) throw new Error("This run's simulator has been shut down");
+    this.device = device;
     return `(Simulator ${this.device.name} started: ${this.device.deviceType.split(".").pop()}, ${this.device.runtime.split(".").pop()}, ${Math.round(this.device.bootMs / 1000)} s.)\n`;
   }
 
@@ -79,12 +89,12 @@ export class Eyes {
   private saveAs(path: string | undefined): string | undefined {
     if (path === undefined) return undefined;
     if (this.evidence >= MAX_EVIDENCE) throw new Error(`At most ${MAX_EVIDENCE} evidence screenshots per run; pick the ones that matter`);
-    this.evidence += 1;
     return path;
   }
 
   /** The model gets the image; the dashboard gets a copy under the run's screens. */
   private image(note: string, img: ImageResult): AgentToolResult<Details> {
+    if (img.saved) this.evidence += 1;
     mkdirSync(this.deps.screensDir, { recursive: true });
     this.shots += 1;
     const file = `${String(this.shots).padStart(3, "0")}.jpg`;
@@ -94,8 +104,13 @@ export class Eyes {
   }
 
   private async readScreen(signal?: AbortSignal): Promise<Screen> {
-    this.screen = numberElements(await this.call<UiElement[]>({ op: "sim.ui", scope: this.deps.scope }, signal, 120_000));
-    return this.screen;
+    const screen = numberElements(await this.call<UiElement[]>({ op: "sim.ui", scope: this.deps.scope }, signal, 120_000));
+    this.points = { width: screen.width, height: screen.height };
+    return screen;
+  }
+
+  private async size(signal?: AbortSignal): Promise<{ width: number; height: number } | null> {
+    return this.points ?? (await this.readScreen(signal).catch(() => null));
   }
 
   async simScreenshot(saveAs?: string, region?: readonly number[], signal?: AbortSignal): Promise<AgentToolResult<Details>> {
@@ -103,7 +118,7 @@ export class Eyes {
     const save = this.saveAs(saveAs);
     const img = await this.call<ImageResult>({ op: "sim.screenshot", scope: this.deps.scope, ...(save ? { saveAs: save } : {}), ...(region ? { region: region as [number, number, number, number] } : {}) }, signal, 120_000);
     this.last = "simulator";
-    const points = this.screen ?? (await this.readScreen(signal).catch(() => null));
+    const points = await this.size(signal);
     const scale = points?.width ? ` 1 image px = ${(points.width / img.width).toFixed(3)} points; taps use points.` : "";
     const what = region ? `A closer look at [${region.join(", ")}] of the simulator screen` : `The simulator screen, ${img.width}×${img.height} px${points?.width ? ` (${points.width}×${points.height} points)` : ""}.${scale}`;
     return this.image(`${boot}${what}`, img);
@@ -161,7 +176,11 @@ export class Eyes {
         }),
       tool("sim_ui", "Read the current screen: every labelled or tappable element with a number, its text and where it is (points). Cheaper and more exact than a screenshot for finding what to tap.",
         Type.Object({}),
-        async (_p, signal) => `${await this.booted(signal)}${formatScreen(await this.readScreen(signal))}`),
+        async (_p, signal) => {
+          const boot = await this.booted(signal);
+          this.screen = await this.readScreen(signal);
+          return `${boot}${formatScreen(this.screen)}`;
+        }),
       tool("sim_tap", "Tap an element by its number from the last sim_ui, or a point (x, y in points). Read the screen again afterwards: it may have changed.",
         Type.Object({ element: Type.Optional(Type.Integer({ minimum: 1 })), x: Type.Optional(Type.Number({ minimum: 0 })), y: Type.Optional(Type.Number({ minimum: 0 })) }),
         async (p, signal) => {
@@ -194,8 +213,8 @@ export class Eyes {
         Type.Object({ direction: Type.Optional(Type.Union([Type.Literal("up"), Type.Literal("down"), Type.Literal("left"), Type.Literal("right")])), from: Type.Optional(Type.Array(Type.Number(), { minItems: 2, maxItems: 2 })), to: Type.Optional(Type.Array(Type.Number(), { minItems: 2, maxItems: 2 })) }),
         async (p, signal) => {
           await this.booted(signal);
-          const s = this.screen ?? (await this.readScreen(signal));
-          const [w, h] = [s.width || 400, s.height || 870];
+          const s = await this.size(signal);
+          const [w, h] = [s?.width || 400, s?.height || 870];
           const lines = { up: [[w / 2, h * 0.75], [w / 2, h * 0.25]], down: [[w / 2, h * 0.3], [w / 2, h * 0.8]], left: [[w * 0.85, h / 2], [w * 0.15, h / 2]], right: [[w * 0.15, h / 2], [w * 0.85, h / 2]] } as const;
           const [from, to] = p.from && p.to ? [p.from, p.to] : p.direction ? lines[p.direction as keyof typeof lines] : [null, null];
           if (!from || !to) return text("Give a direction, or from and to.");
@@ -269,11 +288,14 @@ export class Eyes {
 
   /** End of the run's execution: the simulator is shut down and erased, the browser closed. */
   async close(): Promise<void> {
+    this.closed = true;
     const browser = this.browser;
     this.browser = null;
     await browser?.close().catch(() => undefined);
-    if (this.device) {
+    // Also after a boot that was cut short (a cancel, a timeout): the next project gets a clean device.
+    if (this.bootRequested) {
       this.device = null;
+      this.bootRequested = false;
       await this.call({ op: "sim.shutdown", scope: this.deps.scope }, undefined, 300_000);
     }
   }

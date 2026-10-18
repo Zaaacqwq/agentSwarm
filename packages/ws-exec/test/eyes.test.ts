@@ -182,6 +182,9 @@ describe("browser address rules", () => {
     assert.equal(await urlAllowed("chrome://settings", dns), false);
     assert.equal(await urlAllowed("http://unknown.invalid/", dns), false);
     assert.equal(await urlAllowed("data:text/html,hi", dns), true);
+    assert.equal(await urlAllowed("http://127.0.0.1.evil.example/", async () => ["192.168.1.1"]), false, "a name that only looks like loopback is resolved and refused");
+    assert.equal(await urlAllowed("http://[::]/", dns), false);
+    assert.equal(await urlAllowed("http://[64:ff9b::c0a8:101]/", dns), false, "NAT64 of a LAN address");
   });
 
   test("clicking and typing only on local pages and the project's test sites", () => {
@@ -202,6 +205,10 @@ function browserTools(): string | null {
 async function serve(): Promise<{ server: Server; port: number }> {
   const server = createServer((req, res) => {
     res.setHeader("content-type", "text/html");
+    if (req.url === "/away") {
+      res.writeHead(302, { location: "http://192.168.1.1/admin" });
+      return res.end();
+    }
     res.end(req.url === "/next"
       ? "<title>Next</title><h1>Second page</h1>"
       : `<title>Demo</title><h1 id="h">Hello</h1><label>Name <input id="n"></label><button onclick="document.getElementById('h').textContent='Hi '+document.getElementById('n').value">Greet</button><a href="/next">Next</a>`);
@@ -258,6 +265,7 @@ describe("the browser (real headless Chromium, real sandbox)", { skip: browserTo
       const tools = browserTools()!;
       mkdirSync(f.layout.toolsDir, { recursive: true });
       for (const d of ["playwright-core", "chromium"]) symlinkSync(join(tools, d), join(f.layout.toolsDir, d));
+      copyFileSync(join(import.meta.dirname, "..", "src", "ops", "browser-driver.ts"), join(f.layout.toolsDir, "browser-driver.ts"));
       mkdirSync(join(f.layout.mirrors, ".agentswarm"), { recursive: true });
       writeFileSync(denyPortsFile(f.env), JSON.stringify([denied.port]));
       await call(f.env, clone);
@@ -280,6 +288,8 @@ describe("the browser (real headless Chromium, real sandbox)", { skip: browserTo
       const lan = await s.send({ cmd: "open", url: "http://192.168.1.1/" });
       assert.equal(lan.ok, false);
       assert.match(lan.error!, /not allowed/);
+      const away = await s.send({ cmd: "open", url: `http://127.0.0.1:${port}/away` });
+      assert.equal(away.ok, false, "a redirect into the LAN is refused too");
       const blocked = await s.send({ cmd: "open", url: `http://127.0.0.1:${denied.port}/` });
       assert.equal(blocked.ok, false, "seatbelt refuses the denied port for the browser too");
       const bogus = await s.send({ cmd: "launch_missiles" });
@@ -292,7 +302,7 @@ describe("the browser (real headless Chromium, real sandbox)", { skip: browserTo
       const res = await s.done;
       assert.equal(res.ok, true, JSON.stringify(res));
       assert.equal((res as { result: { closed: string } }).result.closed, "closed");
-      assert.deepEqual(readdirSync(join(f.env.root, ".tmp", SCOPE.replaceAll("/", "__"))).filter((n) => n.startsWith("browser-profile") || n.startsWith("driver-")), [], "profile and driver copy removed");
+      assert.deepEqual(readdirSync(join(f.env.root, ".tmp", SCOPE.replaceAll("/", "__"))).filter((n) => n.startsWith("browser-profile")), [], "the profile is removed");
     } finally {
       server.close();
       denied.server.close();
@@ -306,6 +316,7 @@ describe("the browser (real headless Chromium, real sandbox)", { skip: browserTo
       const tools = browserTools()!;
       mkdirSync(f.layout.toolsDir, { recursive: true });
       for (const d of ["playwright-core", "chromium"]) symlinkSync(join(tools, d), join(f.layout.toolsDir, d));
+      copyFileSync(join(import.meta.dirname, "..", "src", "ops", "browser-driver.ts"), join(f.layout.toolsDir, "browser-driver.ts"));
       await call(f.env, clone);
       await assert.rejects(call(f.env, { op: "browser.session", scope: SCOPE, interact: ["https://ok.example/path"], timeoutMs: 60_000 }), { code: "bad_request" });
       const s = session(f.env);

@@ -27,7 +27,8 @@ export type DriverCommand =
 
 const PRIVATE = new BlockList();
 for (const [net, bits] of [["10.0.0.0", 8], ["172.16.0.0", 12], ["192.168.0.0", 16], ["100.64.0.0", 10], ["169.254.0.0", 16], ["0.0.0.0", 8], ["224.0.0.0", 3]] as const) PRIVATE.addSubnet(net, bits, "ipv4");
-for (const [net, bits] of [["fc00::", 7], ["fe80::", 10], ["ff00::", 8]] as const) PRIVATE.addSubnet(net, bits, "ipv6");
+for (const [net, bits] of [["fc00::", 7], ["fe80::", 10], ["fec0::", 10], ["ff00::", 8], ["2002::", 16], ["64:ff9b::", 96]] as const) PRIVATE.addSubnet(net, bits, "ipv6");
+PRIVATE.addAddress("::", "ipv6");
 
 /**
  * Loopback is allowed (a project's own dev server; seatbelt still refuses the denied ports and swarmd's), the
@@ -41,7 +42,13 @@ export function addressAllowed(ip: string): boolean {
   return false;
 }
 
-export const isLoopbackHost = (host: string) => host === "localhost" || host.endsWith(".localhost") || /^127\./.test(host) || host === "::1" || host === "[::1]";
+/** Only real loopback: the name localhost, or a loopback IP. "127.0.0.1.example.com" is a name like any other. */
+export function isLoopbackHost(host: string): boolean {
+  const h = host.replace(/^\[|\]$/g, "").toLowerCase();
+  if (h === "localhost" || h.endsWith(".localhost")) return true;
+  if (isIP(h) === 4) return h.startsWith("127.");
+  return isIP(h) === 6 && (h === "::1" || /^::ffff:127\./.test(h));
+}
 
 const resolved = new Map<string, { ok: boolean; at: number }>();
 
@@ -103,6 +110,8 @@ async function main(): Promise<void> {
     viewport: { width: 1280, height: 800 },
     acceptDownloads: false,
     serviceWorkers: "block",
+    // WebRTC would open UDP connections that the request filter never sees.
+    args: ["--force-webrtc-ip-handling-policy=disable_non_proxied_udp", "--disable-features=WebRtcHideLocalIpsWithMdns"],
   });
   const events: string[] = [];
   const note = (text: string) => {

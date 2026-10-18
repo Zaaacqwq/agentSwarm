@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, rmSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import type { ExecEnv } from "../layout.ts";
 import { OpError } from "../protocol.ts";
@@ -21,6 +21,8 @@ export const browserPaths = (env: ExecEnv) => ({
   playwright: join(env.layout.toolsDir, "playwright-core"),
   chromium: join(env.layout.toolsDir, "chromium", "chrome-headless-shell-mac-arm64", "chrome-headless-shell"),
 });
+/** Installed next to the tools (root-owned): never run from a directory the agent can write. */
+export const driverPath = (env: ExecEnv) => join(env.layout.toolsDir, "browser-driver.ts");
 
 /** Origins the project lists for clicking and typing: exactly scheme://host[:port], http or https. */
 export function checkOrigins(origins: readonly string[]): string[] {
@@ -50,11 +52,9 @@ export async function session(env: ExecEnv, scope: string, interact: readonly st
     throw new OpError("failed", "The browser is not installed: run sudo zsh scripts/setup.sh --update-exec");
   }
   const s = prepareSpace(env, scope);
+  const driver = driverPath(env);
+  if (!existsSync(driver)) throw new OpError("failed", "The browser driver is not installed: run sudo zsh scripts/setup.sh --update-exec");
   const stamp = `${process.pid}-${Date.now()}`;
-  const driver = join(s.tmp, `driver-${stamp}`, "browser-driver.ts");
-  mkdirSync(join(s.tmp, `driver-${stamp}`), { recursive: true, mode: 0o700 });
-  // The sandbox may not read ws-exec's own directory in every layout: run a copy from the scope's temp dir.
-  writeFileSync(driver, readFileSync(new URL("./browser-driver.ts", import.meta.url)));
   const profile = join(s.tmp, `browser-profile-${stamp}`);
   const config: DriverConfig = { ...paths, userDataDir: profile, tmpDir: s.tmp, interact: origins };
   const child = spawnInteractive(env, sandboxed(env, [join(env.layout.nodeBin, "node"), "--disable-warning=ExperimentalWarning", driver], scope), { cwd, scope });
@@ -82,7 +82,11 @@ export async function session(env: ExecEnv, scope: string, interact: readonly st
         if (msg.ready) return emit({ ready: true });
         if (typeof msg.id !== "number") return;
         const png = msg.ok ? msg.result?.png : undefined;
-        if (typeof png !== "string") return emit(msg);
+        if (png === undefined) return emit(msg);
+        // The driver shares the sandbox with untrusted pages: take only a capture in its own temp dir.
+        if (typeof png !== "string" || dirname(png) !== s.tmp.replace(/\/$/, "") || !/^browser-\d+-\d+\.png$/.test(basename(png))) {
+          return emit({ id: msg.id, ok: false, error: "The browser returned an unexpected screenshot path" });
+        }
         try {
           const { png: _png, ...rest } = msg.result!;
           const image = await toModelImage(env, scope, cwd, png, saves.get(msg.id), regions.get(msg.id));
@@ -95,7 +99,9 @@ export async function session(env: ExecEnv, scope: string, interact: readonly st
         }
       });
     });
-    child.on("exit", () => resolve());
+    // "close", not "exit": the last replies may still be in the pipe when the process ends.
+    child.on("close", () => resolve());
+    child.on("error", () => resolve());
   });
   let stderr = "";
   child.stderr!.on("data", (b: Buffer) => (stderr = (stderr + b.toString("utf8")).slice(-2000)));
@@ -145,6 +151,5 @@ export async function session(env: ExecEnv, scope: string, interact: readonly st
   clearTimeout(total);
   clearTimeout(idle);
   rmSync(profile, { recursive: true, force: true });
-  rmSync(join(s.tmp, `driver-${stamp}`), { recursive: true, force: true });
   return { closed: closed || (child.exitCode === 0 ? "closed" : `browser exited: ${stderr.trim().split("\n").pop() ?? ""}`.slice(0, 500)) };
 }

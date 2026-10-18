@@ -1,4 +1,5 @@
-import { readFileSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
+import { readProduced } from "../paths.ts";
 import type { ExecEnv } from "../layout.ts";
 import { OpError, type ImageResult } from "../protocol.ts";
 import { runProcess } from "../process.ts";
@@ -45,14 +46,16 @@ export function checkRegion(region: unknown): Region {
  * a closer look at small icons and text (R0), not a blow-up of the already shrunk image.
  */
 export async function toModelImage(env: ExecEnv, scope: string, cwd: string, png: string, saveAs?: { readonly path: string; readonly abs: string }, region?: Region): Promise<ImageResult> {
-  const full = imageSize(readFileSync(png));
   const jpeg = `${png}.jpg`;
   const run = async (argv: string[]) => {
     const r = await runProcess(env, sandboxed(env, argv, scope), { cwd, scope, timeoutMs: 30_000 });
     if (r.exitCode !== 0) throw new OpError("failed", `Image conversion failed: ${r.output.trim().slice(-300)}`);
   };
-  let source = full;
+  let full: { width: number; height: number };
+  let source: { width: number; height: number };
   try {
+    full = imageSize(readProduced(png));
+    source = full;
     if (region) {
       const [x1, y1, x2, y2] = region;
       const x = Math.round((x1 / 1000) * full.width);
@@ -60,7 +63,7 @@ export async function toModelImage(env: ExecEnv, scope: string, cwd: string, png
       const w = Math.max(1, Math.round(((x2 - x1) / 1000) * full.width));
       const h = Math.max(1, Math.round(((y2 - y1) / 1000) * full.height));
       await run(["/usr/bin/sips", "--cropToHeightWidth", String(h), String(w), "--cropOffset", String(y), String(x), png, "--out", png]);
-      source = imageSize(readFileSync(png));
+      source = imageSize(readProduced(png));
       // A small crop is scaled up to the model's size: that is the point of looking closer.
       const scale = MODEL_MAX_SIDE / Math.max(source.width, source.height);
       if (scale > 1) await run(["/usr/bin/sips", "-z", String(Math.round(source.height * scale)), String(Math.round(source.width * scale)), png, "--out", png]);
@@ -68,7 +71,7 @@ export async function toModelImage(env: ExecEnv, scope: string, cwd: string, png
     await run(["/usr/bin/sips", "-s", "format", "jpeg", "-s", "formatOptions", "70", "-Z", String(MODEL_MAX_SIDE), png, "--out", jpeg]);
     // Evidence for the acceptance report: the same size, a little better quality.
     if (saveAs) await run(["/usr/bin/sips", "-s", "format", "jpeg", "-s", "formatOptions", "80", "-Z", String(MODEL_MAX_SIDE), png, "--out", saveAs.abs]);
-    const buf = readFileSync(jpeg);
+    const buf = readProduced(jpeg);
     const size = imageSize(buf);
     return { jpeg: buf.toString("base64"), width: size.width, height: size.height, sourceWidth: full.width, sourceHeight: full.height, ...(region ? { region } : {}), ...(saveAs ? { saved: saveAs.path } : {}) };
   } finally {

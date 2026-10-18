@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
+import { basename, dirname, join, relative, sep } from "node:path";
 import type { ExecEnv } from "../layout.ts";
 import { OpError, type ExecResult, type ImageResult, type SimBuildResult, type SimDevice, type UiElement } from "../protocol.ts";
-import { resolveInScope, resolveScope } from "../paths.ts";
+import { readProduced, resolveInScope, resolveScope } from "../paths.ts";
 import { runProcess } from "../process.ts";
 import { sandboxed } from "../sandbox.ts";
 import { space } from "../space.ts";
@@ -78,10 +78,13 @@ async function jsonOut(c: Ctx, argv: string[], timeoutMs = 60_000): Promise<stri
   const file = join(dir, `out-${process.pid}-${Math.random().toString(36).slice(2)}.json`);
   // The command goes in as positional parameters, never into the script text.
   const r = await run(c, ["/bin/zsh", "-c", 'out="$1"; shift; "$@" > "$out"', "zsh", file, ...argv], { timeoutMs });
-  const text = existsSync(file) ? readFileSync(file, "utf8") : "";
-  rmSync(file, { force: true });
-  if (r.exitCode !== 0) throw new OpError("failed", (r.output.trim() || text.trim()).slice(-800) || `exit ${r.exitCode}`);
-  return text;
+  try {
+    // The error says what the command wrote to stderr, never what the file holds.
+    if (r.exitCode !== 0) throw new OpError("failed", r.output.trim().slice(-800) || `${basename(argv[0]!)} exited with ${r.exitCode}`);
+    return readProduced(file).toString("utf8");
+  } finally {
+    rmSync(file, { force: true });
+  }
 }
 
 async function findDevice(c: Ctx): Promise<{ runtime: string; device: SimctlDevice } | undefined> {
@@ -108,11 +111,14 @@ export async function boot(env: ExecEnv, scope: string, deviceType?: string, run
     found = undefined;
   }
   const udid = found?.device.udid ?? (await simctl(c, ["create", deviceName(env), wantType, wantRuntime])).trim().split("\n").pop()!.trim();
-  if (found?.device.state !== "Booted") {
-    const r = await run(c, [env.layout.xcrun, "simctl", "boot", udid], { timeoutMs: 120_000 });
-    if (r.exitCode !== 0 && !/current state: Booted/.test(r.output)) throw new OpError("failed", r.output.trim().slice(-800));
-    await simctl(c, ["bootstatus", udid, "-b"], 240_000);
+  // Every run starts from a clean device, even if the last one ended without erasing it (a crash, a cancel).
+  if (found) {
+    if (found.device.state !== "Shutdown") await run(c, [env.layout.xcrun, "simctl", "shutdown", udid], { timeoutMs: 120_000 });
+    await simctl(c, ["erase", udid], 180_000);
   }
+  const r = await run(c, [env.layout.xcrun, "simctl", "boot", udid], { timeoutMs: 120_000 });
+  if (r.exitCode !== 0 && !/current state: Booted/.test(r.output)) throw new OpError("failed", r.output.trim().slice(-800));
+  await simctl(c, ["bootstatus", udid, "-b"], 240_000);
   return { udid, name: deviceName(env), deviceType: wantType, runtime: wantRuntime, bootMs: Date.now() - started };
 }
 
@@ -249,7 +255,12 @@ export async function screenshot(env: ExecEnv, scope: string, saveAs?: string, r
   const dir = space(env, scope).tmp;
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const png = join(dir, `shot-${process.pid}-${Date.now()}.png`);
-  await ok(c, [axePath(env), "screenshot", "--udid", device.udid, "--output", png], { timeoutMs: 60_000 });
+  try {
+    await ok(c, [axePath(env), "screenshot", "--udid", device.udid, "--output", png], { timeoutMs: 60_000 });
+  } catch (error) {
+    rmSync(png, { force: true });
+    throw error;
+  }
   return toModelImage(env, scope, c.cwd, png, save, crop);
 }
 
@@ -258,6 +269,8 @@ export function evidencePath(cwd: string, path: string): { path: string; abs: st
   if (!/\.jpe?g$/i.test(path)) throw new OpError("bad_request", "Save screenshots as .jpg");
   if (path.split("/").some((p) => p.toLowerCase() === ".git")) throw new OpError("out_of_scope", "Not inside .git");
   const abs = resolveInScope(cwd, path);
+  // Checked on the resolved path too: a link in the worktree must not lead into .git.
+  if (relative(realpathSync(cwd), abs).split(sep).some((p) => p.toLowerCase() === ".git")) throw new OpError("out_of_scope", "Not inside .git");
   mkdirSync(dirname(abs), { recursive: true });
   return { path, abs };
 }

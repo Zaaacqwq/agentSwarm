@@ -240,44 +240,54 @@ fetch_pinned() {  # url, file, sha256
 }
 
 install_tools() {
-  local dest="${LIBEXEC}/tools" stage tmp
+  local dest="${LIBEXEC}/tools" stage tmp t
   stage="$(mktemp -d)"
   tmp="$(mktemp -d)"
   mkdir -p "${stage}/bin"
   cp "${ROOT}/packages/ws-exec/shims/xcodebuild" "${ROOT}/packages/ws-exec/shims/swift" "${ROOT}/packages/ws-exec/shims/swiftc" "${ROOT}/packages/ws-exec/shims/axe" "${stage}/bin/"
+  # The browser driver runs inside the sandbox from here, never from a directory agents can write.
+  cp "${ROOT}/packages/ws-exec/src/ops/browser-driver.ts" "${stage}/browser-driver.ts"
 
-  if [[ "$(cat "${dest}/axe/.version" 2>/dev/null)" == "$AXE_VERSION" ]]; then
-    cp -R "${dest}/axe" "${stage}/axe"
-  elif fetch_pinned "https://github.com/cameroncooke/AXe/releases/download/v${AXE_VERSION}/AXe-macOS-v${AXE_VERSION}-universal.tar.gz" "${tmp}/axe.tgz" "$AXE_SHA256"; then
-    mkdir -p "${stage}/axe" && tar -xzf "${tmp}/axe.tgz" -C "${stage}/axe"
-    if codesign --verify --strict -R="anchor apple generic and certificate leaf[subject.OU] = \"${AXE_TEAM}\"" "${stage}/axe/axe" 2>/dev/null; then
-      print -r -- "$AXE_VERSION" > "${stage}/axe/.version"
+  if [[ "$(cat "${dest}/axe/.version" 2>/dev/null)" != "$AXE_VERSION" ]] \
+    && fetch_pinned "https://github.com/cameroncooke/AXe/releases/download/v${AXE_VERSION}/AXe-macOS-v${AXE_VERSION}-universal.tar.gz" "${tmp}/axe.tgz" "$AXE_SHA256"; then
+    mkdir -p "${tmp}/axe" && tar -xzf "${tmp}/axe.tgz" -C "${tmp}/axe"
+    if codesign --verify --strict -R="anchor apple generic and certificate leaf[subject.OU] = \"${AXE_TEAM}\"" "${tmp}/axe/axe" 2>/dev/null; then
+      print -r -- "$AXE_VERSION" > "${tmp}/axe/.version" && mv "${tmp}/axe" "${stage}/axe"
     else
       warn "AXe is not signed by team ${AXE_TEAM}; not installed"
-      rm -rf "${stage}/axe"
     fi
   fi
 
-  if [[ "$(cat "${dest}/chromium/.version" 2>/dev/null)" == "$CHROMIUM_VERSION" ]]; then
-    cp -R "${dest}/chromium" "${stage}/chromium"
-  elif fetch_pinned "https://cdn.playwright.dev/builds/cft/${CHROMIUM_VERSION}/mac-arm64/chrome-headless-shell-mac-arm64.zip" "${tmp}/chromium.zip" "$CHROMIUM_SHA256"; then
-    mkdir -p "${stage}/chromium" && unzip -q "${tmp}/chromium.zip" -d "${stage}/chromium"
-    print -r -- "$CHROMIUM_VERSION" > "${stage}/chromium/.version"
+  if [[ "$(cat "${dest}/chromium/.version" 2>/dev/null)" != "$CHROMIUM_VERSION" ]] \
+    && fetch_pinned "https://cdn.playwright.dev/builds/cft/${CHROMIUM_VERSION}/mac-arm64/chrome-headless-shell-mac-arm64.zip" "${tmp}/chromium.zip" "$CHROMIUM_SHA256"; then
+    mkdir -p "${tmp}/chromium" && unzip -q "${tmp}/chromium.zip" -d "${tmp}/chromium" \
+      && print -r -- "$CHROMIUM_VERSION" > "${tmp}/chromium/.version" && mv "${tmp}/chromium" "${stage}/chromium"
   fi
 
-  if [[ "$(cat "${dest}/playwright-core/.version" 2>/dev/null)" == "$PLAYWRIGHT_VERSION" ]]; then
-    cp -R "${dest}/playwright-core" "${stage}/playwright-core"
-  elif fetch_pinned "https://registry.npmjs.org/playwright-core/-/playwright-core-${PLAYWRIGHT_VERSION}.tgz" "${tmp}/pw.tgz" "$PLAYWRIGHT_SHA256"; then
-    tar -xzf "${tmp}/pw.tgz" -C "$tmp" && mv "${tmp}/package" "${stage}/playwright-core"
-    print -r -- "$PLAYWRIGHT_VERSION" > "${stage}/playwright-core/.version"
+  if [[ "$(cat "${dest}/playwright-core/.version" 2>/dev/null)" != "$PLAYWRIGHT_VERSION" ]] \
+    && fetch_pinned "https://registry.npmjs.org/playwright-core/-/playwright-core-${PLAYWRIGHT_VERSION}.tgz" "${tmp}/pw.tgz" "$PLAYWRIGHT_SHA256"; then
+    tar -xzf "${tmp}/pw.tgz" -C "$tmp" && print -r -- "$PLAYWRIGHT_VERSION" > "${tmp}/package/.version" && mv "${tmp}/package" "${stage}/playwright-core"
   fi
 
-  rm -rf "$tmp" "$dest"
-  mv "$stage" "$dest"
-  chown -R root:wheel "$dest" && chmod -R go-w "$dest" && chmod -R a+rX "$dest" && chmod 0755 "${dest}/bin/"*
-  local t
+  # Whatever was not (re)installed keeps the copy already there: a failed download never removes a working tool.
   for t in axe chromium playwright-core; do
-    [[ -d "${dest}/${t}" ]] && say "Installed ${t} $(cat "${dest}/${t}/.version") in ${dest}/${t}" || warn "${t} is not installed; agents cannot use it"
+    [[ ! -d "${stage}/${t}" && -d "${dest}/${t}" ]] && cp -R "${dest}/${t}" "${stage}/${t}"
+  done
+  rm -rf "$tmp"
+  # Nothing from an archive keeps setuid bits, and no link may point outside its tool.
+  local link target
+  find "$stage" -type l | while read -r link; do
+    target="$(cd "$(dirname "$link")" && realpath "$(readlink "$link")" 2>/dev/null || true)"
+    [[ "$target" == "${stage}/"* ]] || { warn "Removing a link that leaves the tools: ${link#${stage}/}"; rm -f "$link"; }
+  done
+  chown -R root:wheel "$stage" && chmod -R u-s,g-s,go-w,a+rX "$stage" && chmod 0755 "$stage" "${stage}/bin/"*
+  # Swapped in by renames, so agents never see a half-installed directory.
+  rm -rf "${dest}.old"
+  [[ -d "$dest" ]] && mv "$dest" "${dest}.old"
+  mv "$stage" "$dest"
+  rm -rf "${dest}.old"
+  for t in axe chromium playwright-core; do
+    [[ -d "${dest}/${t}" ]] && say "Tools: ${t} $(cat "${dest}/${t}/.version")" || warn "${t} is not installed; agents cannot use it"
   done
 }
 

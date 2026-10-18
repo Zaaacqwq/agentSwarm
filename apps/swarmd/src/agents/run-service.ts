@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync, rmSync } from "node:fs";
 import { basename, join } from "node:path";
 import { and, asc, desc, eq, gt, inArray, isNotNull, lt } from "drizzle-orm";
 import { Agent, type AgentEvent, type AgentMessage, type AgentTool } from "@earendil-works/pi-agent-core";
@@ -61,6 +61,7 @@ export const MISSION_LEAD_TURNS = 150;
 /** A failed model request is retried this many times before the run fails. */
 export const MODEL_RETRIES = 2;
 const QUOTA_RETRY_MS = 5 * 60_000;
+const MEMORY_RETRY_MS = 20_000;
 
 const RETRY_DELAY_MS = 2_000;
 
@@ -125,6 +126,7 @@ export class RunService {
   private hooks: RunHooks | null = null;
   private readonly cliRunner: CliRunner;
   private retryTimer: NodeJS.Timeout | null = null;
+  private memoryTimer: NodeJS.Timeout | null = null;
 
   constructor(deps: RunDeps) {
     this.deps = deps;
@@ -285,6 +287,7 @@ export class RunService {
   /** Cancels everything running and waits for it to wind down (shutdown and tests). */
   async stopAll(): Promise<void> {
     if (this.retryTimer) clearTimeout(this.retryTimer);
+    if (this.memoryTimer) clearTimeout(this.memoryTimer);
     this.retryTimer = null;
     for (const [id, active] of this.active) {
       active.reason = "shutdown";
@@ -346,7 +349,7 @@ export class RunService {
           if (heavy >= this.deps.heavySlots) continue;
           pressure ??= this.deps.memoryPressure();
           if (pressure > 1) {
-            this.retryLater();
+            this.retryOnMemory();
             continue;
           }
         }
@@ -622,6 +625,16 @@ export class RunService {
     this.retryTimer.unref();
   }
 
+  /** Simulator runs held back by memory pressure: look again soon, not in five minutes. */
+  private retryOnMemory(): void {
+    if (this.memoryTimer) return;
+    this.memoryTimer = setTimeout(() => {
+      this.memoryTimer = null;
+      this.schedule();
+    }, MEMORY_RETRY_MS);
+    this.memoryTimer.unref();
+  }
+
   private runtimeOf(run: RunRow): AgentRow["runtime"] {
     return this.deps.agents.get(run.agentId).runtime;
   }
@@ -838,6 +851,25 @@ export class RunService {
     const heavyRunning = [...this.active.keys()].filter((id) => this.get(id).needs?.length).length;
     const heavyQueued = this.deps.db.select({ needs: schema.runs.needs }).from(schema.runs).where(eq(schema.runs.status, "queued")).all().filter((r) => r.needs?.length).length;
     return { heavySlots: this.deps.heavySlots, heavyRunning, heavyQueued, memoryPressure: this.deps.memoryPressure() };
+  }
+
+  /** Screenshots kept for the dashboard are removed once their run ended more than `maxAgeMs` ago (R6). */
+  pruneScreens(maxAgeMs: number, now = Date.now()): number {
+    let removed = 0;
+    let dirs: string[];
+    try {
+      dirs = readdirSync(this.deps.screensDir);
+    } catch {
+      return 0;
+    }
+    for (const runId of dirs) {
+      const row = this.deps.db.select({ endedAt: schema.runs.endedAt, status: schema.runs.status }).from(schema.runs).where(eq(schema.runs.id, runId)).get();
+      const stale = !row || (row.endedAt !== null && now - row.endedAt > maxAgeMs && TERMINAL.has(row.status));
+      if (!stale) continue;
+      rmSync(join(this.deps.screensDir, runId), { recursive: true, force: true });
+      removed += 1;
+    }
+    return removed;
   }
 
   /** A screenshot the run took (R6), for the dashboard; null when there is no such file. */
