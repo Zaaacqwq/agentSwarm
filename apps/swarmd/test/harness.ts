@@ -18,6 +18,7 @@ import type { WebAccess } from "../src/web/web-access.ts";
 import { FakeDiscord } from "./fake-discord.ts";
 import type { RunLimits } from "../src/db/schema.ts";
 import { installFakeCli, type FakeCli } from "../../../packages/ws-exec/test/fake-cli.ts";
+import { installFakeSim, type FakeSim } from "../../../packages/ws-exec/test/fake-sim.ts";
 import { FakeLinear } from "./fake-linear.ts";
 import { buildLinearWebhook } from "../src/linear/linear-webhook.ts";
 
@@ -38,6 +39,8 @@ export interface Harness {
   readonly discord: FakeDiscord;
   /** Fake `claude` and `codex` the CLI runs use (R4). */
   readonly cli: FakeCli;
+  /** Fake simctl, AXe and xcodebuild (R6), per workstation user. */
+  sim(user: string): FakeSim;
   /** Fake Linear (R5), and agentSwarm's webhook app that it posts to. */
   readonly linear: FakeLinear;
   readonly linearWebhook: FastifyInstance;
@@ -74,7 +77,7 @@ function makeRemote(base: string): string {
   return remote;
 }
 
-export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: number; webDist?: string; prPollMs?: number } = {}): Promise<Harness> {
+export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: number; webDist?: string; prPollMs?: number; heavySlots?: number; memoryPressure?: () => number } = {}): Promise<Harness> {
   const base = realpathSync(mkdtempSync(join(tmpdir(), "swarmd-test-")));
   const volume = join(base, "SwarmWS");
   const layout: Layout = {
@@ -82,10 +85,12 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
     swarmdData: join(volume, "swarmd"), nodeBin: process.execPath.replace(/\/node$/, ""), swarmdPort: 4318, cliDir: join(base, "cli"), toolsDir: join(base, "tools"), xcrun: join(base, "tools", "fake-xcrun"),
   };
   const envs = new Map<string, ExecEnv>();
+  const sims = new Map<string, FakeSim>();
   for (const user of ["ws-1", "ws-2"]) {
     const env: ExecEnv = { user, home: join(base, "homes", user), root: join(layout.wsRoot, user), layout, sandbox: true, reapAll: false };
     for (const d of [env.home, env.root, join(layout.inbox, `${user}.git`)]) mkdirSync(d, { recursive: true });
     envs.set(user, env);
+    sims.set(user, installFakeSim(layout, join(env.root, "cache")));
   }
   mkdirSync(layout.mirrors, { recursive: true });
   mkdirSync(layout.swarmdData, { recursive: true, mode: 0o700 });
@@ -147,6 +152,9 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
     git: createGitRunner({ askpassDir: base, inboxGlob: `${layout.inbox}/*` }),
     layout,
     maxConcurrentRuns: opts.maxConcurrentRuns ?? 2,
+    screensDir: join(base, "screens"),
+    ...(opts.heavySlots ? { heavySlots: opts.heavySlots } : {}),
+    ...(opts.memoryPressure ? { memoryPressure: opts.memoryPressure } : {}),
     log: () => {},
     gateway: () => ({
       listModels: async () => [{ id: "fake-model", name: "Fake", vision: true, contextWindow: 100_000, inputPerMTok: 0, outputPerMTok: 0 }],
@@ -183,6 +191,7 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
   };
 
   return {
+    sim: (user) => sims.get(user)!,
     base, layout, remote, services, app, db, protectedBranches, pullRequests, prStates, discord, cli, linear, linearWebhook, web: webState,
     script: (steps) => faux.setResponses(steps),
     scriptAgents(scripts) {

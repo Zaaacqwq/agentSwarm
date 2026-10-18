@@ -149,6 +149,14 @@ describe("the workstation's simulator (fake simctl and AXe, real sandbox)", () =
       assert.deepEqual(imageSize(jpeg), { width: shot.width, height: shot.height });
       assert.equal(shot.saved, "docs/agentswarm/t1/screenshots/01-home.jpg");
       assert.ok(existsSync(join(f.env.root, SCOPE, shot.saved)));
+      // A closer look: the top-left quarter of the full capture (30×65 px), enlarged to the model's size.
+      const close = await call<ImageResult>(f.env, { op: "sim.screenshot", scope: SCOPE, region: [0, 0, 500, 500] });
+      assert.deepEqual(close.region, [0, 0, 500, 500]);
+      assert.equal(close.height, 1000, "a small crop is scaled up");
+      assert.ok(Math.abs(close.width / close.height - 30 / 65) < 0.02, `${close.width}×${close.height}`);
+      for (const region of [[0, 0, 5, 5], [0, 0, 2000, 10], "all"]) {
+        await assert.rejects(call(f.env, { op: "sim.screenshot", scope: SCOPE, region: region as never }), { code: "bad_request" }, String(region));
+      }
       for (const bad of ["../x.jpg", ".git/x.jpg", "a.png", "/tmp/x.jpg"]) {
         await assert.rejects(call(f.env, { op: "sim.screenshot", scope: SCOPE, saveAs: bad }), (e: { code: string }) => ["bad_request", "out_of_scope"].includes(e.code), bad);
       }

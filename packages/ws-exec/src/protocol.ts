@@ -33,7 +33,7 @@ export type Request =
   | { op: "sim.type"; scope: string; text: string }
   | { op: "sim.swipe"; scope: string; from: [number, number]; to: [number, number]; durationS?: number }
   | { op: "sim.button"; scope: string; button: string }
-  | { op: "sim.screenshot"; scope: string; saveAs?: string }
+  | { op: "sim.screenshot"; scope: string; saveAs?: string; region?: [number, number, number, number] }
   | { op: "sim.logs"; scope: string; process?: string; seconds?: number }
   | { op: "sim.shutdown"; scope: string }
   /**
@@ -89,6 +89,8 @@ export interface ImageResult {
   readonly height: number;
   readonly sourceWidth: number;
   readonly sourceHeight: number;
+  /** When it is a closer look: which part of the screen, [x1, y1, x2, y2] in 0–1000. */
+  readonly region?: readonly [number, number, number, number];
   /** Where the evidence copy went (relative to the worktree), when asked. */
   readonly saved?: string;
 }

@@ -103,8 +103,10 @@ export function stageBrief(stage: MissionStage, c: BriefContext, extra = ""): st
     case "verifying": return [
       "Stage: verifying. Check the result against the plan before it goes to the person.",
       `- Spawn one QA sub-agent (role "qa"). It starts from your last push. It runs every test, checks each acceptance criterion in ${d}/plan.md one by one, and reports pass or fail with evidence. It must not change code.`,
+      `- If the result can be seen (an iOS app or a web page), give QA needs: ["simulator"] or ["browser"] and tell it to: build and start the app (for the web, the dev server), go through each acceptance criterion on screen, save one screenshot per criterion with save_as ${d}/screenshots/NN-what.jpg (at most 20), git_commit and git_push them, and report for each criterion what it did, what it saw, pass or fail, and the screenshot path.`,
+      "- When QA has finished: review_agent it (its branch only adds screenshots) and merge_agent it, so the screenshots are on your branch.",
       "- If something fails, fix it (yourself, or with a developer sub-agent: review and merge), then check again.",
-      `- Write ${d}/acceptance.md: each acceptance criterion with pass or fail and the evidence, the test results, and known limitations. git_commit, git_push.`,
+      `- Write ${d}/acceptance.md: each acceptance criterion with pass or fail and the evidence (with the screenshot shown, e.g. ![01 home](screenshots/01-home.jpg)), the test results, and known limitations. git_commit, git_push.`,
       `- open_pull_request into ${c.defaultBranch}: title = the goal; body = what was built, how it was checked, and links to the documents in ${d}/. Then call stage_done.`,
     ].join("\n");
     case "retro": return [

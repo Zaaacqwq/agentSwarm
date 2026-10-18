@@ -28,20 +28,49 @@ export function imageSize(buf: Buffer): { width: number; height: number } {
  * Turns a captured PNG into what the model gets (a JPEG, longest side MODEL_MAX_SIDE) and, when asked, a copy
  * saved in the worktree. sips runs in the same sandbox as everything else.
  */
-export async function toModelImage(env: ExecEnv, scope: string, cwd: string, png: string, saveAs?: { readonly path: string; readonly abs: string }): Promise<ImageResult> {
-  const source = imageSize(readFileSync(png));
+/** A part of the screen to look at closely: [x1, y1, x2, y2], each 0–1000 of the width or height. */
+export type Region = readonly [number, number, number, number];
+
+export function checkRegion(region: unknown): Region {
+  if (!Array.isArray(region) || region.length !== 4 || !region.every((n) => typeof n === "number" && n >= 0 && n <= 1000)) {
+    throw new OpError("bad_request", "region is [x1, y1, x2, y2], each 0–1000");
+  }
+  const [x1, y1, x2, y2] = region as number[];
+  if (x2! - x1! < 20 || y2! - y1! < 20) throw new OpError("bad_request", "The region must be at least 20 × 20 (of 1000)");
+  return [x1!, y1!, x2!, y2!];
+}
+
+/**
+ * With `region`, the full-resolution capture is cropped first and the crop scaled to the model's size:
+ * a closer look at small icons and text (R0), not a blow-up of the already shrunk image.
+ */
+export async function toModelImage(env: ExecEnv, scope: string, cwd: string, png: string, saveAs?: { readonly path: string; readonly abs: string }, region?: Region): Promise<ImageResult> {
+  const full = imageSize(readFileSync(png));
   const jpeg = `${png}.jpg`;
   const run = async (argv: string[]) => {
     const r = await runProcess(env, sandboxed(env, argv, scope), { cwd, scope, timeoutMs: 30_000 });
     if (r.exitCode !== 0) throw new OpError("failed", `Image conversion failed: ${r.output.trim().slice(-300)}`);
   };
+  let source = full;
   try {
+    if (region) {
+      const [x1, y1, x2, y2] = region;
+      const x = Math.round((x1 / 1000) * full.width);
+      const y = Math.round((y1 / 1000) * full.height);
+      const w = Math.max(1, Math.round(((x2 - x1) / 1000) * full.width));
+      const h = Math.max(1, Math.round(((y2 - y1) / 1000) * full.height));
+      await run(["/usr/bin/sips", "--cropToHeightWidth", String(h), String(w), "--cropOffset", String(y), String(x), png, "--out", png]);
+      source = imageSize(readFileSync(png));
+      // A small crop is scaled up to the model's size: that is the point of looking closer.
+      const scale = MODEL_MAX_SIDE / Math.max(source.width, source.height);
+      if (scale > 1) await run(["/usr/bin/sips", "-z", String(Math.round(source.height * scale)), String(Math.round(source.width * scale)), png, "--out", png]);
+    }
     await run(["/usr/bin/sips", "-s", "format", "jpeg", "-s", "formatOptions", "70", "-Z", String(MODEL_MAX_SIDE), png, "--out", jpeg]);
     // Evidence for the acceptance report: the same size, a little better quality.
     if (saveAs) await run(["/usr/bin/sips", "-s", "format", "jpeg", "-s", "formatOptions", "80", "-Z", String(MODEL_MAX_SIDE), png, "--out", saveAs.abs]);
     const buf = readFileSync(jpeg);
     const size = imageSize(buf);
-    return { jpeg: buf.toString("base64"), width: size.width, height: size.height, sourceWidth: source.width, sourceHeight: source.height, ...(saveAs ? { saved: saveAs.path } : {}) };
+    return { jpeg: buf.toString("base64"), width: size.width, height: size.height, sourceWidth: full.width, sourceHeight: full.height, ...(region ? { region } : {}), ...(saveAs ? { saved: saveAs.path } : {}) };
   } finally {
     rmSync(jpeg, { force: true });
     rmSync(png, { force: true });

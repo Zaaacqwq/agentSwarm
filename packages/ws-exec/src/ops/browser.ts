@@ -8,7 +8,7 @@ import { spawnInteractive, stopInteractive } from "../process.ts";
 import { sandboxed } from "../sandbox.ts";
 import { prepareSpace } from "../space.ts";
 import type { DriverCommand, DriverConfig } from "./browser-driver.ts";
-import { toModelImage } from "./image.ts";
+import { checkRegion, toModelImage, type Region } from "./image.ts";
 import { evidencePath } from "./sim.ts";
 
 export type Emit = (event: unknown) => void;
@@ -61,6 +61,7 @@ export async function session(env: ExecEnv, scope: string, interact: readonly st
   child.stdin!.write(`${JSON.stringify(config)}\n`);
 
   const saves = new Map<number, { path: string; abs: string }>();
+  const regions = new Map<number, Region>();
   let chain = Promise.resolve();
   let closed = "";
   const finished = new Promise<void>((resolve) => {
@@ -84,12 +85,13 @@ export async function session(env: ExecEnv, scope: string, interact: readonly st
         if (typeof png !== "string") return emit(msg);
         try {
           const { png: _png, ...rest } = msg.result!;
-          const image = await toModelImage(env, scope, cwd, png, saves.get(msg.id));
+          const image = await toModelImage(env, scope, cwd, png, saves.get(msg.id), regions.get(msg.id));
           emit({ id: msg.id, ok: true, result: { ...rest, ...image } });
         } catch (error) {
           emit({ id: msg.id, ok: false, error: (error as Error).message });
         } finally {
           saves.delete(msg.id);
+          regions.delete(msg.id);
         }
       });
     });
@@ -112,7 +114,7 @@ export async function session(env: ExecEnv, scope: string, interact: readonly st
   const relay = (async () => {
     for await (const line of input) {
       touch();
-      let c: DriverCommand & { saveAs?: string };
+      let c: DriverCommand & { saveAs?: string; region?: unknown };
       try {
         c = JSON.parse(line);
       } catch {
@@ -122,15 +124,16 @@ export async function session(env: ExecEnv, scope: string, interact: readonly st
         emit({ id: c?.id ?? null, ok: false, error: "Unknown browser command" });
         continue;
       }
-      if (c.cmd === "screenshot" && c.saveAs !== undefined) {
+      if (c.cmd === "screenshot") {
         try {
-          saves.set(c.id, evidencePath(cwd, c.saveAs));
+          if (c.saveAs !== undefined) saves.set(c.id, evidencePath(cwd, c.saveAs));
+          if (c.region !== undefined) regions.set(c.id, checkRegion(c.region));
         } catch (error) {
           emit({ id: c.id, ok: false, error: (error as Error).message });
           continue;
         }
       }
-      const { saveAs: _s, ...forward } = c;
+      const { saveAs: _s, region: _r, ...forward } = c;
       child.stdin!.write(`${JSON.stringify(forward)}\n`);
     }
     // swarmd closed the session: let the driver close Chromium, then make sure.

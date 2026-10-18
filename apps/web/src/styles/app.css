@@ -226,3 +226,11 @@ details.event > summary { cursor: pointer; list-style: none; }
 details.event > summary::-webkit-details-marker { display: none; }
 .said-first { font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--ink-soft); }
 @media (prefers-reduced-motion: reduce) { .tool-state.running { animation: none; } }
+
+/* R6: what an agent saw, next to the tool call that captured it. */
+.tool-wrap { display: grid; gap: var(--space-2); min-width: 0; }
+.screen-thumb { justify-self: start; display: block; border: 1px solid var(--rule); border-radius: var(--radius-sm); overflow: hidden; background: var(--paper-sunk); transition: transform var(--duration-fast) var(--ease), box-shadow var(--duration-fast) var(--ease); }
+.screen-thumb img { display: block; max-height: 220px; max-width: min(100%, 360px); width: auto; height: auto; }
+.screen-thumb:hover { transform: translateY(-1px); box-shadow: 0 4px 14px rgb(0 0 0 / 0.12); }
+.screen-thumb:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { .screen-thumb { transition: none; } .screen-thumb:hover { transform: none; } }

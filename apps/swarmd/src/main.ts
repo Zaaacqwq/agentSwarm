@@ -34,6 +34,8 @@ async function main(): Promise<void> {
     git: createGitRunner({ askpassDir: config.dataDir, inboxGlob: `${PRODUCTION_LAYOUT.inbox}/*` }),
     layout: PRODUCTION_LAYOUT,
     maxConcurrentRuns: config.maxConcurrentRuns,
+    heavySlots: config.heavySlots,
+    screensDir: join(config.dataDir, "screens"),
     log,
     transport: new DiscordJsTransport(),
     linearPort: config.linearPort,

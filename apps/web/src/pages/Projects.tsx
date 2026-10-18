@@ -70,6 +70,12 @@ function Project({ p, onChange }: { p: ProjectView; onChange: () => void }) {
 }
 
 /** What agents should know about the project, which Linear project feeds it, and its local files (R5). */
+/** Drops empty keys; undefined when nothing is left (the profile stays tidy). */
+function prune<T extends Record<string, unknown>>(o: T): T | undefined {
+  const kept = Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined && v !== "")) as T;
+  return Object.keys(kept).length ? kept : undefined;
+}
+
 function ProjectSetup({ p, onChange }: { p: ProjectView; onChange: () => void }) {
   const linear = useResource<LinearStatusView>("/linear");
   const options = useResource<LinearOptionsView>(linear.data?.connected ? "/linear/options" : null);
@@ -78,6 +84,8 @@ function ProjectSetup({ p, onChange }: { p: ProjectView; onChange: () => void })
   const [path, setPath] = useState("");
   const [content, setContent] = useState("");
   const field = (key: keyof ProjectProfile) => (e: { target: { value: string } }) => setProfile((x) => ({ ...x, [key]: e.target.value || undefined }));
+  const ios = (key: "scheme" | "deviceType") => (e: { target: { value: string } }) => setProfile((x) => ({ ...x, ios: prune({ ...x.ios, [key]: e.target.value.trim() || undefined }) }));
+  const [sites, setSites] = useState((p.profile.testSites ?? []).join("\n"));
   return (
     <div className="stack">
       <Form submit="Save profile" onSubmit={async () => {
@@ -110,6 +118,28 @@ function ProjectSetup({ p, onChange }: { p: ProjectView; onChange: () => void })
               </select>
             </Field>
           )}
+        </div>
+        <div className="grid">
+          <Field label="iOS scheme" hint="For the simulator: what QA builds and runs.">
+            <input className="mono" value={profile.ios?.scheme ?? ""} onChange={ios("scheme")} placeholder="Fridgy" />
+          </Field>
+          <Field label="Xcode project or workspace">
+            <input className="mono" value={profile.ios?.workspace ?? profile.ios?.project ?? ""} placeholder="Fridgy.xcodeproj"
+              onChange={(e) => {
+                const v = e.target.value.trim();
+                setProfile((x) => ({ ...x, ios: prune({ ...x.ios, project: v.endsWith(".xcodeproj") ? v : undefined, workspace: v.endsWith(".xcworkspace") ? v : undefined }) }));
+              }} />
+          </Field>
+          <Field label="Simulator model" hint="Default: iPhone 17.">
+            <input className="mono" value={profile.ios?.deviceType ?? ""} onChange={ios("deviceType")} placeholder="com.apple.CoreSimulator.SimDeviceType.iPhone-17" />
+          </Field>
+          <Field label="Test sites" hint="Besides localhost, where the browser may click and type. One origin per line.">
+            <textarea className="mono" value={sites} onChange={(e) => {
+              setSites(e.target.value);
+              const list = e.target.value.split("\n").map((l) => l.trim()).filter(Boolean);
+              setProfile((x) => ({ ...x, testSites: list.length ? list : undefined }));
+            }} placeholder="https://staging.example.com" style={{ minHeight: 40 }} />
+          </Field>
         </div>
         <label className="row"><input type="checkbox" checked={profile.autoApproveBugs ?? false} onChange={(e) => setProfile((x) => ({ ...x, autoApproveBugs: e.target.checked }))} /> Bug fixes go ahead without asking me to approve the plan (I still merge the pull request)</label>
       </Form>

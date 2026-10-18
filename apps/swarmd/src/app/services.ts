@@ -1,4 +1,5 @@
 import type { Layout } from "@agentswarm/ws-exec";
+import { memoryPressure } from "../system/memory.ts";
 import type { Db } from "../db/client.ts";
 import type { SecretBox } from "../crypto/secret-box.ts";
 import { AuthService } from "../auth/auth-service.ts";
@@ -38,6 +39,12 @@ export interface ServiceDeps {
   readonly git: GitRunner;
   readonly layout: Pick<Layout, "mirrors" | "inbox">;
   readonly maxConcurrentRuns: number;
+  /** R6: runs with a simulator or browser at once (default 2). */
+  readonly heavySlots?: number;
+  /** R6: where runs' screenshots are kept for the dashboard. */
+  readonly screensDir: string;
+  /** R6: tests pretend memory is tight. */
+  readonly memoryPressure?: () => number;
   readonly log: Logger;
   /** Tests inject a scripted model; production talks to the configured endpoints. */
   readonly gateway?: (endpoints: EndpointService) => ModelGateway;
@@ -93,6 +100,7 @@ export function createServices(d: ServiceDeps): Services {
   const runs = new RunService({
     db: d.db, bus, pool, backend: d.backend, projects, agents, gateway, relay, tree, cli,
     maxConcurrent: d.maxConcurrentRuns, refreshMirror: d.refreshMirror ?? true,
+    heavySlots: d.heavySlots ?? 2, memoryPressure: d.memoryPressure ?? memoryPressure, screensDir: d.screensDir,
     log: (msg, extra) => d.log("warn", msg, extra),
     ...(d.limits ? { limits: d.limits } : {}),
   });

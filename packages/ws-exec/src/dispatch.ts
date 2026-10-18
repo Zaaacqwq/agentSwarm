@@ -74,7 +74,7 @@ function run(env: ExecEnv, r: Request, emit: cli.Emit, input: AsyncIterable<stri
     case "sim.type": return sim.typeText(env, r.scope, r.text);
     case "sim.swipe": return sim.swipe(env, r.scope, r.from, r.to, r.durationS);
     case "sim.button": return sim.button(env, r.scope, r.button);
-    case "sim.screenshot": return sim.screenshot(env, r.scope, r.saveAs);
+    case "sim.screenshot": return sim.screenshot(env, r.scope, r.saveAs, r.region);
     case "sim.logs": return sim.logs(env, r.scope, r.process, r.seconds);
     case "sim.shutdown": return sim.shutdown(env, r.scope);
     case "browser.session": return browser.session(env, r.scope, r.interact ?? [], r.timeoutMs, input, emit);

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { CliStatusView, CliTestResult, CodexWorkstationView, DiscordStatus, EndpointKind, EndpointView, GitHubStatus, LinearOptionsView, LinearStatusView, MachineSettings } from "@agentswarm/contracts";
+import type { CliStatusView, CliTestResult, CodexWorkstationView, DiscordStatus, EndpointKind, EndpointView, GitHubStatus, LinearOptionsView, LinearStatusView, MachineLoadView, MachineSettings } from "@agentswarm/contracts";
 import { api, ago, until, when } from "../api.ts";
 import { useLive, useResource } from "../live.ts";
 import { Badge, Field, Form, Meter, PageHead } from "../components/ui.tsx";
@@ -160,6 +160,7 @@ function Machine() {
   return (
     <section className="card stack" aria-labelledby="mc">
       <h2 id="mc">This Mac</h2>
+      <MachineLoad />
       <Form submit="Save" onSubmit={async () => {
         const list = value.split(/[\s,]+/).filter(Boolean).map(Number);
         const v = await api<MachineSettings>("PUT", "/machine", { denyPorts: list });
@@ -171,6 +172,24 @@ function Machine() {
         </Field>
       </Form>
     </section>
+  );
+}
+
+const PRESSURE: Record<number, string> = { 1: "normal", 2: "warning: new simulator runs wait", 4: "critical: new simulator runs wait" };
+
+/** Simulators and browsers in use (R6): they hold heavy slots, and wait when memory is tight. */
+function MachineLoad() {
+  const load = useResource<MachineLoadView>("/machine/load");
+  useLive((m) => {
+    if (m.kind === "run") load.reload();
+  });
+  const l = load.data;
+  if (!l) return null;
+  return (
+    <p className="row faint" aria-live="polite">
+      <Badge status={l.heavyRunning ? "running" : "idle"}>{`${l.heavyRunning} of ${l.heavySlots}`}</Badge>
+      simulators and browsers in use{l.heavyQueued ? `, ${l.heavyQueued} waiting` : ""} · memory {PRESSURE[l.memoryPressure] ?? `level ${l.memoryPressure}`}
+    </p>
   );
 }
 

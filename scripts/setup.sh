@@ -244,7 +244,7 @@ install_tools() {
   stage="$(mktemp -d)"
   tmp="$(mktemp -d)"
   mkdir -p "${stage}/bin"
-  cp "${ROOT}/packages/ws-exec/shims/xcodebuild" "${ROOT}/packages/ws-exec/shims/swift" "${ROOT}/packages/ws-exec/shims/swiftc" "${stage}/bin/"
+  cp "${ROOT}/packages/ws-exec/shims/xcodebuild" "${ROOT}/packages/ws-exec/shims/swift" "${ROOT}/packages/ws-exec/shims/swiftc" "${ROOT}/packages/ws-exec/shims/axe" "${stage}/bin/"
 
   if [[ "$(cat "${dest}/axe/.version" 2>/dev/null)" == "$AXE_VERSION" ]]; then
     cp -R "${dest}/axe" "${stage}/axe"

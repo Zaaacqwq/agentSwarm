@@ -6,7 +6,7 @@ import { resolveInScope, resolveScope } from "../paths.ts";
 import { runProcess } from "../process.ts";
 import { sandboxed } from "../sandbox.ts";
 import { space } from "../space.ts";
-import { toModelImage } from "./image.ts";
+import { checkRegion, toModelImage } from "./image.ts";
 
 /**
  * This workstation's own simulator (R6). Each workstation user has its own CoreSimulator device set (R0), and
@@ -241,15 +241,16 @@ export async function button(env: ExecEnv, scope: string, name: string): Promise
  * A screenshot through AXe: simctl's own fails inside the sandbox (R6 measurement). `saveAs` keeps a JPEG in the
  * worktree as evidence (relative path, .jpg).
  */
-export async function screenshot(env: ExecEnv, scope: string, saveAs?: string): Promise<ImageResult> {
+export async function screenshot(env: ExecEnv, scope: string, saveAs?: string, region?: unknown): Promise<ImageResult> {
   const c = ctx(env, scope);
+  const crop = region === undefined ? undefined : checkRegion(region);
   const save = saveAs === undefined ? undefined : evidencePath(c.cwd, saveAs);
   const device = await requireBooted(c);
   const dir = space(env, scope).tmp;
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const png = join(dir, `shot-${process.pid}-${Date.now()}.png`);
   await ok(c, [axePath(env), "screenshot", "--udid", device.udid, "--output", png], { timeoutMs: 60_000 });
-  return toModelImage(env, scope, c.cwd, png, save);
+  return toModelImage(env, scope, c.cwd, png, save, crop);
 }
 
 /** Where evidence goes: a .jpg inside the worktree, outside .git, directories created. */
