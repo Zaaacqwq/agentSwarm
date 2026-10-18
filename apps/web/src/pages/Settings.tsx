@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { CliStatusView, CliTestResult, CodexWorkstationView, DiscordStatus, EndpointKind, EndpointView, GitHubStatus, LinearOptionsView, LinearStatusView, MachineLoadView, MachineSettings } from "@agentswarm/contracts";
+import type { CliStatusView, CliTestResult, CodexWorkstationView, DiscordStatus, EndpointKind, EndpointView, GitHubStatus, LinearOptionsView, LinearStatusView, MachineLoadView, MachineSettings, TicketSettings } from "@agentswarm/contracts";
 import { api, ago, until, when } from "../api.ts";
 import { useLive, useResource } from "../live.ts";
 import { Badge, Field, Form, Meter, PageHead } from "../components/ui.tsx";
@@ -61,6 +61,7 @@ export function SettingsPage() {
           </Form>
         </section>
       </div>
+      <Board />
       <Linear />
       <Discord />
       <CliWorkers />
@@ -72,6 +73,27 @@ export function SettingsPage() {
 type LinearView = LinearStatusView & { redirectUri: string };
 
 /** Linear: where you give agentSwarm work (R5). */
+/** The board (R7): how many tickets are worked on at once; the rest wait in Todo by priority. */
+function Board() {
+  const settings = useResource<TicketSettings>("/tickets/settings");
+  const [value, setValue] = useState<string | null>(null);
+  if (!settings.data) return null;
+  return (
+    <section className="card stack" aria-labelledby="board-head">
+      <h2 id="board-head">Tickets</h2>
+      <Form submit="Save" onSubmit={async () => {
+        const v = await api<TicketSettings>("PUT", "/tickets/settings", { maxActive: Number(value ?? settings.data!.maxActive) });
+        settings.set(() => v);
+        setValue(null);
+      }}>
+        <Field label="Tickets worked on at once" hint="Each has its own lead and agents. Todo tickets beyond this wait, the most urgent first.">
+          <input type="number" min={1} max={8} value={value ?? String(settings.data.maxActive)} onChange={(e) => setValue(e.target.value)} required />
+        </Field>
+      </Form>
+    </section>
+  );
+}
+
 function Linear() {
   const status = useResource<LinearView>("/linear");
   const s = status.data;

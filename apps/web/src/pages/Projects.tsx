@@ -81,6 +81,7 @@ function ProjectSetup({ p, onChange }: { p: ProjectView; onChange: () => void })
   const options = useResource<LinearOptionsView>(linear.data?.connected ? "/linear/options" : null);
   const [profile, setProfile] = useState<ProjectProfile>(p.profile);
   const [linearProjectId, setLinearProjectId] = useState(p.linearProjectId ?? "");
+  const [prefix, setPrefix] = useState(p.ticketPrefix);
   const [path, setPath] = useState("");
   const [content, setContent] = useState("");
   const field = (key: keyof ProjectProfile) => (e: { target: { value: string } }) => setProfile((x) => ({ ...x, [key]: e.target.value || undefined }));
@@ -89,7 +90,7 @@ function ProjectSetup({ p, onChange }: { p: ProjectView; onChange: () => void })
   return (
     <div className="stack">
       <Form submit="Save profile" onSubmit={async () => {
-        await api("PUT", `/projects/${p.id}/profile`, { profile, linearProjectId: linearProjectId || null });
+        await api("PUT", `/projects/${p.id}/profile`, { profile, linearProjectId: linearProjectId || null, ...(prefix !== p.ticketPrefix ? { ticketPrefix: prefix } : {}) });
         onChange();
       }}>
         <div className="grid">
@@ -103,6 +104,9 @@ function ProjectSetup({ p, onChange }: { p: ProjectView; onChange: () => void })
           <textarea value={profile.rules ?? ""} onChange={field("rules")} style={{ minHeight: 70 }} />
         </Field>
         <div className="grid">
+          <Field label="Ticket prefix" hint="Its tickets are PREFIX-1, PREFIX-2… Changing it does not renumber old tickets.">
+            <input className="mono" value={prefix} onChange={(e) => setPrefix(e.target.value.toUpperCase())} pattern="[A-Z][A-Z0-9]{0,5}" maxLength={6} required />
+          </Field>
           <Field label="Reviewer">
             <select value={profile.reviewRuntime ?? "native"} onChange={(e) => setProfile((x) => ({ ...x, reviewRuntime: e.target.value as ProjectProfile["reviewRuntime"] }))}>
               <option value="native">Native model</option>

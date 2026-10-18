@@ -8,13 +8,23 @@ export class ApiError extends Error {
   }
 }
 
-export async function api<T>(method: "GET" | "POST" | "PUT" | "DELETE", path: string, body?: unknown): Promise<T> {
+export async function api<T>(method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api${path}`, {
     method,
     credentials: "same-origin",
     headers: body !== undefined ? { "content-type": "application/json" } : {},
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
+  const text = await res.text();
+  const data = text ? JSON.parse(text) : null;
+  if (!res.ok) throw new ApiError(res.status, (data as { error?: string } | null)?.error ?? res.statusText);
+  return data as T;
+}
+
+/** A picture as itself (R7): the server checks its bytes, converts it and answers JSON. */
+export async function upload<T>(path: string, file: Blob, name: string): Promise<T> {
+  const type = /^image\/(jpeg|png|heic|heif)$/.test(file.type) ? file.type : "application/octet-stream";
+  const res = await fetch(`/api${path}?name=${encodeURIComponent(name)}`, { method: "POST", credentials: "same-origin", headers: { "content-type": type }, body: file });
   const text = await res.text();
   const data = text ? JSON.parse(text) : null;
   if (!res.ok) throw new ApiError(res.status, (data as { error?: string } | null)?.error ?? res.statusText);
