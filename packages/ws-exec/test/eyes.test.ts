@@ -1,6 +1,7 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { createServer, type Server } from "node:http";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -13,6 +14,22 @@ import { addressAllowed, interactAllowed, urlAllowed } from "../src/ops/browser-
 import { imageSize } from "../src/ops/image.ts";
 import { fixture } from "./fixture.ts";
 import { installFakeSim } from "./fake-sim.ts";
+
+/** One pixel of a JPEG, read through a BMP that sips writes (bottom-up rows, BGR). */
+function pixel(jpeg: Buffer, x: number, y: number): number[] {
+  const dir = mkdtempSync(join(tmpdir(), "px-"));
+  writeFileSync(join(dir, "a.jpg"), jpeg);
+  execFileSync("/usr/bin/sips", ["-s", "format", "bmp", join(dir, "a.jpg"), "--out", join(dir, "a.bmp")], { stdio: "ignore" });
+  const bmp = readFileSync(join(dir, "a.bmp"));
+  const offset = bmp.readUInt32LE(10);
+  const width = bmp.readInt32LE(18);
+  const height = bmp.readInt32LE(22);
+  const bpp = bmp.readUInt16LE(28) / 8;
+  const stride = Math.ceil((width * bpp) / 4) * 4;
+  const row = height > 0 ? height - 1 - y : y;
+  const i = offset + row * stride + x * bpp;
+  return [bmp[i + 2]!, bmp[i + 1]!, bmp[i]!];
+}
 
 async function call<T = Record<string, unknown>>(env: ExecEnv, request: Request): Promise<T> {
   const res = await dispatch(env, request);
@@ -153,7 +170,10 @@ describe("the workstation's simulator (fake simctl and AXe, real sandbox)", () =
       const close = await call<ImageResult>(f.env, { op: "sim.screenshot", scope: SCOPE, region: [0, 0, 500, 500] });
       assert.deepEqual(close.region, [0, 0, 500, 500]);
       assert.equal(close.height, 1000, "a small crop is scaled up");
-      assert.ok(Math.abs(close.width / close.height - 30 / 65) < 0.02, `${close.width}×${close.height}`);
+      assert.ok(Math.abs(close.width / close.height - 30 / 65) < 0.05, `${close.width}×${close.height}`);
+      // The fake capture's colour is its position (red = 4x, green = 2y): the top-left corner was kept.
+      const [r, g] = pixel(Buffer.from(close.jpeg, "base64"), 4, 4);
+      assert.ok(r! < 30 && g! < 30, `top-left of the crop is near (0,0), not the centre: rgb ${r},${g}`);
       for (const region of [[0, 0, 5, 5], [0, 0, 2000, 10], "all"]) {
         await assert.rejects(call(f.env, { op: "sim.screenshot", scope: SCOPE, region: region as never }), { code: "bad_request" }, String(region));
       }

@@ -58,8 +58,9 @@ export async function toModelImage(env: ExecEnv, scope: string, cwd: string, png
     source = full;
     if (region) {
       const [x1, y1, x2, y2] = region;
-      const x = Math.round((x1 / 1000) * full.width);
-      const y = Math.round((y1 / 1000) * full.height);
+      // sips reads an offset of 0 as "none" and crops around the centre instead: start at 1 at least.
+      const x = Math.max(1, Math.round((x1 / 1000) * full.width));
+      const y = Math.max(1, Math.round((y1 / 1000) * full.height));
       const w = Math.max(1, Math.round(((x2 - x1) / 1000) * full.width));
       const h = Math.max(1, Math.round(((y2 - y1) / 1000) * full.height));
       await run(["/usr/bin/sips", "--cropToHeightWidth", String(h), String(w), "--cropOffset", String(y), String(x), png, "--out", png]);

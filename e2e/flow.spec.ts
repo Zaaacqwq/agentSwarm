@@ -54,7 +54,7 @@ test("set up agentSwarm, add a project and an agent, and watch a run fix a bug",
   await expect(page.getByRole("region", { name: "Report" }).getByText("Fixed square.")).toBeVisible();
   const shot = page.getByRole("region", { name: "Timeline" }).getByRole("img", { name: "Screenshot from sim_screenshot" });
   await expect(shot).toBeVisible();
-  await expect.poll(() => shot.evaluate((img: HTMLImageElement) => img.naturalWidth)).toBeGreaterThan(0);
+  await expect.poll(() => shot.evaluate((img) => (img as unknown as { naturalWidth: number }).naturalWidth)).toBeGreaterThan(0);
   await page.screenshot({ path: `${SHOTS}/child-1440.png`, fullPage: true });
   await page.getByRole("link", { name: "Projects" }).click();
   await expect(page.getByText("pushed", { exact: true }).first()).toBeVisible();

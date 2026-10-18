@@ -101,7 +101,10 @@ export async function session(env: ExecEnv, scope: string, interact: readonly st
     });
     // "close", not "exit": the last replies may still be in the pipe when the process ends.
     child.on("close", () => resolve());
-    child.on("error", () => resolve());
+    child.on("error", (error) => {
+      closed ||= `browser could not start: ${error.message}`;
+      resolve();
+    });
   });
   let stderr = "";
   child.stderr!.on("data", (b: Buffer) => (stderr = (stderr + b.toString("utf8")).slice(-2000)));
