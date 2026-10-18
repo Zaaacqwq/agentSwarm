@@ -3,6 +3,7 @@
 #   sudo zsh scripts/setup.sh                 install (8 workstations) or repair
 #   sudo zsh scripts/setup.sh --update-exec   reinstall ws-exec, its Node runtime and the CLI workers only
 #   sudo zsh scripts/setup.sh --update-cli    (re)install the pinned Claude Code and Codex CLI workers only
+#   sudo zsh scripts/setup.sh --update-tools  (re)install the simulator, browser and build tools only (R6)
 #   sudo zsh scripts/setup.sh --uninstall     remove users, group, sudoers and /usr/local/libexec/agentswarm
 #
 # Creates: the SwarmWS APFS volume (ownership on) next to /Volumes/Data, the swarm-ws group, hidden users
@@ -33,6 +34,14 @@ CODEX_RG_SHA256="27d09e29c478fddbfc750a2cb5fd06965bad0ea223e776f8667160a0de63c6e
 CODEX_HOST_SHA256="79f123a85dbc61e8f5d0f0c050dfc3f4b81a8305d33a32b41e008b7f6e035698"   # codex-code-mode-host, next to codex
 CODEX_TEAM="2DC432GLL2"    # OpenAI OpCo, LLC
 CODEX_VENDOR="/opt/homebrew/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin"
+# Eyes and hands (R6): downloaded from their publishers, checked against these hashes before anything is installed.
+AXE_VERSION="1.8.0"
+AXE_SHA256="7b76340b72e90d0f211bc7c4636f15009076eff07acef2f2b632b175debd8834"   # AXe-macOS-v1.8.0-universal.tar.gz
+AXE_TEAM="BR6WD3M6ZD"
+CHROMIUM_VERSION="156.0.8078.4"   # Chrome for Testing headless shell, the build Playwright 1.64.1 drives
+CHROMIUM_SHA256="94e4337b70cbc5638f0935fbc46b9f242bc7416f657e3fbe924baf348404b53d"
+PLAYWRIGHT_VERSION="1.64.1"
+PLAYWRIGHT_SHA256="3af03703c967c95037454f2283f709d53ce804a4776d4219d319f5bbcc2a0185"   # playwright-core-1.64.1.tgz
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 OWNER="${SUDO_USER:-}"
 mode="install"
@@ -41,6 +50,7 @@ for arg in "$@"; do
   case "$arg" in
     --update-exec) mode="update-exec" ;;
     --update-cli) mode="update-cli" ;;
+    --update-tools) mode="update-tools" ;;
     --uninstall) mode="uninstall" ;;
     *) print -u2 "Unknown argument: $arg"; exit 64 ;;
   esac
@@ -221,6 +231,56 @@ install_cli() {
   chown -R root:wheel "$dest" && find "$dest" -type d -exec chmod 0755 {} + && find "$dest" -type f -exec chmod 0755 {} +
 }
 
+# ---- eyes and hands (R6) --------------------------------------------------------------------------
+# ${LIBEXEC}/tools: bin/ (xcodebuild, swift and swiftc wrappers, first on agents' PATH), axe/, chromium/,
+# playwright-core/. A tool already at its pinned version is kept; anything new is downloaded and checked first.
+fetch_pinned() {  # url, file, sha256
+  curl -fsSL --retry 2 "$1" -o "$2" || { warn "Download failed: $1"; return 1; }
+  [[ "$(shasum -a 256 "$2" | awk '{print $1}')" == "$3" ]] || { warn "$1 does not match the pinned SHA-256"; return 1; }
+}
+
+install_tools() {
+  local dest="${LIBEXEC}/tools" stage tmp
+  stage="$(mktemp -d)"
+  tmp="$(mktemp -d)"
+  mkdir -p "${stage}/bin"
+  cp "${ROOT}/packages/ws-exec/shims/xcodebuild" "${ROOT}/packages/ws-exec/shims/swift" "${ROOT}/packages/ws-exec/shims/swiftc" "${stage}/bin/"
+
+  if [[ "$(cat "${dest}/axe/.version" 2>/dev/null)" == "$AXE_VERSION" ]]; then
+    cp -R "${dest}/axe" "${stage}/axe"
+  elif fetch_pinned "https://github.com/cameroncooke/AXe/releases/download/v${AXE_VERSION}/AXe-macOS-v${AXE_VERSION}-universal.tar.gz" "${tmp}/axe.tgz" "$AXE_SHA256"; then
+    mkdir -p "${stage}/axe" && tar -xzf "${tmp}/axe.tgz" -C "${stage}/axe"
+    if codesign --verify --strict -R="anchor apple generic and certificate leaf[subject.OU] = \"${AXE_TEAM}\"" "${stage}/axe/axe" 2>/dev/null; then
+      print -r -- "$AXE_VERSION" > "${stage}/axe/.version"
+    else
+      warn "AXe is not signed by team ${AXE_TEAM}; not installed"
+      rm -rf "${stage}/axe"
+    fi
+  fi
+
+  if [[ "$(cat "${dest}/chromium/.version" 2>/dev/null)" == "$CHROMIUM_VERSION" ]]; then
+    cp -R "${dest}/chromium" "${stage}/chromium"
+  elif fetch_pinned "https://cdn.playwright.dev/builds/cft/${CHROMIUM_VERSION}/mac-arm64/chrome-headless-shell-mac-arm64.zip" "${tmp}/chromium.zip" "$CHROMIUM_SHA256"; then
+    mkdir -p "${stage}/chromium" && unzip -q "${tmp}/chromium.zip" -d "${stage}/chromium"
+    print -r -- "$CHROMIUM_VERSION" > "${stage}/chromium/.version"
+  fi
+
+  if [[ "$(cat "${dest}/playwright-core/.version" 2>/dev/null)" == "$PLAYWRIGHT_VERSION" ]]; then
+    cp -R "${dest}/playwright-core" "${stage}/playwright-core"
+  elif fetch_pinned "https://registry.npmjs.org/playwright-core/-/playwright-core-${PLAYWRIGHT_VERSION}.tgz" "${tmp}/pw.tgz" "$PLAYWRIGHT_SHA256"; then
+    tar -xzf "${tmp}/pw.tgz" -C "$tmp" && mv "${tmp}/package" "${stage}/playwright-core"
+    print -r -- "$PLAYWRIGHT_VERSION" > "${stage}/playwright-core/.version"
+  fi
+
+  rm -rf "$tmp" "$dest"
+  mv "$stage" "$dest"
+  chown -R root:wheel "$dest" && chmod -R go-w "$dest" && chmod -R a+rX "$dest" && chmod 0755 "${dest}/bin/"*
+  local t
+  for t in axe chromium playwright-core; do
+    [[ -d "${dest}/${t}" ]] && say "Installed ${t} $(cat "${dest}/${t}/.version") in ${dest}/${t}" || warn "${t} is not installed; agents cannot use it"
+  done
+}
+
 write_sudoers() {
   local tmp user
   tmp="$(mktemp)"
@@ -262,11 +322,15 @@ case "$mode" in
     install_node
     install_exec
     install_cli
+    install_tools
     write_sudoers
     for user in $(workstation_users); do verify "$user"; done
     ;;
   update-cli)
     install_cli
+    ;;
+  update-tools)
+    install_tools
     ;;
   install)
     preflight
@@ -276,6 +340,7 @@ case "$mode" in
     install_node
     install_exec
     install_cli
+    install_tools
     write_sudoers
     for n in $(seq 1 "$COUNT"); do verify "ws-${n}"; done
     say "Done. Next: npm run check (as yourself), then start swarmd."

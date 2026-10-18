@@ -79,7 +79,7 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
   const volume = join(base, "SwarmWS");
   const layout: Layout = {
     volume, wsRoot: join(volume, "ws"), mirrors: join(volume, "mirrors"), inbox: join(volume, "inbox"),
-    swarmdData: join(volume, "swarmd"), nodeBin: process.execPath.replace(/\/node$/, ""), swarmdPort: 4318, cliDir: join(base, "cli"),
+    swarmdData: join(volume, "swarmd"), nodeBin: process.execPath.replace(/\/node$/, ""), swarmdPort: 4318, cliDir: join(base, "cli"), toolsDir: join(base, "tools"), xcrun: join(base, "tools", "fake-xcrun"),
   };
   const envs = new Map<string, ExecEnv>();
   for (const user of ["ws-1", "ws-2"]) {

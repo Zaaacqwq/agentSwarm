@@ -16,6 +16,13 @@ export interface Layout {
   readonly swarmdPort: number;
   /** Pinned CLI workers (R4): <cliDir>/claude/claude and <cliDir>/codex/bin/codex, installed by scripts/setup.sh. */
   readonly cliDir: string;
+  /**
+   * Pinned tools for eyes and hands (R6), installed by scripts/setup.sh: bin/ (the xcodebuild, swift and swiftc
+   * wrappers, first on agents' PATH), axe/axe, chromium/ (headless shell), playwright-core/.
+   */
+  readonly toolsDir: string;
+  /** xcrun, for simctl. Tests point it at a fake. */
+  readonly xcrun: string;
 }
 
 export const PRODUCTION_LAYOUT: Layout = {
@@ -27,6 +34,8 @@ export const PRODUCTION_LAYOUT: Layout = {
   nodeBin: "/usr/local/libexec/agentswarm/node/bin",
   swarmdPort: 4318,
   cliDir: "/usr/local/libexec/agentswarm/cli",
+  toolsDir: "/usr/local/libexec/agentswarm/tools",
+  xcrun: "/usr/bin/xcrun",
 };
 
 export const WS_USER_PATTERN = /^ws-[0-9]{1,2}$/;
