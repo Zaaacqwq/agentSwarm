@@ -322,3 +322,4 @@ code.copy { cursor: copy; background: var(--paper-sunk); padding: 1px var(--spac
   .ticket-card, .column { transition: none; }
   .ticket-card:hover, .ticket-card.dragging { transform: none; }
 }
+.warn-card { border-color: var(--warn); box-shadow: inset 3px 0 0 var(--warn), var(--shadow); }

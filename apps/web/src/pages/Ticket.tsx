@@ -16,6 +16,7 @@ export function TicketPage({ ticketKey }: { ticketKey: string }) {
     events.reload();
   });
   useLive((m) => {
+    if (m.kind === "ticket_removed" && m.id === ticket.data?.id) navigate("/");
     if (m.kind === "ticket" && (m.ticket.key === ticketKey || m.ticket.id === ticket.data?.id)) {
       // Moved to another project: it has a new key and address.
       if (m.ticket.key !== ticketKey) navigate(`/tickets/${m.ticket.key}`);
@@ -31,9 +32,15 @@ export function TicketPage({ ticketKey }: { ticketKey: string }) {
       <PageHead title={t.title}
         sub={<>
           <span className="mono">{t.key}</span> · <span className={t.need ? "needs-you" : "muted"}>{t.need ? NEED_LABEL[t.need] : STATUS_LABEL[t.status]}</span>
-          {" · "}{t.projectName ?? (t.space === "sandbox" ? "Sandbox" : "Ideas")}{t.external && <> · from <a href={t.external.url} target="_blank" rel="noreferrer">{t.external.key} ↗</a></>}
+          {" · "}{t.projectName ?? (t.space === "sandbox" ? "Sandbox" : "Ideas")}{t.external && (/^https:\/\//.test(t.external.url) ? <> · from <a href={t.external.url} target="_blank" rel="noreferrer">{t.external.key} ↗</a></> : <> · from {t.external.key}</>)}
         </>}
         action={t.missionId ? (open ? <StopMission id={t.missionId} label="Stop" /> : undefined) : <MoveMenu t={t} />} />
+      {t.createdBy !== "you" && (
+        <div className="card warn-card" role="note">
+          <b>Written by {t.createdBy}, an agent</b>{t.fromTicket ? <> while working on <Link to={`/tickets/${t.fromTicket}`}>{t.fromTicket}</Link></> : null}, not by you.
+          Read it before you start it: its lead is told the words are not yours.
+        </div>
+      )}
       <div className="split">
         <section className="card stack" aria-labelledby="ask-head">
           <h2 id="ask-head">What you asked</h2>

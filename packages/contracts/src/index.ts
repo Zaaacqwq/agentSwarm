@@ -378,7 +378,8 @@ export type LiveMessage =
   | { readonly kind: "cli"; readonly cli: CliStatusView }
   | { readonly kind: "mission"; readonly mission: MissionView }
   | { readonly kind: "mission_message"; readonly message: MissionMessageView }
-  | { readonly kind: "ticket"; readonly ticket: TicketView };
+  | { readonly kind: "ticket"; readonly ticket: TicketView }
+  | { readonly kind: "ticket_removed"; readonly id: string };
 
 // ---- CLI workers (R4) --------------------------------------------------------------------
 export type AgentRuntime = "native" | "claude_code" | "codex";
@@ -553,7 +554,7 @@ export interface TicketEventView {
 }
 
 /** 立项: a research or experiment ticket becomes a project. repo: an existing empty one to use (owner/name). */
-export const PromoteTicket = Type.Object({ repo: Type.Optional(Type.String({ pattern: "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", maxLength: 140 })) });
+export const PromoteTicket = Type.Object({ repo: Type.Optional(Type.String({ pattern: "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$", maxLength: 140 })) });
 export type PromoteTicket = Static<typeof PromoteTicket>;
 
 export const TicketSettings = Type.Object({ maxActive: Type.Integer({ minimum: 1, maximum: 8 }) });

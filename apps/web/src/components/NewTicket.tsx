@@ -39,8 +39,13 @@ export function NewTicket({ onCreated }: { onCreated: (t: TicketView) => void })
         const space = where === "sandbox" || where === "ideas" ? where : "project";
         const t = await api<TicketView>("POST", "/tickets", { space, ...(space === "project" ? { projectId: where } : {}), title, description, kind, priority, commitAttachments: commit });
         // Pictures first, then it may start: the lead sees them in its first message.
-        for (const file of pictures) await upload(`/tickets/${t.key}/attachments`, file, file.name);
-        if (start) await api("POST", `/tickets/${t.key}/move`, { status: "todo" });
+        const failed: string[] = [];
+        for (const file of pictures) {
+          await upload(`/tickets/${t.key}/attachments`, file, file.name).catch((e: Error) => void failed.push(`${file.name}: ${e.message}`));
+        }
+        // The ticket exists either way: never make you create it twice. With a picture missing, it waits for you.
+        if (failed.length) alert(`${t.key} was created, but these pictures were not added:\n${failed.join("\n")}\n\nAdd them on the ticket${start ? ", then move it to Todo" : ""}.`);
+        else if (start) await api("POST", `/tickets/${t.key}/move`, { status: "todo" }).catch((e: Error) => alert(`${t.key} was created but did not start: ${e.message}`));
         onCreated(t);
       }}>
         <Field label="Title"><input value={title} onChange={(e) => setTitle(e.target.value)} required maxLength={200} placeholder="The share button is cut off on small phones" /></Field>

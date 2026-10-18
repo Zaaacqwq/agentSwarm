@@ -51,6 +51,17 @@ describe("the board", () => {
     assert.ok(h.services.tickets.events("IDEA-2").some((e) => e.kind === "edited" && e.data.was === "DEM-2"));
     assert.equal((await h.api("DELETE", "/api/tickets/IDEA-2", undefined, cookie)).status, 204);
     assert.equal((await h.api("GET", "/api/tickets/IDEA-2", undefined, cookie)).status, 404);
+    assert.equal((await make({ space: "ideas", kind: "research" })).body.key, "IDEA-3", "a deleted number is not given again");
+    // Another project whose name gives the same prefix gets its own: DEM2.
+    const other = await h.api("POST", "/api/projects/local", { name: "Demo notes" }, cookie);
+    assert.equal(other.status, 200, JSON.stringify(other.body));
+    assert.equal((await make({ space: "project", projectId: other.body.id, kind: "research" })).body.key, "DEM2-1");
+    assert.equal((await make({ space: "project", projectId, kind: "bug" })).body.key, "APP-2", "the first project keeps its own");
+    // Canceled and back: no end time any more.
+    await h.api("POST", "/api/tickets/APP-2/move", { status: "canceled" }, cookie);
+    assert.ok(h.services.tickets.view("APP-2").endedAt);
+    await h.api("POST", "/api/tickets/APP-2/move", { status: "backlog" }, cookie);
+    assert.equal(h.services.tickets.view("APP-2").endedAt, null);
   });
 
   test("todo starts by priority within the limit; needs you, answered, canceled; the slot passes on", async () => {
@@ -134,6 +145,10 @@ describe("the board", () => {
     assert.match(listed, /01-screen-shot\.jpg/, "in the worktree, with the mission's documents");
     assert.match(listed, /\?\? docs\//, "not ignored: it goes in with the documents' commit");
     assert.equal((await upload(png(10, 10))).statusCode, 409, "no new pictures once it started");
+    const other = (await h.api("POST", "/api/tickets", { space: "project", projectId, title: "Huge", description: "", kind: "bug" }, cookie)).body as TicketView;
+    const huge = await h.app.inject({ method: "POST", url: `/api/tickets/${other.key}/attachments?name=huge.png`, payload: png(13_000, 4), headers: { cookie, "content-type": "image/png" } });
+    assert.equal(huge.statusCode, 400, "a canvas too large is refused before it is decoded");
+    assert.match(huge.body, /too large/);
   });
 
   test("a lead files a follow-up: it waits in the backlog, from this ticket, even with free slots", async () => {
@@ -154,6 +169,20 @@ describe("the board", () => {
     assert.match(filed, /Filed DEM-2 in the backlog/);
     const follow = h.services.tickets.view("DEM-2");
     assert.deepEqual([follow.status, follow.createdBy, follow.fromTicket, follow.kind, follow.missionId], ["backlog", "Dev", t.key, "bug", null]);
+    // At most five from one ticket, and not the same one twice.
+    for (let i = 0; i < 4; i++) h.services.tickets.fileFromAgent(follow.fromTicket ? h.services.tickets.view(t.key).missionId! : "", "Dev", { title: `Another ${i}`, description: "something else noticed here", kind: "bug" });
+    assert.throws(() => h.services.tickets.fileFromAgent(h.services.tickets.view(t.key).missionId!, "Dev", { title: "One too many", description: "something else noticed", kind: "bug" }), /filed 5 tickets/);
+    // Started by you, its lead is told the words are an agent's.
+    await h.api("POST", `/api/missions/${h.services.tickets.view(t.key).missionId}/cancel`, {}, cookie);
+    let intent = "";
+    h.scriptAgents({ Dev: [(c) => {
+      intent = JSON.stringify(c.messages[1] ?? "");
+      return call("ask_user", { question: "Is this real?" });
+    }] });
+    await h.api("POST", "/api/tickets/DEM-2/move", { status: "todo" }, cookie);
+    await ticket(h, "DEM-2", (x) => x.need === "answer", "asking");
+    assert.match(intent, /did not write this ticket's description: Dev, an agent/);
+    assert.match(intent, /<<<agent-written>>>[\s\S]*no test covers login[\s\S]*<<<end of agent-written text>>>/);
   });
 
   test("立项: a finished sandbox experiment becomes a repository, a project and a feature ticket in todo", async () => {
@@ -174,14 +203,18 @@ describe("the board", () => {
     h.scriptAgents({ Lead: [call("ask_user", { question: "Plan it?" })] });
     const next = await h.api("POST", `/api/tickets/${t.key}/promote`, {}, cookie);
     assert.equal(next.status, 200, JSON.stringify(next.body));
+    assert.equal(next.body.status, "backlog", "you read the conclusion before it becomes the work");
+    assert.match(next.body.description, /<<<agent-written>>>\nIt works: 2x faster\./);
     const real = h.services.projects.view(next.body.projectId);
     assert.equal(real.kind, "github");
     assert.match(real.githubRepo, /^tester\/faster-square/);
     assert.equal(next.body.fromTicket, t.key);
     const files = execFileSync("/usr/bin/git", ["ls-tree", "-r", "--name-only", "main"], { cwd: h.services.projects.get(real.id).mirrorPath }).toString();
     assert.match(files, /results\.md/, "what the experiment found starts the repository");
+    await h.api("POST", `/api/tickets/${next.body.key}/move`, { status: "todo" }, cookie);
     await ticket(h, next.body.key, (x) => x.status === "needs_you", "the feature ticket started");
     assert.match(h.services.missions.view(h.services.tickets.view(next.body.key).missionId!).intent, /started as SBX-1 \(an experiment\)/);
     assert.equal((await h.api("POST", `/api/tickets/${t.key}/promote`, {}, cookie)).status, 409, "only once");
   });
 });
+

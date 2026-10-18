@@ -109,11 +109,31 @@ export class ProjectService {
     return this.view(row.id);
   }
 
+  /**
+   * The project's ticket prefix, fixed the first time it is needed: derived from its name, with a number added when
+   * another project already uses it (Fridgy FRI, Friends FRI2), so every project numbers its own tickets.
+   */
+  ensurePrefix(id: string): string {
+    const row = this.get(id);
+    if (row.ticketPrefix) return row.ticketPrefix;
+    // First come, first served: only prefixes other projects have fixed already are taken.
+    // So are prefixes other projects' tickets still carry (a project that changed its prefix keeps its old tickets).
+    const inUse = this.deps.db.selectDistinct({ prefix: schema.tickets.prefix, projectId: schema.tickets.projectId }).from(schema.tickets).all()
+      .filter((t) => t.projectId !== id).map((t) => t.prefix);
+    const taken = new Set([...RESERVED_PREFIXES, ...inUse, ...this.deps.db.select().from(schema.projects).all().filter((p) => p.id !== id && p.ticketPrefix).map((p) => p.ticketPrefix!)]);
+    const base = ticketPrefixOf(row).slice(0, 5);
+    let prefix = ticketPrefixOf(row);
+    for (let n = 2; taken.has(prefix); n++) prefix = `${base}${n}`;
+    this.deps.db.update(schema.projects).set({ ticketPrefix: prefix }).where(eq(schema.projects.id, id)).run();
+    return prefix;
+  }
+
   setProfile(actor: string, id: string, input: SetProjectProfile, now = Date.now()): ProjectView {
     this.get(id);
     if (input.ticketPrefix) {
       const taken = this.list().find((p) => p.id !== id && p.ticketPrefix === input.ticketPrefix);
-      if (taken || RESERVED_PREFIXES.has(input.ticketPrefix)) throw conflict(`The ticket prefix ${input.ticketPrefix} is already used${taken ? ` by ${taken.name}` : ""}`);
+      const onTickets = this.deps.db.select({ projectId: schema.tickets.projectId }).from(schema.tickets).where(eq(schema.tickets.prefix, input.ticketPrefix)).all().some((t) => t.projectId !== id);
+      if (taken || onTickets || RESERVED_PREFIXES.has(input.ticketPrefix)) throw conflict(`The ticket prefix ${input.ticketPrefix} is already used${taken ? ` by ${taken.name}` : ""}`);
     }
     this.deps.db.update(schema.projects).set({
       profile: input.profile,

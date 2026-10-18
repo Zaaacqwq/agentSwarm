@@ -61,7 +61,7 @@ export interface RunHooks {
    * (a ticket's pictures, base64) and images in its first message.
    */
   opening?(run: RunRow): Promise<RunOpening | null>;
-  /** The pull request a root opens: what the extension adds (a Linear ticket key, "Fixes ZAC-42"). */
+  /** The pull request a root opens: what the extension adds (a board ticket's key, "Ticket FRI-12"). */
   pullRequest?(run: RunRow, title: string, body: string): { title: string; body: string };
 }
 
@@ -577,6 +577,11 @@ export class RunService {
     const base = run.baseBranch ?? project.defaultBranch;
     const cloned = await backend.call<{ resumed: boolean }>(ws, { op: "git.clone", scope: run.worktreeScope, mirror: basename(project.mirrorPath), branch: run.branch, base, files: await projects.files(project.id) }, { signal });
     if (!run.cliSession) bus.runEvent(run.id, "status", { status: "worktree", branch: run.branch, base, ...(cloned.resumed ? { resumed: true } : {}) });
+    // A CLI reads pictures from files: they go into the worktree (images in a message are for native runs).
+    const opening = run.cliSession || run.kind === "review" ? null : await this.hooks?.opening?.(run) ?? null;
+    for (const f of opening?.files ?? []) {
+      await backend.call(ws, { op: "fs.write", scope: run.worktreeScope, path: f.path, content: f.base64, encoding: "base64" }, { signal });
+    }
 
     const stopReason = () => active.reason;
     const deadline = setTimeout(() => {

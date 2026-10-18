@@ -350,7 +350,9 @@ export class DiscordBridge {
     const s = this.stored();
     if (!s || !this.connected) return;
     const link = `${this.deps.dashboardUrl.replace(/\/$/, "")}/tickets/${ticket.key}`;
-    this.deps.transport.send(s.channelId, { content: `**${ticket.key}** ${ticket.title.slice(0, 120)} ${what}. ${link}` })
+    // The title may be an agent's words (file_ticket): shown as code, so it cannot carry links or formatting.
+    const title = ticket.title.replace(/[`\r\n]+/g, " ").slice(0, 120);
+    this.deps.transport.send(s.channelId, { content: `**${ticket.key}** \`${title}\` ${what}. ${link}` })
       .catch((e: Error) => this.deps.log("discord ticket note failed", { ticket: ticket.key, error: e.message }));
   }
 

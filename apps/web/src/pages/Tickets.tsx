@@ -3,7 +3,7 @@ import {
   DndContext, DragOverlay, KeyboardSensor, PointerSensor, TouchSensor, closestCorners, useDroppable, useSensor, useSensors,
   type DragEndEvent, type DragStartEvent,
 } from "@dnd-kit/core";
-import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
+import { SortableContext, arrayMove, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import type { ProjectView, TicketStatus, TicketView } from "@agentswarm/contracts";
 import { useLive, useReconnect, useResource } from "../live.ts";
@@ -42,12 +42,8 @@ export function TicketsPage() {
   const view = query.get("view") ?? (narrow ? "list" : "board");
   useReconnect(tickets.reload);
   useLive((m) => {
-    if (m.kind !== "ticket") return;
-    tickets.set((prev) => {
-      const rest = (prev ?? []).filter((x) => x.id !== m.ticket.id);
-      // A deleted ticket comes as canceled without a mission, gone from the list on the next load.
-      return [...rest, m.ticket];
-    });
+    if (m.kind === "ticket_removed") tickets.set((prev) => (prev ?? []).filter((x) => x.id !== m.id));
+    if (m.kind === "ticket") tickets.set((prev) => [...(prev ?? []).filter((x) => x.id !== m.ticket.id), m.ticket]);
   });
   const q = (query.get("q") ?? "").trim().toLowerCase();
   const all = tickets.data ?? [];
@@ -120,17 +116,30 @@ function Board({ tickets, columns }: { tickets: TicketView[]; columns: readonly 
     setActive(null);
     const t = placed.find((x) => x.id === e.active.id);
     const to = e.over ? columnOf(String(e.over.id)) : null;
-    if (!t || !to) return;
+    if (!t || !to || !e.over) return;
+    // Let go where it was picked up: nothing to do.
+    if (e.over.id === t.id) return;
     if (!YOURS.includes(to) || (t.missionId && to !== "canceled")) {
       if (to !== t.status) alert(t.missionId ? `${t.key} has started: its column follows its mission.` : `Drop it on Backlog or Todo; ${STATUS_LABEL[to]} follows the work.`);
       return;
     }
-    const col = placed.filter((x) => x.status === to && x.id !== t.id).sort(byPlace);
-    const overIndex = col.findIndex((x) => x.id === e.over!.id);
-    const index = overIndex < 0 ? col.length : overIndex;
-    const after = index > 0 ? col[index - 1]!.id : null;
-    const before = index < col.length ? col[index]!.id : null;
-    const position = ((after ? col[index - 1]!.position : (before ? col[index]!.position - 2 : 0)) + (before ? col[index]!.position : (after ? col[index - 1]!.position + 2 : 0))) / 2;
+    // The column as it will be (dnd-kit's own order: moving down puts it after the card it is over).
+    const ids = placed.filter((x) => x.status === to).sort(byPlace).map((x) => x.id);
+    const overIndex = ids.indexOf(String(e.over.id));
+    let order: string[];
+    if (to === t.status) order = arrayMove(ids, ids.indexOf(t.id), overIndex < 0 ? ids.length - 1 : overIndex);
+    else {
+      order = [...ids];
+      order.splice(overIndex < 0 ? order.length : overIndex, 0, t.id);
+    }
+    const i = order.indexOf(t.id);
+    const after = order[i - 1] ?? null;
+    const before = order[i + 1] ?? null;
+    if (to === t.status && after === (ids[ids.indexOf(t.id) - 1] ?? null)) return;
+    const pos = (id: string | null) => (id ? placed.find((x) => x.id === id)!.position : null);
+    const lo = pos(after);
+    const hi = pos(before);
+    const position = lo !== null && hi !== null ? (lo + hi) / 2 : lo !== null ? lo + 1 : hi !== null ? hi - 1 : 0;
     setOptimistic(new Map(optimistic).set(t.id, { status: to, position }));
     if (!(await moveTicket(t, to as "backlog" | "todo" | "canceled", { after, before }))) setOptimistic(new Map());
   };

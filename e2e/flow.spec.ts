@@ -220,7 +220,28 @@ test("the board: a ticket with a picture, dragged into Todo, answered on the pho
   await page.getByRole("link", { name: "Tickets" }).click();
   await page.getByRole("button", { name: "Board", exact: true }).click();
   const card = page.getByRole("article", { name: /DEM-\d+ Make the button orange/ });
+  await page.goto("/?view=board");
   await expect(page.getByRole("region", { name: "Backlog" }).getByRole("article")).toHaveCount(1);
+  // Two more in the backlog, then a drag within the column: the last one goes to the top.
+  for (const title of ["Second idea", "Third idea"]) {
+    await page.evaluate(`fetch("/api/tickets", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ space: "ideas", kind: "research", title: "${title}", description: "" }) })`);
+  }
+  const backlog = page.getByRole("region", { name: "Backlog" });
+  await expect(backlog.getByRole("article")).toHaveCount(3);
+  const titles = () => backlog.locator(".ticket-title").allTextContents();
+  const order = await titles();
+  const last = backlog.getByRole("article").nth(2);
+  const top = backlog.getByRole("article").nth(0);
+  const from = (await last.boundingBox())!;
+  const dest = (await top.boundingBox())!;
+  await page.mouse.move(from.x + 20, from.y + 12);
+  await page.mouse.down();
+  await page.mouse.move(from.x + 24, from.y + 2, { steps: 3 });
+  await page.mouse.move(dest.x + 20, dest.y + 4, { steps: 12 });
+  await page.mouse.up();
+  await expect.poll(titles).toEqual([order[2], order[0], order[1]]);
+  await page.reload();
+  await expect.poll(titles).toEqual([order[2], order[0], order[1]]);
   await page.screenshot({ path: `${SHOTS}/board-1440.png`, fullPage: true });
   // Drag it into Todo: it starts, its lead asks, and it lands in Needs you.
   const box = (await card.boundingBox())!;

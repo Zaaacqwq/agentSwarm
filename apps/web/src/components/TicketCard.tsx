@@ -32,6 +32,7 @@ export function openTicket(e: MouseEvent, key: string): void {
 /** Moves a ticket to one of your columns; returns false (after saying why) when it cannot. */
 export async function moveTicket(t: TicketView, status: "backlog" | "todo" | "canceled", place: { after?: string | null; before?: string | null } = {}): Promise<boolean> {
   if (status === "canceled" && t.missionId && !confirm(`Stop ${t.key}? Its agents are cancelled.`)) return false;
+  if (status === "todo" && t.createdBy !== "you" && !confirm(`${t.key} was written by ${t.createdBy}, an agent. Start it?`)) return false;
   try {
     await api("POST", `/tickets/${t.key}/move`, { status, ...place });
     return true;
