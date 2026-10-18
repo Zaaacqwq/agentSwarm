@@ -1,7 +1,7 @@
-# R7 实施方案：内置看板，替换 Linear（草案，2026-10-18）
+# R7 实施方案：内置看板，替换 Linear（2026-10-18 已确认）
 
 > 依据：`PLAN.md` 第 14 节，R5 的 Linear 集成（`docs/R5_IMPLEMENTATION_PLAN.md`），agent-swarm-ng 的 tickets（`docs/tickets.md`，2026-10-17 加入），以及现在面板上的 Missions 页。
-> 第 9 节是需要你决定的事。
+> 你同意了第 9 节的全部推荐（"按推荐"）。
 
 ## 0. 为什么做，做完是什么样
 
