@@ -89,6 +89,16 @@ export const ProjectProfile = Type.Object({
   rules: Type.Optional(Type.String({ maxLength: 4000 })),
   reviewRuntime: Type.Optional(Type.Union([Type.Literal("native"), Type.Literal("claude_code"), Type.Literal("codex")])),
   autoApproveBugs: Type.Optional(Type.Boolean()),
+  /** iOS apps (R6): what to build for the simulator. Agents find the rest with `xcodebuild -list`. */
+  ios: Type.Optional(Type.Object({
+    project: Type.Optional(Type.String({ maxLength: 200, pattern: "\\.xcodeproj$" })),
+    workspace: Type.Optional(Type.String({ maxLength: 200, pattern: "\\.xcworkspace$" })),
+    scheme: Type.Optional(Type.String({ maxLength: 100 })),
+    /** e.g. com.apple.CoreSimulator.SimDeviceType.iPhone-17 */
+    deviceType: Type.Optional(Type.String({ maxLength: 150, pattern: "^[A-Za-z0-9.-]+$" })),
+  })),
+  /** Sites besides the local dev server where the browser may click and type (R6): origins, e.g. https://staging.example.com. */
+  testSites: Type.Optional(Type.Array(Type.String({ maxLength: 200, pattern: "^https?://[^/\\s]+$" }), { maxItems: 20 })),
 });
 export type ProjectProfile = Static<typeof ProjectProfile>;
 
@@ -229,7 +239,21 @@ export interface RunView {
   readonly runtime: AgentRuntime;
   /** CLI runs: the cost at API prices as the CLI reports it (paid by the subscription, not the budget). */
   readonly estimatedUsd: number;
+  /** Eyes and hands it was given (R6). */
+  readonly needs: readonly RunNeed[];
 }
+
+/** R6: how busy this Mac is with simulators and browsers. memoryPressure: 1 normal, 2 warning, 4 critical. */
+export interface MachineLoadView {
+  readonly heavySlots: number;
+  readonly heavyRunning: number;
+  readonly heavyQueued: number;
+  readonly memoryPressure: number;
+}
+
+/** What a run may use beyond its worktree (R6). Each holds a heavy slot while the run works. */
+export type RunNeed = "simulator" | "browser";
+export const RUN_NEEDS: readonly RunNeed[] = ["simulator", "browser"];
 
 /** Every run of one tree, and what the whole tree has spent. */
 export interface TreeView {

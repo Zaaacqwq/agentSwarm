@@ -17,7 +17,7 @@ const builderId = (c: TranscriptContext) => /Spawned Builder: id (run_[0-9a-f]+)
 const h = await harness({ webDist: fileURLToPath(new URL("../../web/dist", import.meta.url)) });
 h.scriptAgents({
   Dev: [
-    call("spawn_agent", { name: "Helper", role: "developer", brief: "square(3) must be 9: fix math.js, run node --test, commit, push and report." }),
+    call("spawn_agent", { name: "Helper", role: "developer", brief: "square(3) must be 9: fix math.js, run node --test, commit, push and report.", needs: ["simulator"] }),
     call("wait_agents", {}),
     withHelper("review_agent"),
     withHelper("merge_agent"),
@@ -56,6 +56,8 @@ h.scriptAgents({
   ],
   "Builder-review": [call("review_verdict", { approved: true, comments: "Correct." })],
   Helper: [
+    // R6: what it saw, shown in the timeline (a fake simulator).
+    call("sim_screenshot", {}),
     call("ws_read", { path: "math.js" }),
     call("ws_edit", { path: "math.js", old_text: "x + x", new_text: "x * x" }),
     call("ws_bash", { command: "node --test" }),

@@ -50,7 +50,7 @@ export function childEnv(env: ExecEnv, scope: string): Record<string, string> {
     USER: env.user,
     LOGNAME: env.user,
     SHELL: "/bin/zsh",
-    PATH: `${env.layout.nodeBin}:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin`,
+    PATH: `${env.layout.toolsDir}/bin:${env.layout.nodeBin}:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin`,
     TMPDIR: `${s.tmp}/`,
     LANG: "en_US.UTF-8",
     TERM: "dumb",
@@ -118,6 +118,28 @@ export function runProcess(env: ExecEnv, argv: readonly string[], opts: RunOptio
       }, 500).unref();
     });
   });
+}
+
+/**
+ * A long-lived program whose stdin stays open (browser sessions, R6), in its own process group: killed with
+ * ws-exec like every command, and its group goes when it exits.
+ */
+export function spawnInteractive(env: ExecEnv, argv: readonly string[], opts: { cwd: string; scope: string }): ChildProcess {
+  const [cmd, ...args] = argv;
+  if (!cmd) throw new Error("Empty argv");
+  const child = spawn(cmd, args, { cwd: opts.cwd, env: childEnv(env, opts.scope), detached: true, stdio: ["pipe", "pipe", "pipe"] });
+  running.add(child);
+  child.stdin?.on("error", () => undefined);
+  child.on("exit", () => {
+    killGroup(child);
+    running.delete(child);
+  });
+  child.on("error", () => running.delete(child));
+  return child;
+}
+
+export function stopInteractive(child: ChildProcess): void {
+  killGroup(child);
 }
 
 export interface StreamOptions extends RunOptions {

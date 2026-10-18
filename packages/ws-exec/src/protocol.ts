@@ -23,7 +23,24 @@ export type Request =
   /** Installed versions, and whether Codex is signed in on this workstation. */
   | { op: "cli.status" }
   /** Kill every process of this workstation user: the run ended, was cancelled, or swarmd restarted. */
-  | { op: "reap" };
+  | { op: "reap" }
+  // R6: this workstation's own simulator device (agentswarm-<user>); a request never names a device.
+  | { op: "sim.boot"; scope: string; deviceType?: string; runtime?: string }
+  | { op: "sim.build"; scope: string; project?: string; workspace?: string; scheme: string; configuration?: string; timeoutMs?: number }
+  | { op: "sim.launch"; scope: string; bundleId: string; args?: string[] }
+  | { op: "sim.ui"; scope: string }
+  | { op: "sim.tap"; scope: string; x: number; y: number }
+  | { op: "sim.type"; scope: string; text: string }
+  | { op: "sim.swipe"; scope: string; from: [number, number]; to: [number, number]; durationS?: number }
+  | { op: "sim.button"; scope: string; button: string }
+  | { op: "sim.screenshot"; scope: string; saveAs?: string; region?: [number, number, number, number] }
+  | { op: "sim.logs"; scope: string; process?: string; seconds?: number }
+  | { op: "sim.shutdown"; scope: string }
+  /**
+   * A headless browser for the run (R6). After this request, swarmd writes browser commands as lines
+   * (`{"id": 1, "cmd": "open", "url": …}`); each reply is an event. Ends when swarmd closes stdin.
+   */
+  | { op: "browser.session"; scope: string; interact?: string[]; timeoutMs: number };
 
 export type Op = Request["op"];
 
@@ -63,6 +80,47 @@ export class OpError extends Error {
     super(message);
     this.code = code;
   }
+}
+
+/** A screenshot as a model sees it: a JPEG (base64), longest side 1000 px, and the size it was taken at. */
+export interface ImageResult {
+  readonly jpeg: string;
+  readonly width: number;
+  readonly height: number;
+  readonly sourceWidth: number;
+  readonly sourceHeight: number;
+  /** When it is a closer look: which part of the screen, [x1, y1, x2, y2] in 0–1000. */
+  readonly region?: readonly [number, number, number, number];
+  /** Where the evidence copy went (relative to the worktree), when asked. */
+  readonly saved?: string;
+}
+
+export interface SimDevice {
+  readonly udid: string;
+  readonly name: string;
+  readonly deviceType: string;
+  readonly runtime: string;
+  readonly bootMs: number;
+}
+
+export interface SimBuildResult {
+  readonly ok: boolean;
+  /** The error lines, at most 40. */
+  readonly errors: readonly string[];
+  readonly durationMs: number;
+  readonly bundleId: string | null;
+  readonly app: string | null;
+}
+
+/** One accessibility element: frame is [x, y, width, height] in screen points. */
+export interface UiElement {
+  readonly type: string;
+  readonly label?: string;
+  readonly value?: string;
+  readonly id?: string;
+  readonly enabled?: false;
+  readonly frame: readonly [number, number, number, number];
+  readonly children?: readonly UiElement[];
 }
 
 export interface ExecResult {

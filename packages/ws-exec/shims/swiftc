@@ -1,0 +1,3 @@
+#!/bin/sh
+# Installed by agentswarm scripts/setup.sh (R6): macro plugins' sandbox cannot start inside agentSwarm's seatbelt.
+exec /usr/bin/swiftc -disable-sandbox "$@"

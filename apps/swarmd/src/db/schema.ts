@@ -81,6 +81,10 @@ export interface ProjectProfile {
   readonly reviewRuntime?: "native" | "claude_code" | "codex";
   /** Bug tickets skip plan approval (the merge gate stays). */
   readonly autoApproveBugs?: boolean;
+  /** R6: what to build for the simulator. */
+  readonly ios?: { readonly project?: string; readonly workspace?: string; readonly scheme?: string; readonly deviceType?: string };
+  /** R6: origins besides localhost where the browser may click and type. */
+  readonly testSites?: string[];
 }
 
 /** Local files a project needs that are not in git (Local.xcconfig, .env): written into every worktree, never committed. */
@@ -125,6 +129,9 @@ export interface RunLimits {
   readonly maxDurationMs: number;
   readonly maxCostUsd: number;
 }
+
+/** What a run may use beyond its worktree (R6). */
+export type RunNeed = "simulator" | "browser";
 
 export const runs = sqliteTable("runs", {
   id: text("id").primaryKey(),
@@ -178,6 +185,8 @@ export const runs = sqliteTable("runs", {
   cliSession: text("cli_session"),
   /** What a subscription run would have cost at API prices (as the CLI reports it); not charged to budgets. */
   estimatedUsd: real("estimated_usd").notNull().default(0),
+  /** Eyes and hands it was given (R6): a simulator, a browser. They hold a heavy slot while it runs. */
+  needs: text("needs", { mode: "json" }).$type<RunNeed[]>(),
 }, (t) => [
   index("runs_agent_idx").on(t.agentId, t.createdAt),
   index("runs_status_idx").on(t.status),

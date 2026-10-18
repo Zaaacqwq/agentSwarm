@@ -1,12 +1,12 @@
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
-import type { AgentRuntime } from "@agentswarm/contracts";
+import type { AgentRuntime, RunNeed } from "@agentswarm/contracts";
 
 const text = (t: string, terminate = false): AgentToolResult<undefined> & { terminate?: boolean } => ({ content: [{ type: "text", text: t }], details: undefined, ...(terminate ? { terminate: true } : {}) });
 
 /** What the tree tools ask of the run service, bound to the calling run. */
 export interface TreeToolOps {
-  spawn(input: { name: string; role: string; brief: string; budgetUsd?: number; modelId?: string; runtime?: AgentRuntime }): Promise<{ id: string; branch: string; budgetUsd: number }>;
+  spawn(input: { name: string; role: string; brief: string; budgetUsd?: number; modelId?: string; runtime?: AgentRuntime; needs?: RunNeed[] }): Promise<{ id: string; branch: string; budgetUsd: number }>;
   /** Which runtimes can be spawned now, for the spawn_agent description (R4). */
   runtimes(): string;
   /** Results right away if everything waited for has finished; otherwise null, and the run will suspend. */
@@ -25,6 +25,7 @@ const Spawn = Type.Object({
   budget_usd: Type.Optional(Type.Number({ minimum: 0.01, maximum: 50 })),
   model: Type.Optional(Type.String({ maxLength: 200 })),
   runtime: Type.Optional(Type.Union([Type.Literal("native"), Type.Literal("claude_code"), Type.Literal("codex")], { description: "Who does the work (default native)" })),
+  needs: Type.Optional(Type.Array(Type.Union([Type.Literal("simulator"), Type.Literal("browser")]), { maxItems: 2, description: "simulator: an iOS simulator to build, run and tap the app; browser: a headless browser for a web app" })),
 });
 const Ids = Type.Object({ ids: Type.Optional(Type.Array(Type.String(), { maxItems: 20 })) });
 const Id = Type.Object({ id: Type.String() });
@@ -49,7 +50,7 @@ function build(ops: TreeToolOps, opts: { canSpawn: boolean; isRoot: boolean }): 
           `Right now: ${ops.runtimes()}.`,
         ].join(" "),
         execute: async (_id, p: any) => {
-          const c = await ops.spawn({ name: p.name, role: p.role, brief: p.brief, ...(p.budget_usd ? { budgetUsd: p.budget_usd } : {}), ...(p.model ? { modelId: p.model } : {}), ...(p.runtime ? { runtime: p.runtime } : {}) });
+          const c = await ops.spawn({ name: p.name, role: p.role, brief: p.brief, ...(p.budget_usd ? { budgetUsd: p.budget_usd } : {}), ...(p.model ? { modelId: p.model } : {}), ...(p.runtime ? { runtime: p.runtime } : {}), ...(p.needs?.length ? { needs: p.needs } : {}) });
           const who = p.runtime && p.runtime !== "native" ? `runs as ${p.runtime} (subscription)` : `budget $${c.budgetUsd.toFixed(2)}`;
           return text(`Spawned ${p.name}: id ${c.id}, branch ${c.branch}, ${who}. Spawn the others you need, then call wait_agents.`);
         },

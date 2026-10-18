@@ -29,7 +29,9 @@ export function ToolCard({ start, end, agent }: { start: RunEventView; end: RunE
   const d = end?.data as Record<string, any> | undefined;
   const state = !d ? "running" : d.isError ? "failed" : "ok";
   const terminal = TERMINAL_TOOLS.has(String(s.name));
+  const screen = typeof d?.screen === "string" && d.screen.startsWith("/api/runs/") ? d.screen : null;
   return (
+    <div className="tool-wrap">
     <details className={`tool-card ${state}`} open={state === "failed"}>
       <summary>
         <span className={`tool-state ${state}`} aria-label={state === "running" ? "Running" : state === "failed" ? "Error" : "Done"} />
@@ -43,6 +45,12 @@ export function ToolCard({ start, end, agent }: { start: RunEventView; end: RunE
         {d && <pre className={terminal ? "terminal" : "result"}>{String(d.output ?? "") || "(no output)"}</pre>}
       </div>
     </details>
+    {screen && (
+      <a className="screen-thumb" href={screen} target="_blank" rel="noreferrer" title="Open the screenshot">
+        <img src={screen} alt={`Screenshot from ${String(s.name)}`} loading="lazy" decoding="async" />
+      </a>
+    )}
+    </div>
   );
 }
 

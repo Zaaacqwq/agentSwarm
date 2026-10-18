@@ -1,4 +1,4 @@
-import { existsSync, realpathSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { OpError } from "./protocol.ts";
 
@@ -40,4 +40,26 @@ function realExistingPrefix(target: string): string {
     current = parent;
   }
   return join(realpathSync(current), ...tail);
+}
+
+/**
+ * Reads a file a sandboxed command produced in a directory the agent can also write. ws-exec itself runs
+ * outside the sandbox, so the file must not be a symlink (to something only the workstation user may read),
+ * must be a regular file, and must not be huge.
+ */
+export function readProduced(path: string, maxBytes = 16 * 1024 * 1024): Buffer {
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (error) {
+    throw new OpError("failed", (error as NodeJS.ErrnoException).code === "ELOOP" ? "Refusing to read a symbolic link" : `The command produced no output file`);
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw new OpError("failed", "The command's output is not a regular file");
+    if (st.size > maxBytes) throw new OpError("failed", "The command's output is too large");
+    return readFileSync(fd);
+  } finally {
+    closeSync(fd);
+  }
 }

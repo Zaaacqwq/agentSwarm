@@ -1,7 +1,8 @@
-import { basename } from "node:path";
+import { readdirSync, readFileSync, rmSync } from "node:fs";
+import { basename, join } from "node:path";
 import { and, asc, desc, eq, gt, inArray, isNotNull, lt } from "drizzle-orm";
 import { Agent, type AgentEvent, type AgentMessage, type AgentTool } from "@earendil-works/pi-agent-core";
-import type { CreateRun, RunEventView, RunReport, RunView, TreeView } from "@agentswarm/contracts";
+import type { CreateRun, MachineLoadView, RunEventView, RunReport, RunView, TreeView } from "@agentswarm/contracts";
 import type { Db } from "../db/client.ts";
 import { schema } from "../db/client.ts";
 import type { RunLimits } from "../db/schema.ts";
@@ -16,6 +17,8 @@ import type { ModelGateway } from "../models/model-gateway.ts";
 import type { Relay } from "../relay/relay.ts";
 import type { AgentService } from "./agent-service.ts";
 import { REVIEW_TOOL_NAMES, workstationTools } from "./tools.ts";
+import { Eyes } from "../eyes/eyes.ts";
+import { keepRecentImages } from "../eyes/images.ts";
 import { projectLines, reviewerPrompt, systemPrompt } from "./prompts.ts";
 import { TERMINAL, TREE_LIMITS, TreeError, type TreeService } from "./tree-service.ts";
 import { treeTools, verdictTool, type TreeToolOps } from "./tree-tools.ts";
@@ -58,6 +61,7 @@ export const MISSION_LEAD_TURNS = 150;
 /** A failed model request is retried this many times before the run fails. */
 export const MODEL_RETRIES = 2;
 const QUOTA_RETRY_MS = 5 * 60_000;
+const MEMORY_RETRY_MS = 20_000;
 
 const RETRY_DELAY_MS = 2_000;
 
@@ -78,6 +82,12 @@ export interface RunDeps {
   readonly tree: TreeService;
   readonly cli: CliService;
   readonly maxConcurrent: number;
+  /** R6: runs with a simulator or a browser at once (Xcode builds, simulators and Chromium are heavy). */
+  readonly heavySlots: number;
+  /** R6: the kernel's memory pressure level (1 normal, 2 warning, 4 critical); new heavy runs wait above 1. */
+  readonly memoryPressure: () => number;
+  /** R6: where each run's screenshots are kept for the dashboard (<dir>/<runId>/NNN.jpg). */
+  readonly screensDir: string;
   readonly limits?: RunLimits;
   /** Fetch GitHub into the mirror before a run clones it (off in tests with local remotes). */
   readonly refreshMirror: boolean;
@@ -97,6 +107,8 @@ interface Active {
   readonly inbox: string[];
   /** Set by wait_agents or review_agent: suspend when this execution ends, until these runs finish. */
   waitFor: string[] | null;
+  /** R6: the run's simulator and browser, closed when the execution ends. */
+  eyes: Eyes | null;
 }
 
 const STOP_TEXT: Record<Exclude<StopReason, "cancelled">, string> = {
@@ -114,6 +126,7 @@ export class RunService {
   private hooks: RunHooks | null = null;
   private readonly cliRunner: CliRunner;
   private retryTimer: NodeJS.Timeout | null = null;
+  private memoryTimer: NodeJS.Timeout | null = null;
 
   constructor(deps: RunDeps) {
     this.deps = deps;
@@ -191,7 +204,7 @@ export class RunService {
       limits: this.limitsFor(missionId), createdAt: now, startedAt: null, endedAt: null,
       treeId: names.treeId, parentRunId: null, depth: 0, baseBranch: null, budgetUsd: input.budgetUsd ?? TREE_LIMITS.defaultRootBudgetUsd,
       kind: "task", reviewOf: null, review: null, mergedAt: null, prUrl: null, waitingFor: null, reviewSha: null,
-      missionId, prState: null, cleanedAt: null, cliSession: null, estimatedUsd: 0,
+      missionId, prState: null, cleanedAt: null, cliSession: null, estimatedUsd: 0, needs: null,
     };
     this.deps.db.insert(schema.runs).values(row).run();
     audit(this.deps.db, actor, "run.create", row.id, { agentId, branch: row.branch }, now);
@@ -274,6 +287,7 @@ export class RunService {
   /** Cancels everything running and waits for it to wind down (shutdown and tests). */
   async stopAll(): Promise<void> {
     if (this.retryTimer) clearTimeout(this.retryTimer);
+    if (this.memoryTimer) clearTimeout(this.memoryTimer);
     this.retryTimer = null;
     for (const [id, active] of this.active) {
       active.reason = "shutdown";
@@ -326,8 +340,19 @@ export class RunService {
         if (runtime !== "native") cliRunning.set(runtime, (cliRunning.get(runtime) ?? 0) + 1);
       }
       const codexReady = new Set(this.deps.pool.codexReady());
+      // Simulators and browsers: a few at once, and none started while memory is already tight.
+      let heavy = [...this.active.keys()].filter((id) => this.get(id).needs?.length).length;
+      let pressure: number | null = null;
       for (const run of queued) {
         if (this.active.size >= this.deps.maxConcurrent) break;
+        if (run.needs?.length) {
+          if (heavy >= this.deps.heavySlots) continue;
+          pressure ??= this.deps.memoryPressure();
+          if (pressure > 1) {
+            this.retryOnMemory();
+            continue;
+          }
+        }
         // A follow-up needs the workstation that holds its worktree.
         if (run.workstationId && (workstations.get(run.workstationId) ?? "unhealthy") === "unhealthy") {
           this.finish(run.id, "failed", run.report, `Its workstation ${run.workstationId} is unavailable; start a new run`);
@@ -354,13 +379,14 @@ export class RunService {
         const ws = this.deps.pool.acquire(run.id, run.workstationId, Date.now(), runtime === "codex" ? (w) => codexReady.has(w.id) : undefined);
         if (!ws) continue;
         if (runtime !== "native") cliRunning.set(runtime, (cliRunning.get(runtime) ?? 0) + 1);
+        if (run.needs?.length) heavy += 1;
         this.start(run, ws);
       }
     }
   }
 
   private start(run: RunRow, ws: string, now = Date.now()): void {
-    const active: Active = { controller: new AbortController(), agent: null, reason: null, done: Promise.resolve(), inbox: [], waitFor: null };
+    const active: Active = { controller: new AbortController(), agent: null, reason: null, done: Promise.resolve(), inbox: [], waitFor: null, eyes: null };
     this.active.set(run.id, active);
     this.deps.db.update(schema.runs).set({ status: "running", workstationId: ws, startedAt: run.startedAt ?? now, error: null, endedAt: null, waitingFor: null }).where(eq(schema.runs.id, run.id)).run();
     this.deps.bus.runEvent(run.id, "status", { status: "running", workstation: ws }, now);
@@ -373,6 +399,8 @@ export class RunService {
         this.finish(run.id, "failed", null, error.message.slice(0, 500));
       })
       .finally(async () => {
+        // The simulator is shut down and erased and the browser closed before everything else is reaped.
+        await active.eyes?.close().catch((e: Error) => this.deps.log("closing the simulator or browser failed", { runId: run.id, error: e.message }));
         // Whatever the agent left running (servers, setsid loops) dies with the run.
         await this.deps.pool.reap(ws).catch((e: Error) => this.deps.log("reap failed", { ws, error: e.message }));
         this.deps.pool.release(ws, run.id);
@@ -428,6 +456,10 @@ export class RunService {
         report = { summary: `${approved ? "Approved" : "Changes requested"}: ${comments}`, tests: "", unfinished: [] };
       })]
       : [...wsTools, ...treeTools(this.treeOps(runId, active), { canSpawn, isRoot: run.depth === 0 })];
+    if (!isReview && run.needs?.length) {
+      active.eyes = new Eyes({ backend, workstation: ws, scope: run.worktreeScope, needs: run.needs, profile: project.profile, screensDir: join(this.deps.screensDir, runId) });
+      tools.push(...(active.eyes.tools() as AgentTool<any, undefined>[]));
+    }
     const extension = isReview ? null : this.hooks?.tools(run, {
       signal,
       waitForUser: () => (active.waitFor = [...(active.waitFor ?? []), WAIT_FOR_USER]),
@@ -445,6 +477,7 @@ export class RunService {
         name: agentRow.name, role: agentRow.role, instructions: agentRow.instructions, repo: project.githubRepo, defaultBranch: project.defaultBranch, branch: run.branch,
         project: projectLines(project.profile),
         tree: { canSpawn, isRoot: run.depth === 0, depth: run.depth },
+        eyes: run.needs ?? [],
         ...(missionPrompt ? { extra: missionPrompt.section, finish: missionPrompt.finish } : {}),
       });
     const agent = new Agent({
@@ -454,6 +487,8 @@ export class RunService {
         tools,
         messages: (session?.messages ?? []) as AgentMessage[],
       },
+      // Only the newest screenshots go to the model (R6).
+      transformContext: async (messages) => keepRecentImages(messages),
       streamFn,
       sessionId: runId,
     });
@@ -590,6 +625,16 @@ export class RunService {
     this.retryTimer.unref();
   }
 
+  /** Simulator runs held back by memory pressure: look again soon, not in five minutes. */
+  private retryOnMemory(): void {
+    if (this.memoryTimer) return;
+    this.memoryTimer = setTimeout(() => {
+      this.memoryTimer = null;
+      this.schedule();
+    }, MEMORY_RETRY_MS);
+    this.memoryTimer.unref();
+  }
+
   private runtimeOf(run: RunRow): AgentRow["runtime"] {
     return this.deps.agents.get(run.agentId).runtime;
   }
@@ -616,7 +661,7 @@ export class RunService {
         bus.runEvent(runId, "tool_start", { id: event.toolCallId, name: event.toolName, args: event.args });
         return;
       case "tool_execution_end":
-        bus.runEvent(runId, "tool_end", { id: event.toolCallId, name: event.toolName, isError: event.isError, output: resultText(event.result), ms: event.durationMs ?? null });
+        bus.runEvent(runId, "tool_end", { id: event.toolCallId, name: event.toolName, isError: event.isError, output: resultText(event.result), ms: event.durationMs ?? null, ...screenOf(runId, event.result) });
         return;
       case "turn_end":
         c.turns += 1;
@@ -669,7 +714,8 @@ export class RunService {
   }
 
   private saveSession(runId: string, messages: AgentMessage[], now = Date.now()): void {
-    const values = { messages: messages as unknown[], updatedAt: now };
+    // Screenshots beyond the newest few are not kept: neither the model nor the database needs them.
+    const values = { messages: keepRecentImages(messages) as unknown[], updatedAt: now };
     this.deps.db.insert(schema.agentSessions).values({ runId, ...values }).onConflictDoUpdate({ target: schema.agentSessions.runId, set: values }).run();
   }
 
@@ -718,6 +764,9 @@ export class RunService {
     const { tree, bus } = this.deps;
     return {
       spawn: async (input) => {
+        if (input.runtime && input.runtime !== "native" && input.needs?.length) {
+          throw new TreeError("The simulator and browser tools are for native agents: let a native agent (e.g. QA) do the looking and tapping");
+        }
         if (input.runtime && input.runtime !== "native") {
           const available = this.deps.cli.availability(input.runtime);
           if (!available.ok) throw new TreeError(`${input.runtime} is not available: ${available.reason}. Use another runtime.`);
@@ -793,8 +842,45 @@ export class RunService {
       agentName: agent?.name ?? "?", agentRole: agent?.role ?? "?", treeId: row.treeId, parentRunId: row.parentRunId, depth: row.depth,
       kind: row.kind, baseBranch: row.baseBranch, budgetUsd: row.budgetUsd, review: row.review, reviewOf: row.reviewOf,
       mergedAt: row.mergedAt, prUrl: row.prUrl, waitingFor: row.waitingFor, missionId: row.missionId, prState: row.prState, cleanedAt: row.cleanedAt,
-      runtime: agent?.runtime ?? "native", estimatedUsd: row.estimatedUsd,
+      runtime: agent?.runtime ?? "native", estimatedUsd: row.estimatedUsd, needs: row.needs ?? [],
     };
+  }
+
+  /** Simulators and browsers in use and waiting, and memory pressure (R6). */
+  load(): MachineLoadView {
+    const heavyRunning = [...this.active.keys()].filter((id) => this.get(id).needs?.length).length;
+    const heavyQueued = this.deps.db.select({ needs: schema.runs.needs }).from(schema.runs).where(eq(schema.runs.status, "queued")).all().filter((r) => r.needs?.length).length;
+    return { heavySlots: this.deps.heavySlots, heavyRunning, heavyQueued, memoryPressure: this.deps.memoryPressure() };
+  }
+
+  /** Screenshots kept for the dashboard are removed once their run ended more than `maxAgeMs` ago (R6). */
+  pruneScreens(maxAgeMs: number, now = Date.now()): number {
+    let removed = 0;
+    let dirs: string[];
+    try {
+      dirs = readdirSync(this.deps.screensDir);
+    } catch {
+      return 0;
+    }
+    for (const runId of dirs) {
+      const row = this.deps.db.select({ endedAt: schema.runs.endedAt, status: schema.runs.status }).from(schema.runs).where(eq(schema.runs.id, runId)).get();
+      const stale = !row || (row.endedAt !== null && now - row.endedAt > maxAgeMs && TERMINAL.has(row.status));
+      if (!stale) continue;
+      rmSync(join(this.deps.screensDir, runId), { recursive: true, force: true });
+      removed += 1;
+    }
+    return removed;
+  }
+
+  /** A screenshot the run took (R6), for the dashboard; null when there is no such file. */
+  screen(runId: string, file: string): Buffer | null {
+    this.get(runId);
+    if (!/^\d{3,6}\.jpg$/.test(file)) return null;
+    try {
+      return readFileSync(join(this.deps.screensDir, runId, file));
+    } catch {
+      return null;
+    }
   }
 
   private emit(runId: string): void {
@@ -806,6 +892,12 @@ function modelError(agent: Agent): string | null {
   const last = [...agent.state.messages].reverse().find((m) => "role" in m && m.role === "assistant");
   if (last && "stopReason" in last && last.stopReason === "error") return last.errorMessage ?? "unknown error";
   return null;
+}
+
+/** A tool that captured the screen: where the dashboard finds the picture. */
+function screenOf(runId: string, result: unknown): { screen?: string } {
+  const file = (result as { details?: { screen?: unknown } } | undefined)?.details?.screen;
+  return typeof file === "string" && /^\d{3,6}\.jpg$/.test(file) ? { screen: `/api/runs/${runId}/screens/${file}` } : {};
 }
 
 function resultText(result: unknown): string {

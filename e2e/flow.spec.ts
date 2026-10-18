@@ -52,6 +52,9 @@ test("set up agentSwarm, add a project and an agent, and watch a run fix a bug",
   await tree.getByRole("link", { name: "Helper", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Helper" })).toBeVisible();
   await expect(page.getByRole("region", { name: "Report" }).getByText("Fixed square.")).toBeVisible();
+  const shot = page.getByRole("region", { name: "Timeline" }).getByRole("img", { name: "Screenshot from sim_screenshot" });
+  await expect(shot).toBeVisible();
+  await expect.poll(() => shot.evaluate((img) => (img as unknown as { naturalWidth: number }).naturalWidth)).toBeGreaterThan(0);
   await page.screenshot({ path: `${SHOTS}/child-1440.png`, fullPage: true });
   await page.getByRole("link", { name: "Projects" }).click();
   await expect(page.getByText("pushed", { exact: true }).first()).toBeVisible();
@@ -169,6 +172,7 @@ test("set up Linear, a project's profile and local files, and the ports agents m
   await expect(linear.getByText("Stored; leave empty to keep it.").first()).toBeVisible();
 
   const mac = page.getByRole("region", { name: "This Mac" });
+  await expect(mac.getByText("simulators and browsers in use", { exact: false })).toBeVisible();
   await mac.getByLabel("Local ports agents may not connect to").fill("3000, 5432");
   await mac.getByRole("button", { name: "Save" }).click();
   await page.reload();
@@ -179,7 +183,14 @@ test("set up Linear, a project's profile and local files, and the ports agents m
   await page.getByRole("button", { name: "Profile and files" }).first().click();
   await page.getByLabel("Test", { exact: true }).fill("node --test");
   await page.getByLabel("Rules").fill("Never deploy; only open pull requests.");
+  await page.getByLabel("iOS scheme").fill("Demo");
+  await page.getByLabel("Xcode project or workspace").fill("Demo.xcodeproj");
+  await page.getByLabel("Test sites").fill("https://staging.example.com");
   await page.getByRole("button", { name: "Save profile" }).click();
+  await page.reload();
+  await page.getByRole("button", { name: "Profile and files" }).first().click();
+  await expect(page.getByLabel("iOS scheme")).toHaveValue("Demo");
+  await expect(page.getByLabel("Test sites")).toHaveValue("https://staging.example.com");
   await page.getByLabel("Path in the repository").fill("Local.xcconfig");
   await page.getByLabel("Content").fill("API_KEY = dev-only\n");
   await page.getByRole("button", { name: "Save file" }).click();

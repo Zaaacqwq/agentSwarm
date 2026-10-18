@@ -31,7 +31,11 @@ export function sandboxProfile(env: ExecEnv, scope: string, extraWritable: reado
   // Only this scope's own space: not the workstation's other worktrees, homes or temp dirs.
   const s = space(env, scope);
   // Extra paths are given only by ws-exec itself (a CLI worker's sign-in), never by a request.
-  const writable = [s.dir, s.home, s.tmp, s.cache, inbox, ...extraWritable];
+  // Foundation saves a file on a non-boot volume through <volume>/.TemporaryItems/folders.<uid> (xcodebuild,
+  // simctl, plists): without it every atomic save fails with EPERM. The folder is this user's own (0700).
+  const uid = process.getuid?.();
+  const tempItems = uid === undefined ? [] : [`${layout.volume}/.TemporaryItems/folders.${uid}`];
+  const writable = [s.dir, s.home, s.tmp, s.cache, inbox, ...tempItems, ...extraWritable];
   return [
     "(version 1)",
     "(allow default)",

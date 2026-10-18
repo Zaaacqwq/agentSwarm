@@ -146,6 +146,7 @@ export async function buildApp(o: AppOptions): Promise<FastifyInstance> {
     return reply.type("text/plain; charset=utf-8").header("x-content-type-options", "nosniff").header("content-security-policy", "default-src 'none'; sandbox").send(text);
   });
   app.get("/api/machine", async () => s.machine.get());
+  app.get("/api/machine/load", async () => s.runs.load());
   app.put<{ Body: MachineSettings }>("/api/machine", { schema: { body: MachineSettings } }, async (req) => s.machine.set(actor(req), req.body));
 
   // ---- workstations and system --------------------------------------------------------------
@@ -164,6 +165,11 @@ export async function buildApp(o: AppOptions): Promise<FastifyInstance> {
   app.get<{ Params: { id: string } }>("/api/runs/:id", async (req) => s.runs.view(req.params.id));
   app.get<{ Params: { id: string } }>("/api/trees/:id", async (req) => s.runs.tree(req.params.id));
   app.get<{ Params: { id: string }; Querystring: { before?: string } }>("/api/trees/:id/events", async (req) => s.runs.treeEvents(req.params.id, Number(req.query.before ?? 0) || null));
+  app.get<{ Params: { id: string; file: string } }>("/api/runs/:id/screens/:file", async (req, reply) => {
+    const image = s.runs.screen(req.params.id, req.params.file);
+    if (!image) return reply.code(404).send({ error: "No such screenshot" });
+    return reply.type("image/jpeg").header("x-content-type-options", "nosniff").header("cache-control", "private, max-age=86400").send(image);
+  });
   app.get<{ Params: { id: string }; Querystring: { after?: string } }>("/api/runs/:id/events", async (req) => s.runs.events(req.params.id, Number(req.query.after ?? 0) || 0));
   app.post<{ Params: { id: string }; Body: RunMessage }>("/api/runs/:id/messages", { schema: { body: RunMessage } }, async (req) => s.runs.message(actor(req), req.params.id, req.body.text));
   app.post<{ Params: { id: string } }>("/api/runs/:id/cancel", async (req) => s.runs.cancel(actor(req), req.params.id));

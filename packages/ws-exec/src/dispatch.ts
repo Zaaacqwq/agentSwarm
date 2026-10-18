@@ -5,11 +5,15 @@ import * as fs from "./ops/fs.ts";
 import { exec } from "./ops/exec.ts";
 import * as git from "./ops/git.ts";
 import * as cli from "./ops/cli.ts";
+import * as sim from "./ops/sim.ts";
+import * as browser from "./ops/browser.ts";
+
+const NO_INPUT: AsyncIterable<string> = { async *[Symbol.asyncIterator]() {} };
 
 /** `emit` receives the events of streaming ops (cli.*); callers write them as `{"event": …}` lines. */
-export async function dispatch(env: ExecEnv, request: Request, emit: cli.Emit = () => undefined): Promise<Response> {
+export async function dispatch(env: ExecEnv, request: Request, emit: cli.Emit = () => undefined, input: AsyncIterable<string> = NO_INPUT): Promise<Response> {
   try {
-    return { ok: true, result: await run(env, request, emit) };
+    return { ok: true, result: await run(env, request, emit, input) };
   } catch (error) {
     if (error instanceof OpError) return { ok: false, code: error.code, error: error.message };
     const message = error instanceof Error ? error.message : String(error);
@@ -42,7 +46,7 @@ function reap(env: ExecEnv): { reaped: number } {
   return { reaped };
 }
 
-function run(env: ExecEnv, r: Request, emit: cli.Emit): unknown {
+function run(env: ExecEnv, r: Request, emit: cli.Emit, input: AsyncIterable<string>): unknown {
   switch (r.op) {
     case "info": return { user: env.user, root: env.root, sandbox: env.sandbox };
     case "fs.list": return fs.list(env, r.scope, r.path, r.depth);
@@ -62,6 +66,18 @@ function run(env: ExecEnv, r: Request, emit: cli.Emit): unknown {
     case "cli.logout": return cli.logout(env);
     case "cli.status": return cli.status(env);
     case "reap": return reap(env);
+    case "sim.boot": return sim.boot(env, r.scope, r.deviceType, r.runtime);
+    case "sim.build": return sim.build(env, r.scope, r);
+    case "sim.launch": return sim.launch(env, r.scope, r.bundleId, r.args);
+    case "sim.ui": return sim.ui(env, r.scope);
+    case "sim.tap": return sim.tap(env, r.scope, r.x, r.y);
+    case "sim.type": return sim.typeText(env, r.scope, r.text);
+    case "sim.swipe": return sim.swipe(env, r.scope, r.from, r.to, r.durationS);
+    case "sim.button": return sim.button(env, r.scope, r.button);
+    case "sim.screenshot": return sim.screenshot(env, r.scope, r.saveAs, r.region);
+    case "sim.logs": return sim.logs(env, r.scope, r.process, r.seconds);
+    case "sim.shutdown": return sim.shutdown(env, r.scope);
+    case "browser.session": return browser.session(env, r.scope, r.interact ?? [], r.timeoutMs, input, emit);
     default: throw new OpError("bad_request", `Unknown op ${(r as { op?: unknown }).op}`);
   }
 }
