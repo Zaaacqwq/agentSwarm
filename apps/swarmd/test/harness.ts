@@ -149,7 +149,8 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
     screensDir: join(base, "screens"),
     attachmentsDir: join(base, "attachments"),
     ...(opts.heavySlots ? { heavySlots: opts.heavySlots } : {}),
-    ...(opts.memoryPressure ? { memoryPressure: opts.memoryPressure } : {}),
+    // Normal unless a test says otherwise: the host's own memory must not decide whether a test passes.
+    memoryPressure: opts.memoryPressure ?? (() => 1),
     log: () => {},
     gateway: () => ({
       listModels: async () => [{ id: "fake-model", name: "Fake", vision: true, contextWindow: 100_000, inputPerMTok: 0, outputPerMTok: 0 }],

@@ -24,12 +24,12 @@ const Lesson = Type.Object({
 });
 
 /** At a retrospective: keep what would have saved time (R8). */
-export function recordLessonTool(record: (input: { title: string; text: string; scope: "team" | "project" | "role"; role?: string }) => string): AgentTool<typeof Lesson, undefined> {
+export function recordLessonTool(record: (input: { title: string; text: string; scope: "team" | "project" | "role"; role?: string }) => Promise<string>): AgentTool<typeof Lesson, undefined> {
   return {
     name: "record_lesson", label: "record_lesson", parameters: Lesson,
-    description: "Keep a lesson for future work: a reusable way of doing something or a pitfall, not a log of this ticket. At most 3 per ticket; a lesson that says the same as an existing one improves it instead.",
+    description: "Keep a lesson for future work: a reusable way of doing something or a pitfall, not a log of this ticket. At most 3 per ticket. Project lessons apply at once; lessons for the whole team or a role wait for the person's approval. A lesson that says the same as one of yours improves it.",
     prepareArguments: clipToSchema(Lesson),
-    execute: async (_id, p) => text(record(p)),
+    execute: async (_id, p) => text(await record(p)),
   };
 }
 

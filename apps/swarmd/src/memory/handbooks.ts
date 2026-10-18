@@ -5,9 +5,15 @@ import { audit } from "../audit.ts";
 import type { Db } from "../db/client.ts";
 import { schema } from "../db/client.ts";
 import { badRequest, conflict, notFound } from "../errors.ts";
-import { SECRET } from "./search.ts";
+import { clean, SECRET } from "./search.ts";
 
 export const MAX_HANDBOOK = 4000;
+const MAX_OPEN_PROPOSALS = 30;
+
+/** A handbook with a proposed change appended, one instruction per line: exactly what "accept as proposed" saves. */
+export function withChange(handbook: string, change: string): string {
+  return `${handbook}\n${clean(change).split("\n").filter((l) => l.trim()).map((l) => (l.startsWith("- ") ? l : `- ${l}`)).join("\n")}`;
+}
 
 /** How each role works, as agentSwarm starts out. You change them on the dashboard; agents only propose. */
 export const DEFAULT_HANDBOOKS: Record<Role, string> = {
@@ -37,7 +43,7 @@ export const DEFAULT_HANDBOOKS: Record<Role, string> = {
     "- Make the smallest change that does the job; leave unrelated files alone.",
     "- For a bug: a failing test first, then the fix. Run the tests and quote what they printed.",
     "- Commit in small steps with clear messages. Never commit secrets or the project's local files.",
-    "- iOS: build with sim_build (or xcodebuild through the wrapper). Web: run the dev server on the project's port.",
+    "- iOS: build with xcodebuild (the wrapper handles the sandbox), or sim_build if you have a simulator. Web: run the dev server on the project's port.",
   ].join("\n"),
   reviewer: [
     "- Check the change against what was asked and its acceptance criteria, not against your taste.",
@@ -63,12 +69,12 @@ export const DEFAULT_HANDBOOKS: Record<Role, string> = {
 export function roleOf(role: string, isMissionLead: boolean): Role {
   if (isMissionLead) return "lead";
   const r = role.toLowerCase();
-  if (/lead/.test(r)) return "lead";
-  if (/research/.test(r)) return "researcher";
-  if (/architect/.test(r)) return "architect";
-  if (/review/.test(r)) return "reviewer";
-  if (/\bqa\b|test|verif/.test(r)) return "qa";
-  if (/market|copy|writer/.test(r)) return "marketer";
+  if (/\bmarket|\bcopywrit|\bwriter\b/.test(r)) return "marketer";
+  if (/\breview/.test(r)) return "reviewer";
+  if (/\bqa\b|\btest(er|ing)?\b|\bverif/.test(r)) return "qa";
+  if (/\bresearch/.test(r)) return "researcher";
+  if (/\barchitect/.test(r)) return "architect";
+  if (/^(team )?lead(er)?$/.test(r.trim())) return "lead";
   return "developer";
 }
 
@@ -124,8 +130,11 @@ export class HandbookService {
 
   /** An agent's suggestion: it waits for you, and changes nothing until you accept it. */
   propose(author: string, source: string | null, role: Role, change: string, why: string, now = Date.now()): HandbookProposalView {
-    if (SECRET.test(`${change}\n${why}`)) throw badRequest("That looks like a credential");
-    const row = { id: `hbp_${randomBytes(12).toString("hex")}`, role, change: change.trim().slice(0, 1500), why: why.trim().slice(0, 800), author, source, status: "open" as const, createdAt: now, decidedAt: null };
+    const c = clean(change).slice(0, 1500);
+    const w = clean(why, true).slice(0, 800);
+    if (SECRET.test(`${c}\n${w}`)) throw badRequest("That looks like a credential");
+    if (this.proposals("open").length >= MAX_OPEN_PROPOSALS) throw conflict("Many handbook changes already wait for the person; mention this one in your retrospective instead");
+    const row = { id: `hbp_${randomBytes(12).toString("hex")}`, role, change: c, why: w, author: clean(author, true), source, status: "open" as const, createdAt: now, decidedAt: null };
     this.db.insert(schema.handbookProposals).values(row).run();
     return { ...row };
   }
@@ -135,8 +144,10 @@ export class HandbookService {
     const p = this.db.select().from(schema.handbookProposals).where(eq(schema.handbookProposals.id, id)).get();
     if (!p) throw notFound("No such proposal");
     if (p.status !== "open") throw conflict("That proposal was already decided");
-    if (accept) this.set(actor, p.role, text ?? `${this.text(p.role)}\n${p.change.split("\n").map((l) => (l.startsWith("- ") ? l : `- ${l}`)).join("\n")}`, now);
-    this.db.update(schema.handbookProposals).set({ status: accept ? "accepted" : "rejected", decidedAt: now }).where(eq(schema.handbookProposals.id, id)).run();
+    this.db.transaction(() => {
+      if (accept) this.set(actor, p.role, text ?? withChange(this.text(p.role), p.change), now);
+      this.db.update(schema.handbookProposals).set({ status: accept ? "accepted" : "rejected", decidedAt: now }).where(eq(schema.handbookProposals.id, id)).run();
+    });
     audit(this.db, actor, accept ? "handbook.accept" : "handbook.reject", id, { role: p.role }, now);
     return { ...this.db.select().from(schema.handbookProposals).where(eq(schema.handbookProposals.id, id)).get()! };
   }

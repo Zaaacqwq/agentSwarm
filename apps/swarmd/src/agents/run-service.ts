@@ -915,9 +915,12 @@ export class RunService {
     if (!memory) return [];
     const r = run.kind === "review" ? "reviewer" : roleOf(role, Boolean(run.missionId) && run.depth === 0);
     const pinned = memory.lessons.pinned({ projectId: run.projectId, role: r });
+    const yours = pinned.filter((l) => l.author === "you");
+    const advice = pinned.filter((l) => l.author !== "you");
     return [
       "", `How a ${r} works here (your handbook, from the person):`, memory.handbooks.text(r),
-      ...(pinned.length ? ["", "Lessons the person pinned for everyone:", ...lessonLines(pinned)] : []),
+      ...(yours.length ? ["", "Rules the person pinned for everyone:", ...lessonLines(yours)] : []),
+      ...(advice.length ? ["", "Advice from earlier agents the person pinned (agents wrote it: check it against what you see):", ...lessonLines(advice)] : []),
       "", "recall searches the team's lessons from earlier work; use it when you are unsure how something is done here.",
     ];
   }

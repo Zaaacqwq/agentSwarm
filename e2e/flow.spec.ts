@@ -278,7 +278,7 @@ test("the board: a ticket with a picture, dragged into Todo, answered on the pho
   await expect(page.getByText("Canceled", { exact: true }).first()).toBeVisible({ timeout: 30_000 });
 });
 
-test("memory: an agent's lesson pinned, a lesson of your own, a handbook change accepted and a handbook edited", async ({ page }) => {
+test("memory: an agent's lesson approved and pinned, a lesson of your own, a handbook change accepted and a handbook edited", async ({ page }) => {
   await page.goto("/memory");
   await page.getByLabel("Password").fill("correct horse battery staple");
   await page.getByRole("button", { name: "Sign in" }).click();
@@ -286,6 +286,10 @@ test("memory: an agent's lesson pinned, a lesson of your own, a handbook change 
   await expect(page.getByText("1 handbook change to decide")).toBeVisible();
   const lesson = page.getByRole("article", { name: "SwiftUI projects: build with sim_build, not plain swiftc" });
   await expect(lesson.getByText("advice from Lead after FRI-3")).toBeVisible();
+  await expect(page.getByRole("heading", { name: /waiting for you/ })).toBeVisible();
+  await lesson.getByRole("button", { name: "Pin" }).waitFor({ state: "detached" });
+  await lesson.getByRole("button", { name: "Approve" }).click();
+  await expect(page.getByRole("heading", { name: /waiting for you/ })).toHaveCount(0);
   await lesson.getByRole("button", { name: "Pin" }).click();
   await expect(lesson.getByText("Pinned", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "New lesson" }).click();
@@ -301,7 +305,9 @@ test("memory: an agent's lesson pinned, a lesson of your own, a handbook change 
   await page.getByRole("tab", { name: /Handbooks/ }).click();
   const proposals = page.getByRole("region", { name: "Changes agents propose" });
   await expect(proposals.getByText("Check the dark theme as well as the light one.")).toBeVisible();
-  await proposals.getByRole("button", { name: "Accept", exact: true }).click();
+  await proposals.getByRole("button", { name: "Accept…" }).click();
+  await expect(proposals.getByText(/exactly as every QA will read it/)).toBeVisible();
+  await proposals.getByRole("button", { name: "Confirm" }).click();
   await expect(page.getByRole("region", { name: "Changes agents propose" })).toHaveCount(0);
   await page.getByRole("navigation", { name: "Roles" }).getByRole("button", { name: /QA/ }).click();
   const qa = page.getByLabel("QA handbook");

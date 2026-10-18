@@ -370,6 +370,13 @@ export const lessons = sqliteTable("lessons", {
   source: text("source"),
   pinned: integer("pinned", { mode: "boolean" }).notNull().default(false),
   retired: integer("retired", { mode: "boolean" }).notNull().default(false),
+  /**
+   * "suggested": an agent's lesson for the whole team or a role, shown to nobody until you approve it (a prompt-
+   * injected agent must not reach every project). Agents' project lessons, and yours, are "active".
+   */
+  status: text("status", { enum: ["active", "suggested"] }).notNull().default("active"),
+  /** The mission that recorded it (limits per mission). */
+  missionId: text("mission_id"),
   uses: integer("uses").notNull().default(0),
   lastUsedAt: integer("last_used_at"),
   createdAt: integer("created_at").notNull(),

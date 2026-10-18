@@ -41,6 +41,7 @@ function Lessons() {
   const shown = all.filter((l) => (showRetired || !l.retired) && (!scope || l.scope === scope)
     && words.every((w) => `${l.title} ${l.text} ${l.source ?? ""}`.toLowerCase().includes(w)));
   const pinned = all.filter((l) => l.pinned && !l.retired).length;
+  const waiting = all.filter((l) => l.suggested && !l.retired);
   return (
     <div className="stack">
       <div className="board-tools" role="search">
@@ -53,13 +54,20 @@ function Lessons() {
         <button className="btn signal" onClick={() => setAdding((a) => !a)} aria-expanded={adding}>{adding ? "Close" : "New lesson"}</button>
       </div>
       <p className="faint">{pinned} of 8 pinned: every agent reads those. The rest come up when they fit a ticket, and agents can search them with recall.</p>
+      {waiting.length > 0 && (
+        <section className="card stack gate-card" aria-labelledby="suggested-head">
+          <h2 id="suggested-head">Suggested for {waiting.length === 1 ? "the whole team or a role" : "the whole team or roles"}: waiting for you</h2>
+          <p className="faint">An agent wrote these at a retrospective. Until you approve one, no agent sees it.</p>
+          <ol className="lesson-list">{waiting.map((l) => <li key={l.id}><Lesson l={l} onChange={lessons.reload} /></li>)}</ol>
+        </section>
+      )}
       {adding && <NewLesson onDone={() => {
         setAdding(false);
         lessons.reload();
       }} />}
       {lessons.data && shown.length === 0 && <Empty>{all.length ? "No lesson matches." : "No lessons yet. Leads record them at retrospectives; you can write your own."}</Empty>}
       <ol className="lesson-list">
-        {shown.map((l) => <li key={l.id}><Lesson l={l} onChange={lessons.reload} /></li>)}
+        {shown.filter((l) => !(l.suggested && !l.retired)).map((l) => <li key={l.id}><Lesson l={l} onChange={lessons.reload} /></li>)}
       </ol>
     </div>
   );
@@ -71,8 +79,14 @@ function scopeText(l: LessonView): string {
 
 function Lesson({ l, onChange }: { l: LessonView; onChange: () => void }) {
   const [editing, setEditing] = useState(false);
-  const [title, setTitle] = useState(l.title);
-  const [text, setText] = useState(l.text);
+  const [title, setTitle] = useState("");
+  const [text, setText] = useState("");
+  // Seeded when you start editing: the newest wording, not what was there when the page opened.
+  const startEdit = () => {
+    setTitle(l.title);
+    setText(l.text);
+    setEditing(true);
+  };
   const [versions, setVersions] = useState<LessonVersionView[] | null>(null);
   const patch = (body: Record<string, unknown>) => api("PATCH", `/lessons/${l.id}`, body).then(onChange).catch((e: Error) => alert(e.message));
   const fromAgent = l.author !== "you";
@@ -80,6 +94,7 @@ function Lesson({ l, onChange }: { l: LessonView; onChange: () => void }) {
     <article className={`lesson${l.pinned ? " pinned" : ""}${l.retired ? " retired" : ""}`} aria-label={l.title}>
       <header className="lesson-top">
         {l.pinned && <span className="pin" aria-label="Pinned">Pinned</span>}
+        {l.suggested && <span className="pin suggested">Suggested</span>}
         <span className="kind-tag">{scopeText(l)}</span>
         <span className={fromAgent ? "faint agent-note" : "faint"}>{fromAgent ? `advice from ${l.author}${l.source ? ` after ${l.source}` : ""}` : "yours"}</span>
         <span className="faint">used {l.uses}×{l.lastUsedAt ? `, last ${ago(l.lastUsedAt)}` : ""}</span>
@@ -91,7 +106,8 @@ function Lesson({ l, onChange }: { l: LessonView; onChange: () => void }) {
           onChange();
         }}>
           <Field label="Title"><input value={title} onChange={(e) => setTitle(e.target.value)} required minLength={3} maxLength={160} /></Field>
-          <Field label="Lesson" hint="Saved as yours: agents read it as a requirement."><textarea value={text} onChange={(e) => setText(e.target.value)} required maxLength={1000} style={{ minHeight: 90 }} /></Field>
+          <Field label="Lesson" hint={fromAgent ? "Saving makes it yours: agents will read all of it as a requirement, not as advice." : "Agents read it as a requirement."}><textarea value={text} onChange={(e) => setText(e.target.value)} required maxLength={1000} style={{ minHeight: 90 }} /></Field>
+          <button type="button" className="btn ghost small" onClick={() => setEditing(false)}>Cancel</button>
         </Form>
       ) : (
         <>
@@ -100,9 +116,10 @@ function Lesson({ l, onChange }: { l: LessonView; onChange: () => void }) {
         </>
       )}
       <footer className="row">
-        {!l.retired && <button className="btn ghost small" onClick={() => void patch({ pinned: !l.pinned })}>{l.pinned ? "Unpin" : "Pin"}</button>}
-        {!editing && <button className="btn ghost small" onClick={() => setEditing(true)}>Edit</button>}
-        <button className="btn ghost small" onClick={() => void patch({ retired: !l.retired })}>{l.retired ? "Bring back" : "Retire"}</button>
+        {l.suggested && !l.retired && <button className="btn signal small" onClick={() => void patch({ approved: true })}>Approve</button>}
+        {!l.retired && !l.suggested && <button className="btn ghost small" onClick={() => void patch({ pinned: !l.pinned })}>{l.pinned ? "Unpin" : "Pin"}</button>}
+        {!editing && <button className="btn ghost small" onClick={startEdit}>Edit</button>}
+        <button className="btn ghost small" onClick={() => void patch({ retired: !l.retired })}>{l.retired ? "Bring back" : l.suggested ? "Reject" : "Retire"}</button>
         <button className="btn ghost small" onClick={() => (versions ? setVersions(null) : api<LessonVersionView[]>("GET", `/lessons/${l.id}/versions`).then(setVersions))}>{versions ? "Hide history" : "History"}</button>
       </footer>
       {versions && (
@@ -163,7 +180,7 @@ function Handbooks({ proposals, reload }: { proposals: HandbookProposalView[]; r
   const book = books.data?.find((b) => b.role === role);
   return (
     <div className="stack">
-      {proposals.length > 0 && (
+      {proposals.length > 0 && books.data && (
         <section className="card stack gate-card" aria-labelledby="proposals-head">
           <h2 id="proposals-head">Changes agents propose</h2>
           {proposals.map((p) => <Proposal key={p.id} p={p} current={books.data?.find((b) => b.role === p.role)?.text ?? ""} onDone={() => {
@@ -218,9 +235,15 @@ function HandbookEditor({ book, onSaved }: { book: HandbookView; onSaved: () => 
   );
 }
 
+/** Exactly what "accept as proposed" saves (the server does the same). */
+function withChange(handbook: string, change: string): string {
+  return `${handbook}\n${change.split("\n").filter((l) => l.trim()).map((l) => (l.startsWith("- ") ? l : `- ${l}`)).join("\n")}`;
+}
+
 function Proposal({ p, current, onDone }: { p: HandbookProposalView; current: string; onDone: () => void }) {
   const [editing, setEditing] = useState(false);
-  const [text, setText] = useState(`${current}\n${p.change}`);
+  const [previewing, setPreviewing] = useState(false);
+  const [text, setText] = useState("");
   const decide = (body: Record<string, unknown>) => api("POST", `/handbook-proposals/${p.id}`, body).then(onDone).catch((e: Error) => alert(e.message));
   return (
     <article className="proposal stack" aria-label={`Proposal for the ${ROLE_LABEL[p.role]} handbook`}>
@@ -230,11 +253,24 @@ function Proposal({ p, current, onDone }: { p: HandbookProposalView; current: st
       {editing ? (
         <Form submit="Accept with my edits" onSubmit={async () => decide({ accept: true, text })}>
           <Field label="The handbook as it will be"><textarea className="mono handbook-text" value={text} onChange={(e) => setText(e.target.value)} maxLength={4000} required /></Field>
+          <button type="button" className="btn ghost small" onClick={() => setEditing(false)}>Cancel</button>
         </Form>
+      ) : previewing ? (
+        <div className="stack">
+          <p className="faint">The {ROLE_LABEL[p.role]} handbook after accepting, exactly as every {ROLE_LABEL[p.role]} will read it:</p>
+          <pre className="pre handbook-peek">{withChange(current, p.change)}</pre>
+          <div className="row">
+            <button className="btn signal small" onClick={() => void decide({ accept: true })}>Confirm</button>
+            <button className="btn ghost small" onClick={() => setPreviewing(false)}>Back</button>
+          </div>
+        </div>
       ) : (
         <div className="row">
-          <button className="btn signal small" onClick={() => void decide({ accept: true })}>Accept</button>
-          <button className="btn ghost small" onClick={() => setEditing(true)}>Edit, then accept</button>
+          <button className="btn signal small" onClick={() => setPreviewing(true)}>Accept…</button>
+          <button className="btn ghost small" onClick={() => {
+            setText(withChange(current, p.change));
+            setEditing(true);
+          }}>Edit, then accept</button>
           <button className="btn ghost small" onClick={() => void decide({ accept: false })}>Reject</button>
         </div>
       )}

@@ -183,7 +183,7 @@ export async function buildApp(o: AppOptions): Promise<FastifyInstance> {
     return r as Role;
   };
   app.get("/api/lessons", async () => s.lessons.list());
-  app.post<{ Body: CreateLesson }>("/api/lessons", { schema: { body: CreateLesson } }, async (req) => s.lessons.record("you", req.body, null).lesson);
+  app.post<{ Body: CreateLesson }>("/api/lessons", { schema: { body: CreateLesson } }, async (req) => s.lessons.write(req.body));
   app.patch<{ Params: { id: string }; Body: UpdateLesson }>("/api/lessons/:id", { schema: { body: UpdateLesson } }, async (req) => s.lessons.update(actor(req), req.params.id, req.body));
   app.delete<{ Params: { id: string } }>("/api/lessons/:id", async (req, reply) => {
     s.lessons.remove(actor(req), req.params.id);

@@ -580,6 +580,8 @@ export interface LessonView {
   readonly source: string | null;
   readonly pinned: boolean;
   readonly retired: boolean;
+  /** An agent's lesson for the whole team or a role: shown to no agent until you approve it. */
+  readonly suggested: boolean;
   readonly uses: number;
   readonly lastUsedAt: number | null;
   readonly createdAt: number;
@@ -603,6 +605,8 @@ export const UpdateLesson = Type.Object({
   text: Type.Optional(Type.String({ minLength: 1, maxLength: 1000 })),
   pinned: Type.Optional(Type.Boolean()),
   retired: Type.Optional(Type.Boolean()),
+  /** Approve an agent's suggested lesson: from then on agents see it. */
+  approved: Type.Optional(Type.Literal(true)),
 });
 export type UpdateLesson = Static<typeof UpdateLesson>;
 

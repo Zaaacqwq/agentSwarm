@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { and, asc, desc, eq, gt, inArray } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, inArray, sql } from "drizzle-orm";
 import type { CreateMission, MissionMessageView, MissionView } from "@agentswarm/contracts";
 import type { Db } from "../db/client.ts";
 import { schema } from "../db/client.ts";
@@ -24,6 +24,7 @@ import type { HandbookService } from "../memory/handbooks.ts";
 import { proposeHandbookTool, recordLessonTool } from "../memory/tools.ts";
 import type { Role } from "../db/schema.ts";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
+import { secretValues } from "../relay/relay.ts";
 import { ENDED, GATES, STAGE_LABEL, WORKING, afterStageDone, canMove, requiredDocs, stageTools, DOC_NAMES, type Actor, type Flow } from "./stages.ts";
 
 export type MissionRow = typeof schema.missions.$inferSelect;
@@ -85,6 +86,8 @@ function fenced(text: string): string {
 export class MissionService implements RunHooks {
   private readonly deps: MissionDeps;
 
+  /** record_lesson calls per mission (a rewrite adds no row, but must not go on forever). */
+  private readonly lessonCalls = new Map<string, number>();
   private openingSource: ((m: MissionRow) => Promise<RunOpening | null>) | null = null;
   private ticketFiler: ((m: MissionRow, agent: string, input: { title: string; description: string; kind: "feature" | "bug" | "research" }) => string) | null = null;
 
@@ -363,19 +366,24 @@ export class MissionService implements RunHooks {
     return { keep, add: [...missionTools(ops, t), ...(t.web ? webTools(this.webOps(run, binding)) : []), ...file, ...memory] };
   }
 
-  private memoryTools(m: MissionRow, agent: string, retro: boolean): AgentTool<any, undefined>[] {
+  private memoryTools(m: MissionRow, agentName: string, retro: boolean): AgentTool<any, undefined>[] {
     const memory = this.deps.memory!;
-    const source = ticketKey(m) ?? m.title.slice(0, 80);
+    // A name that would read as the person's ("you") never labels an agent's words.
+    const agent = agentName.trim().toLowerCase() === "you" ? `agent ${agentName}` : agentName;
+    // Unique per mission: a ticket's key, else the mission's own id.
+    const source = ticketKey(m) ?? `${m.title.slice(0, 50)} (${m.id.slice(-6)})`;
     const tools: AgentTool<any, undefined>[] = [
-      recordLessonTool((input) => {
-        const recorded = this.deps.db.select({ id: schema.lessons.id }).from(schema.lessons).where(eq(schema.lessons.source, source)).all().length;
-        if (recorded >= MAX_LESSONS) return `You have recorded ${MAX_LESSONS} lessons for ${source} already; put anything else in your retrospective.`;
+      recordLessonTool(async (input) => {
+        const calls = (this.lessonCalls.get(m.id) ?? 0) + 1;
+        this.lessonCalls.set(m.id, calls);
+        if (memory.lessons.countFor(m.id) >= MAX_LESSONS || calls > MAX_LESSONS * 2) return `You have recorded enough lessons for ${source}; put anything else in your retrospective.`;
+        const forbidden = secretValues(await this.deps.projects.files(m.projectId));
         const role = input.role as Role | undefined;
-        const { lesson, created } = memory.lessons.record(agent, {
-          scope: input.scope, title: input.title, text: input.text,
-          ...(input.scope === "project" ? { projectId: m.projectId } : {}), ...(role ? { role } : input.scope === "role" ? { role: "developer" as const } : {}),
-        }, source);
-        return created ? `Recorded: ${lesson.title}` : lesson.author === "you" ? `The person already wrote this: ${lesson.title}` : `Improved the existing lesson: ${lesson.title}`;
+        const r = memory.lessons.record({ scope: input.scope, title: input.title, text: input.text, ...(role ? { role } : {}) }, { agent, source, missionId: m.id, projectId: m.projectId, forbidden });
+        return r.outcome === "recorded" ? `Recorded for this project: ${r.lesson.title}`
+          : r.outcome === "suggested" ? `Suggested to the person (lessons for the whole team or a role need their approval): ${r.lesson.title}`
+          : r.outcome === "improved" ? `Improved the existing lesson: ${r.lesson.title}`
+          : `Already known (the person's or approved): ${r.lesson.title}`;
       }),
     ];
     if (retro) tools.push(proposeHandbookTool((input) => {
@@ -393,16 +401,21 @@ export class MissionService implements RunHooks {
     const runs = [root, ...this.deps.tree.descendants(root.id)];
     const rejected = runs.filter((r) => r.kind === "review" && /^Changes requested/.test(r.report?.summary ?? "")).length;
     const failed = runs.filter((r) => r.status === "failed" && r.id !== root.id);
-    const modelErrors = runs.reduce((n, r) => n + this.deps.runs.events(r.id, 0, 2000).filter((e) => e.type === "error" && /Model request failed/.test(String(e.data.message ?? ""))).length, 0);
+    const ids = runs.map((r) => r.id);
+    const modelErrors = this.deps.db.select({ n: count() }).from(schema.runEvents)
+      .where(and(eq(schema.runEvents.type, "error"), inArray(schema.runEvents.runId, ids), sql`json_extract(${schema.runEvents.data}, '$.message') like 'Model request failed%'`)).get()?.n ?? 0;
     const hours = (now - m.createdAt) / 3_600_000;
+    // Sub-agents' titles and errors are their words: shown as data.
+    const failures = failed.map((r) => `${r.title}: ${(r.error ?? "no reason").split("\n")[0]!.slice(0, 120)}`).join("\n");
     return [
       "Facts:",
-      `- ${hours < 1 ? `${Math.round(hours * 60)} minutes` : `${hours.toFixed(1)} hours`} from the request to now; ${money(this.deps.tree.subtreeCost(root))} spent by ${runs.length} runs.`,
+      `- ${hours < 1 ? `${Math.round(hours * 60)} minutes` : `${hours.toFixed(1)} hours`} from the request to now, including the time waiting for the person; ${money(this.deps.tree.subtreeCost(root))} spent by ${runs.length} runs.`,
       `- Reviews that asked for changes: ${rejected}.`,
-      failed.length ? `- Sub-agents that failed: ${failed.map((r) => `${r.title} (${(r.error ?? "no reason").split("\n")[0]!.slice(0, 120)})`).join("; ")}.` : "- No sub-agent failed.",
       `- Model requests that failed and were retried: ${modelErrors}.`,
+      failed.length ? `- Sub-agents that failed (${failed.length}):\n${fenced(failures)}` : "- No sub-agent failed.",
     ].join("\n");
   }
+
 
   ended(run: RunRow): void {
     const m = this.missionOf(run);

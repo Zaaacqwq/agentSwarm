@@ -352,3 +352,4 @@ code.copy { cursor: copy; background: var(--paper-sunk); padding: 1px var(--spac
   .role-list button { white-space: nowrap; }
 }
 .stack > .segmented { align-self: flex-start; }
+.pin.suggested { background: var(--warn); }
