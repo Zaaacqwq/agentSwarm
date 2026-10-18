@@ -4,6 +4,7 @@
 #   sudo zsh scripts/setup.sh --update-exec   reinstall ws-exec, its Node runtime and the CLI workers only
 #   sudo zsh scripts/setup.sh --update-cli    (re)install the pinned Claude Code and Codex CLI workers only
 #   sudo zsh scripts/setup.sh --update-tools  (re)install the simulator, browser and build tools only (R6)
+#   sudo zsh scripts/setup.sh --firewall      (re)load the pf rules that keep workstations off the LAN and tailnet (R6)
 #   sudo zsh scripts/setup.sh --uninstall     remove users, group, sudoers and /usr/local/libexec/agentswarm
 #
 # Creates: the SwarmWS APFS volume (ownership on) next to /Volumes/Data, the swarm-ws group, hidden users
@@ -51,6 +52,7 @@ for arg in "$@"; do
     --update-exec) mode="update-exec" ;;
     --update-cli) mode="update-cli" ;;
     --update-tools) mode="update-tools" ;;
+    --firewall) mode="firewall" ;;
     --uninstall) mode="uninstall" ;;
     *) print -u2 "Unknown argument: $arg"; exit 64 ;;
   esac
@@ -291,6 +293,61 @@ install_tools() {
   done
 }
 
+# ---- firewall (R6) ---------------------------------------------------------------------------------
+# Seatbelt filters by port only: it cannot keep agents off the LAN, the tailnet (your services behind
+# tailscale serve), or a name that resolves there. pf can, per user: these rules match only the workstation
+# users' sockets (by uid), refuse at once (TCP reset, ICMP unreachable), and leave everyone else alone.
+PF_ANCHOR="com.apple/agentswarm"
+PF_RULES="/etc/pf.anchors/agentswarm"
+PF_DAEMON="/Library/LaunchDaemons/com.agentswarm.pf.plist"
+
+install_firewall() {
+  local uids user
+  uids="$(for user in $(workstation_users); do id -u "$user"; done | paste -sd, -)"
+  [[ -n "$uids" ]] || { warn "No workstation users; firewall rules not installed"; return; }
+  local tmp
+  tmp="$(mktemp)"
+  cat > "$tmp" <<RULES
+# Managed by agentswarm scripts/setup.sh: workstation users (uids ${uids}) may not reach the LAN, the tailnet,
+# link-local or multicast addresses. Loopback (their own dev servers) and the internet stay open.
+table <agentswarm_private> const { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16, 224.0.0.0/4, 0.0.0.0/8, fc00::/7, fe80::/10, fec0::/10, ff00::/8 }
+block return out quick proto { tcp, udp } from any to <agentswarm_private> user { ${uids} }
+RULES
+  pfctl -nf "$tmp" -a "$PF_ANCHOR" >/dev/null 2>&1 || { rm -f "$tmp"; die "The firewall rules do not parse; nothing changed."; }
+  install -o root -g wheel -m 0644 "$tmp" "$PF_RULES"
+  rm -f "$tmp"
+  # Loaded again at every boot: the main ruleset with Apple's anchor point loads by itself, ours does not.
+  cat > "$PF_DAEMON" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.agentswarm.pf</string>
+  <key>ProgramArguments</key><array><string>/bin/sh</string><string>-c</string><string>/sbin/pfctl -E; /sbin/pfctl -a ${PF_ANCHOR} -f ${PF_RULES}</string></array>
+  <key>RunAtLoad</key><true/>
+</dict></plist>
+PLIST
+  chown root:wheel "$PF_DAEMON" && chmod 0644 "$PF_DAEMON"
+  launchctl bootout system "$PF_DAEMON" >/dev/null 2>&1 || true
+  launchctl bootstrap system "$PF_DAEMON" || warn "Could not register ${PF_DAEMON}"
+  pfctl -E >/dev/null 2>&1 || true
+  pfctl -a "$PF_ANCHOR" -f "$PF_RULES" 2>/dev/null || die "Loading the firewall rules failed"
+  say "Firewall: workstation users (uids ${uids}) cannot reach the LAN or the tailnet"
+}
+
+# A workstation must be refused by the tailnet (Tailscale's own 100.100.100.100) and still reach the internet.
+verify_firewall() {
+  local user="$1" out
+  out="$(print -r -- '{"op":"exec","scope":"cache","command":"curl -s -o /dev/null -m 5 http://100.100.100.100/; echo tailnet=$?; curl -s -o /dev/null -m 10 https://api.github.com/; echo internet=$?","timeoutMs":30000}' | sudo -u "$OWNER" sudo -n "$LAUNCH" "$user" 2>&1 || true)"
+  if [[ "$out" == *"tailnet=7"* && "$out" == *"internet=0"* ]]; then say "Verified: ${user} is refused by the tailnet and reaches the internet"
+  else warn "Firewall check for ${user} did not pass: ${out}"; fi
+}
+
+remove_firewall() {
+  launchctl bootout system "$PF_DAEMON" >/dev/null 2>&1 || true
+  pfctl -a "$PF_ANCHOR" -F all >/dev/null 2>&1 || true
+  rm -f "$PF_DAEMON" "$PF_RULES"
+}
+
 write_sudoers() {
   local tmp user
   tmp="$(mktemp)"
@@ -323,6 +380,7 @@ case "$mode" in
       dscl . -read "/Users/${user}" >/dev/null 2>&1 && dscl . -delete "/Users/${user}"
       [[ -d "/Users/${user}" ]] && rm -rf "/Users/${user}"
     done
+    remove_firewall
     dscl . -read "/Groups/${GROUP}" >/dev/null 2>&1 && dseditgroup -o delete "$GROUP"
     rm -f "$SUDOERS" && rm -rf "$LIBEXEC"
     visudo -c >/dev/null || warn "sudoers does not validate; inspect /etc/sudoers.d"
@@ -334,13 +392,19 @@ case "$mode" in
     install_cli
     install_tools
     write_sudoers
+    install_firewall
     for user in $(workstation_users); do verify "$user"; done
+    verify_firewall "$(workstation_users | head -1)"
     ;;
   update-cli)
     install_cli
     ;;
   update-tools)
     install_tools
+    ;;
+  firewall)
+    install_firewall
+    verify_firewall "$(workstation_users | head -1)"
     ;;
   install)
     preflight
@@ -352,7 +416,9 @@ case "$mode" in
     install_cli
     install_tools
     write_sudoers
+    install_firewall
     for n in $(seq 1 "$COUNT"); do verify "ws-${n}"; done
+    verify_firewall "ws-1"
     say "Done. Next: npm run check (as yourself), then start swarmd."
     ;;
 esac
