@@ -12,6 +12,8 @@ import { WorkstationsPage } from "./pages/Workstations.tsx";
 import { SettingsPage } from "./pages/Settings.tsx";
 import { MissionsPage } from "./pages/Missions.tsx";
 import { MissionPage } from "./pages/Mission.tsx";
+import { TicketsPage } from "./pages/Tickets.tsx";
+import { TicketPage } from "./pages/Ticket.tsx";
 
 const Mark = () => (
   <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 2l12 7v14l-12 7-12-7V9z" fill="var(--signal)" /><path d="M16 9l6 3.5v7L16 23l-6-3.5v-7z" fill="var(--paper)" /></svg>
@@ -40,14 +42,18 @@ export function App() {
   else if (section === "projects") page = <ProjectsPage />;
   else if (section === "workstations") page = <WorkstationsPage />;
   else if (section === "settings") page = <SettingsPage />;
-  else page = <SystemPage />;
+  else if (section === "tickets" && id) page = <TicketPage key={id} ticketKey={decodeURIComponent(id)} />;
+  else if (section === "overview") page = <SystemPage />;
+  // The board is home (R7).
+  else page = <TicketsPage />;
 
   return (
     <div className="shell">
       <nav className="nav" aria-label="Main">
         <div className="brand"><Mark /> agentSwarm</div>
-        <Link to="/">Overview</Link>
-        <Link to="/missions">Missions</Link>
+        <Link to="/">Tickets</Link>
+        <Link to="/overview">Overview</Link>
+        <Link to="/missions">All missions</Link>
         <Link to="/agents">Agents</Link>
         <Link to="/projects">Projects</Link>
         <Link to="/workstations">Workstations</Link>

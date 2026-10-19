@@ -64,8 +64,8 @@ export const projects = sqliteTable("projects", {
   kind: text("kind", { enum: ["github", "local"] }).notNull().default("github"),
   /** The project's profile (platform, commands, rules); shown to every agent working in it. */
   profile: json<ProjectProfile>("profile"),
-  /** The Linear project whose tickets come here. */
-  linearProjectId: text("linear_project_id"),
+  /** R7: ticket ids look like <prefix>-<n>, e.g. FRI-12. */
+  ticketPrefix: text("ticket_prefix"),
 }, (t) => [uniqueIndex("projects_slug_uq").on(t.slug), uniqueIndex("projects_repo_uq").on(t.githubRepo)]);
 
 export interface ProjectProfile {
@@ -259,8 +259,8 @@ export const missions = sqliteTable("missions", {
   // R5
   /** Which flow it follows (missions/stages.ts). */
   kind: text("kind", { enum: MISSION_KINDS }).notNull().default("feature"),
-  /** Where it was started; Linear missions talk in their ticket, Discord only notifies. */
-  origin: text("origin", { enum: ["dashboard", "discord", "linear"] }).notNull().default("dashboard"),
+  /** Where it was started. "linear": the R5 Linear integration, since removed (R7); "ticket": the board. */
+  origin: text("origin", { enum: ["dashboard", "discord", "linear", "ticket"] }).notNull().default("dashboard"),
 }, (t) => [index("missions_project_idx").on(t.projectId, t.createdAt), index("missions_stage_idx").on(t.stage)]);
 
 export const missionMessages = sqliteTable("mission_messages", {
@@ -274,48 +274,74 @@ export const missionMessages = sqliteTable("mission_messages", {
   source: text("source", { enum: ["dashboard", "discord", "agentswarm", "linear"] }).notNull(),
   discordMessageId: text("discord_message_id"),
   createdAt: integer("created_at").notNull(),
-  /** R5: when it was posted to the mission's Linear session (null: not yet, or not a Linear mission). */
-  linearDeliveredAt: integer("linear_delivered_at"),
 }, (t) => [index("mission_messages_idx").on(t.missionId, t.id)]);
 
-/** R5: Linear webhook deliveries, stored before they are answered and handled after (5-second limit). */
-export const linearEvents = sqliteTable("linear_events", {
-  deliveryId: text("delivery_id").primaryKey(),
-  event: text("event").notNull(),
-  payload: json<Record<string, unknown>>("payload").notNull(),
-  receivedAt: integer("received_at").notNull(),
-  processedAt: integer("processed_at"),
-  error: text("error"),
-  /** Failed handling is retried (Linear or the network may be down for a moment). */
-  attempts: integer("attempts").notNull().default(0),
-}, (t) => [index("linear_events_pending_idx").on(t.processedAt, t.receivedAt)]);
-
-/** R5: one Linear agent session (a ticket given to agentSwarm) and the mission it became. */
-export const linearSessions = sqliteTable("linear_sessions", {
-  sessionId: text("session_id").primaryKey(),
-  issueId: text("issue_id").notNull(),
-  /** e.g. ZAC-42 */
-  issueKey: text("issue_key").notNull(),
-  issueUrl: text("issue_url").notNull(),
-  title: text("title").notNull(),
-  /** Linear priority: 1 urgent … 4 low, 0 none. */
-  priority: integer("priority").notNull(),
-  status: text("status", { enum: ["queued", "active", "ended", "refused"] }).notNull(),
-  missionId: text("mission_id"),
-  /** What to start with once it leaves the queue; `promote`: an idea or experiment on its way to a real project. */
-  request: json<{ kind: MissionKind; text: string; linearProjectId: string | null; teamId: string | null; promote?: { repo: string | null; awaitingRepo: boolean } }>("request").notNull(),
-  /** The checklist, links and ticket state last sent, to avoid resending the same. */
-  planDigest: text("plan_digest"),
-  /** When the final answer reached the ticket (ended sessions without it get it again). */
-  finalSentAt: integer("final_sent_at"),
-  createdAt: integer("created_at").notNull(),
-  updatedAt: integer("updated_at").notNull(),
-}, (t) => [index("linear_sessions_status_idx").on(t.status, t.priority, t.createdAt), index("linear_sessions_mission_idx").on(t.missionId)]);
-
-/** Small settings rows (id "discord": the bot). Secrets are sealed. */
 export const settings = sqliteTable("settings", {
   id: text("id").primaryKey(),
   value: json<Record<string, unknown>>("value").notNull(),
   secretSealed: text("secret_sealed"),
   updatedAt: integer("updated_at").notNull(),
 });
+
+// ---- R7: the built-in board ------------------------------------------------------------------
+export const TICKET_STATUSES = ["backlog", "todo", "in_progress", "needs_you", "done", "canceled"] as const;
+export type TicketStatus = (typeof TICKET_STATUSES)[number];
+/** Where a ticket's work happens: a registered project, a fresh local sandbox, or an idea with no repository yet. */
+export const TICKET_SPACES = ["project", "sandbox", "ideas"] as const;
+
+/** Your tasks. One becomes a mission when it starts (todo, a free slot); after that the mission drives its status. */
+export const tickets = sqliteTable("tickets", {
+  id: text("id").primaryKey(),
+  prefix: text("prefix").notNull(),
+  number: integer("number").notNull(),
+  space: text("space", { enum: TICKET_SPACES }).notNull(),
+  /** The project it belongs to (space "project"), or the local one made for it when it started. */
+  projectId: text("project_id").references(() => projects.id, { onDelete: "set null" }),
+  title: text("title").notNull(),
+  description: text("description").notNull(),
+  kind: text("kind", { enum: MISSION_KINDS }).notNull(),
+  /** 0 none, 1 urgent, 2 high, 3 medium, 4 low. */
+  priority: integer("priority").notNull().default(0),
+  status: text("status", { enum: TICKET_STATUSES }).notNull(),
+  /** Manual order within a status: smallest first. */
+  position: real("position").notNull(),
+  missionId: text("mission_id"),
+  /** "you", or the agent that filed it from another ticket. */
+  createdBy: text("created_by").notNull(),
+  fromTicketId: text("from_ticket_id"),
+  /** Attachments go into the repository (docs/agentswarm/<task>/request/) when it starts. */
+  commitAttachments: integer("commit_attachments", { mode: "boolean" }).notNull().default(true),
+  /** Imported from elsewhere (Linear): its old id and link. */
+  external: json<{ key: string; url: string }>("external"),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+  startedAt: integer("started_at"),
+  endedAt: integer("ended_at"),
+}, (t) => [
+  uniqueIndex("tickets_key_uq").on(t.prefix, t.number),
+  index("tickets_status_idx").on(t.status, t.position),
+  uniqueIndex("tickets_mission_uq").on(t.missionId),
+]);
+
+/** What happened to a ticket and who did it: created, edited, moved, started, ended. */
+export const ticketEvents = sqliteTable("ticket_events", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  ticketId: text("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+  actor: text("actor").notNull(),
+  kind: text("kind", { enum: ["created", "edited", "status", "started", "ended", "attachment", "promoted"] }).notNull(),
+  data: json<Record<string, unknown>>("data").notNull(),
+  createdAt: integer("created_at").notNull(),
+}, (t) => [index("ticket_events_ticket_idx").on(t.ticketId, t.id)]);
+
+/** Pictures you attach (a bug's screenshot): kept in swarmd's data, given to the lead when the ticket starts. */
+export const ticketAttachments = sqliteTable("ticket_attachments", {
+  id: text("id").primaryKey(),
+  ticketId: text("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  /** The stored file under <data>/attachments/<ticket>/ (always a JPEG). */
+  file: text("file").notNull(),
+  bytes: integer("bytes").notNull(),
+  width: integer("width").notNull(),
+  height: integer("height").notNull(),
+  createdAt: integer("created_at").notNull(),
+}, (t) => [index("ticket_attachments_ticket_idx").on(t.ticketId)]);

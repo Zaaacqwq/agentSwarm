@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { MissionMessageView, MissionView } from "@agentswarm/contracts";
 import { api, money, when } from "../api.ts";
 import { useLive, useReconnect, useResource } from "../live.ts";
@@ -9,6 +9,20 @@ import { TreeActivity } from "../components/Activity.tsx";
 import { Link } from "../router.tsx";
 
 export function MissionPage({ id }: { id: string }) {
+  return (
+    <MissionDetails id={id} header={(m, ended) => (
+      <PageHead title={m.title} sub={<><span className={m.waitingForYou ? "needs-you" : "muted"}>{m.waitingForYou ? "Needs you · " : ""}{STAGE_LABEL[m.stage]}</span> · {m.githubRepo} · <span className="mono">{m.branch}</span></>}
+        action={ended ? undefined : <StopMission id={id} />} />
+    )} />
+  );
+}
+
+export function StopMission({ id, label = "Stop mission" }: { id: string; label?: string }) {
+  return <button className="btn ghost" onClick={() => confirm("Stop it? Running agents are cancelled.") && api("POST", `/missions/${id}/cancel`, {}).catch((e: Error) => alert(e.message))}>{label}</button>;
+}
+
+/** A mission's gates, conversation, facts, agents and activity; the ticket page shows it under its own header (R7). */
+export function MissionDetails({ id, header, hideIntent = false }: { id: string; header?: (m: MissionView, ended: boolean) => ReactNode; hideIntent?: boolean }) {
   const mission = useResource<MissionView>(`/missions/${id}`);
   const messages = useResource<MissionMessageView[]>(`/missions/${id}/messages`);
   useReconnect(() => {
@@ -25,8 +39,7 @@ export function MissionPage({ id }: { id: string }) {
   const approval = [...(messages.data ?? [])].reverse().find((x) => x.kind === "approval");
   return (
     <div className="stack">
-      <PageHead title={m.title} sub={<><span className={m.waitingForYou ? "needs-you" : "muted"}>{m.waitingForYou ? "Needs you · " : ""}{STAGE_LABEL[m.stage]}</span> · {m.githubRepo} · <span className="mono">{m.branch}</span>{m.linear && <> · <a href={m.linear.url} target="_blank" rel="noreferrer">{m.linear.key} ↗</a></>}</>}
-        action={ended ? undefined : <button className="btn ghost" onClick={() => confirm("Stop this mission? Running agents are cancelled.") && api("POST", `/missions/${id}/cancel`, {}).catch((e: Error) => alert(e.message))}>Stop mission</button>} />
+      {header?.(m, ended)}
       <StageRail stage={m.stage} fast={m.fast} />
       {m.stage === "awaiting_approval" && <ApprovalGate mission={m} summary={approval?.text ?? m.stageSummary ?? ""} />}
       {m.stage === "awaiting_merge" && m.prUrl && (
@@ -34,6 +47,7 @@ export function MissionPage({ id }: { id: string }) {
           <h2 id="merge-head">The pull request is ready</h2>
           <p>Review it on GitHub and merge it when you are happy (or close it to drop the mission). agentSwarm notices within a few minutes, writes a short retrospective and cleans up.</p>
           <p><a className="btn signal" href={m.prUrl} target="_blank" rel="noreferrer">Open the pull request ↗</a></p>
+          <CheckoutHint repo={m.githubRepo} prUrl={m.prUrl} />
         </section>
       )}
       {m.error && <div className="card error" role="alert">{m.error} · reply below to let the lead continue.</div>}
@@ -46,10 +60,12 @@ export function MissionPage({ id }: { id: string }) {
               <div className="stat"><b>{m.leadStatus === "succeeded" ? <Badge status="cancelled">idle</Badge> : <Badge status={m.leadStatus} />}</b><span>Lead</span></div>
             </div>
             {!ended && <BudgetEdit mission={m} />}
-            <div>
-              <h3 className="mini">Your words</h3>
-              <p className="quote">{m.intent}</p>
-            </div>
+            {!hideIntent && (
+              <div>
+                <h3 className="mini">Your words</h3>
+                <p className="quote">{m.intent}</p>
+              </div>
+            )}
             <div>
               <h3 className="mini">Documents</h3>
               {m.docs.length ? <ul className="plain">{m.docs.map((d) => <li key={d.name}><a href={d.url} target="_blank" rel="noreferrer">{d.name} ↗</a></li>)}</ul> : <p className="faint">None yet; they appear as stages finish ({m.docsPath}/).</p>}
@@ -71,6 +87,18 @@ export function MissionPage({ id }: { id: string }) {
       <Tree treeId={m.treeId} current={m.rootRunId} />
       <TreeActivity treeId={m.treeId} />
     </div>
+  );
+}
+
+/** To try the change on your own machine before merging (PLAN.md §17). */
+function CheckoutHint({ repo, prUrl }: { repo: string; prUrl: string }) {
+  const number = /\/pull\/(\d+)/.exec(prUrl)?.[1];
+  if (!number) return null;
+  const cmd = `gh pr checkout ${number}`;
+  return (
+    <p className="faint">
+      To try it locally, in your clone of {repo}: <code className="copy" onClick={() => void navigator.clipboard?.writeText(cmd)} title="Copy">{cmd}</code>
+    </p>
   );
 }
 
@@ -115,7 +143,7 @@ function Conversation({ mission, messages, ended }: { mission: MissionView; mess
     <section className="card stack chat-card" aria-labelledby="chat-head">
       <div className="row" style={{ justifyContent: "space-between" }}>
         <h2 id="chat-head">Conversation</h2>
-        <span className="faint">{mission.linear ? "Also in its Linear ticket" : mission.discordThreadId ? "Also in its Discord thread" : "Dashboard only"}</span>
+        <span className="faint">{mission.origin === "ticket" ? "Discord tells you when it needs you" : mission.discordThreadId ? "Also in its Discord thread" : "Dashboard only"}</span>
       </div>
       <ol className="chat" ref={list}>
         {messages.map((x) => <Message key={x.id} m={x} />)}

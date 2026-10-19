@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { GitHubStatus, LinearOptionsView, LinearStatusView, ProjectProfile, ProjectView, PushView, RepoChoice } from "@agentswarm/contracts";
+import type { GitHubStatus, ProjectProfile, ProjectView, PushView, RepoChoice } from "@agentswarm/contracts";
 import { api, ago } from "../api.ts";
 import { useResource } from "../live.ts";
 import { Badge, Empty, Field, Form, PageHead } from "../components/ui.tsx";
@@ -69,7 +69,7 @@ function Project({ p, onChange }: { p: ProjectView; onChange: () => void }) {
   );
 }
 
-/** What agents should know about the project, which Linear project feeds it, and its local files (R5). */
+/** What agents should know about the project, its ticket prefix, and its local files. */
 /** Drops empty keys; undefined when nothing is left (the profile stays tidy). */
 function prune<T extends Record<string, unknown>>(o: T): T | undefined {
   const kept = Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined && v !== "")) as T;
@@ -77,10 +77,8 @@ function prune<T extends Record<string, unknown>>(o: T): T | undefined {
 }
 
 function ProjectSetup({ p, onChange }: { p: ProjectView; onChange: () => void }) {
-  const linear = useResource<LinearStatusView>("/linear");
-  const options = useResource<LinearOptionsView>(linear.data?.connected ? "/linear/options" : null);
   const [profile, setProfile] = useState<ProjectProfile>(p.profile);
-  const [linearProjectId, setLinearProjectId] = useState(p.linearProjectId ?? "");
+  const [prefix, setPrefix] = useState(p.ticketPrefix);
   const [path, setPath] = useState("");
   const [content, setContent] = useState("");
   const field = (key: keyof ProjectProfile) => (e: { target: { value: string } }) => setProfile((x) => ({ ...x, [key]: e.target.value || undefined }));
@@ -89,7 +87,7 @@ function ProjectSetup({ p, onChange }: { p: ProjectView; onChange: () => void })
   return (
     <div className="stack">
       <Form submit="Save profile" onSubmit={async () => {
-        await api("PUT", `/projects/${p.id}/profile`, { profile, linearProjectId: linearProjectId || null });
+        await api("PUT", `/projects/${p.id}/profile`, { profile, ...(prefix !== p.ticketPrefix ? { ticketPrefix: prefix } : {}) });
         onChange();
       }}>
         <div className="grid">
@@ -103,6 +101,9 @@ function ProjectSetup({ p, onChange }: { p: ProjectView; onChange: () => void })
           <textarea value={profile.rules ?? ""} onChange={field("rules")} style={{ minHeight: 70 }} />
         </Field>
         <div className="grid">
+          <Field label="Ticket prefix" hint="Its tickets are PREFIX-1, PREFIX-2… Changing it does not renumber old tickets.">
+            <input className="mono" value={prefix} onChange={(e) => setPrefix(e.target.value.toUpperCase())} pattern="[A-Z][A-Z0-9]{0,5}" maxLength={6} required />
+          </Field>
           <Field label="Reviewer">
             <select value={profile.reviewRuntime ?? "native"} onChange={(e) => setProfile((x) => ({ ...x, reviewRuntime: e.target.value as ProjectProfile["reviewRuntime"] }))}>
               <option value="native">Native model</option>
@@ -110,14 +111,6 @@ function ProjectSetup({ p, onChange }: { p: ProjectView; onChange: () => void })
               <option value="codex">Codex</option>
             </select>
           </Field>
-          {p.kind === "github" && (
-            <Field label="Linear project" hint={linear.data?.connected ? "Tickets in it come here." : "Connect Linear in Settings first."}>
-              <select value={linearProjectId} onChange={(e) => setLinearProjectId(e.target.value)} disabled={!options.data}>
-                <option value="">None</option>
-                {options.data?.projects.map((lp) => <option key={lp.id} value={lp.id}>{lp.name}</option>)}
-              </select>
-            </Field>
-          )}
         </div>
         <div className="grid">
           <Field label="iOS scheme" hint="For the simulator: what QA builds and runs.">

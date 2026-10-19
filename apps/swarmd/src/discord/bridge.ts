@@ -215,8 +215,9 @@ export class DiscordBridge {
     const sent = this.deps.db.select({ d: schema.missionMessages.discordMessageId }).from(schema.missionMessages).where(eq(schema.missionMessages.id, message.id)).get();
     if (sent?.d) return;
     const m = this.deps.missions.row(message.missionId);
-    // Linear missions talk in their ticket (R5): Discord only says when the person is needed.
-    if (m.origin === "linear") return this.notify(message, m);
+    // Board tickets (R7) talk on the dashboard; the ticket service sends its own notes (notifyTicket).
+    // (Missions from the old Linear integration likewise: they talked in Linear.)
+    if (m.origin === "ticket" || m.origin === "linear") return this.deps.missions.markDelivered(message.id, m.origin);
     // The idea itself opens the thread.
     if (message.author === "user" && message.text === m.intent && message.createdAt === m.createdAt) {
       this.deps.missions.markDelivered(message.id, await this.ensureThread(m.id));
@@ -344,17 +345,15 @@ export class DiscordBridge {
     return found;
   }
 
-  private async notify(message: MissionMessageView, m: { id: string; title: string; stage: string }): Promise<void> {
+  /** One line to the channel about a board ticket (R7), with a link to it on the dashboard. */
+  notifyTicket(ticket: { key: string; title: string }, what: string): void {
     const s = this.stored();
-    const needsYou = message.kind === "question" || message.kind === "approval" || message.kind === "error"
-      || (message.author === "system" && /pull request is ready/i.test(message.text));
-    let id = "linear";
-    if (s && needsYou) {
-      const link = this.deps.db.select({ url: schema.linearSessions.issueUrl }).from(schema.linearSessions).where(eq(schema.linearSessions.missionId, m.id)).get()?.url;
-      const what = message.kind === "question" ? "has a question" : message.kind === "approval" ? "has a plan for you to approve" : message.kind === "error" ? "stopped and needs you" : "has a pull request for you to merge";
-      id = await this.deps.transport.send(s.channelId, { content: `**${m.title}** ${what}.${link ? ` ${link}` : ""}` });
-    }
-    this.deps.missions.markDelivered(message.id, id);
+    if (!s || !this.connected) return;
+    const link = `${this.deps.dashboardUrl.replace(/\/$/, "")}/tickets/${ticket.key}`;
+    // The title may be an agent's words (file_ticket): shown as code, so it cannot carry links or formatting.
+    const title = ticket.title.replace(/[`\r\n]+/g, " ").slice(0, 120);
+    this.deps.transport.send(s.channelId, { content: `**${ticket.key}** \`${title}\` ${what}. ${link}` })
+      .catch((e: Error) => this.deps.log("discord ticket note failed", { ticket: ticket.key, error: e.message }));
   }
 
   private stored(): Stored | null {

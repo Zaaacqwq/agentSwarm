@@ -47,6 +47,9 @@ h.scriptAgents({
     call("spawn_agent", { name: "Claudia", role: "developer", brief: "square(3) must be 9: fix math.js so node --test passes.", runtime: "claude_code" }),
     call("wait_agents", {}),
     call("report", { summary: "Claude Code fixed square.", tests: "node --test: 1 passed", unfinished: [] }),
+    // The board (R7): a ticket's lead asks, you answer, it asks again.
+    call("ask_user", { question: "Which colour should the button be?" }),
+    call("ask_user", { question: "Got it: orange. Anything else?" }),
   ],
   Builder: [
     call("ws_write", { path: "cube.js", content: "export const cube = (x) => x * x * x;\n" }),

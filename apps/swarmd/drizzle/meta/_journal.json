@@ -57,6 +57,20 @@
       "when": 1792291497591,
       "tag": "0007_eyes_and_hands",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1792296918204,
+      "tag": "0008_board",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1792305614061,
+      "tag": "0009_remove_linear",
+      "breakpoints": true
     }
   ]
 }

@@ -19,8 +19,6 @@ import { FakeDiscord } from "./fake-discord.ts";
 import type { RunLimits } from "../src/db/schema.ts";
 import { installFakeCli, type FakeCli } from "../../../packages/ws-exec/test/fake-cli.ts";
 import { installFakeSim, type FakeSim } from "../../../packages/ws-exec/test/fake-sim.ts";
-import { FakeLinear } from "./fake-linear.ts";
-import { buildLinearWebhook } from "../src/linear/linear-webhook.ts";
 
 const LOCAL_MAIN = fileURLToPath(new URL("../../../packages/ws-exec/src/local-main.ts", import.meta.url));
 export const ADMIN = { username: "admin", password: "correct horse battery staple" };
@@ -41,9 +39,6 @@ export interface Harness {
   readonly cli: FakeCli;
   /** Fake simctl, AXe and xcodebuild (R6), per workstation user. */
   sim(user: string): FakeSim;
-  /** Fake Linear (R5), and agentSwarm's webhook app that it posts to. */
-  readonly linear: FakeLinear;
-  readonly linearWebhook: FastifyInstance;
   /** Pages web_fetch can read, by URL; web_search answers with `searchResult`. */
   readonly web: { pages: Map<string, string>; searches: string[]; searchResult: string };
   /** Scripted model replies, consumed one per model request. */
@@ -53,7 +48,7 @@ export interface Harness {
   pending(): number;
   /** Signs in (running first-time setup) and returns a cookie header. */
   login(): Promise<string>;
-  api<T = any>(method: "GET" | "POST" | "PUT" | "DELETE", url: string, body?: unknown, cookie?: string): Promise<{ status: number; body: T }>;
+  api<T = any>(method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE", url: string, body?: unknown, cookie?: string): Promise<{ status: number; body: T }>;
   /** Token, project, endpoint and one agent, ready to run. */
   ready(): Promise<{ cookie: string; projectId: string; agentId: string }>;
   remoteBranches(): string[];
@@ -105,7 +100,6 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
   const pullRequests: { repo: string; head: string; base: string; title: string; body: string }[] = [];
   const prStates = new Map<number, PullRequestState>();
   const discord = new FakeDiscord();
-  const linear = new FakeLinear();
   const webState = { pages: new Map<string, string>(), searches: [] as string[], searchResult: "Results:\n1. Example\n   https://example.com/csv\n   CSV parsing notes" };
   const web: WebAccess = {
     fetch: async (url) => {
@@ -153,6 +147,7 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
     layout,
     maxConcurrentRuns: opts.maxConcurrentRuns ?? 2,
     screensDir: join(base, "screens"),
+    attachmentsDir: join(base, "attachments"),
     ...(opts.heavySlots ? { heavySlots: opts.heavySlots } : {}),
     ...(opts.memoryPressure ? { memoryPressure: opts.memoryPressure } : {}),
     log: () => {},
@@ -167,10 +162,8 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
     transport: discord,
     dashboardUrl: "http://127.0.0.1:4399",
     ...(opts.prPollMs ? { prPollMs: opts.prPollMs } : {}),
-    linearApi: linear,
   });
   await services.pool.sync();
-  const linearWebhook = buildLinearWebhook({ db: db.db, linear: services.linear, received: () => services.linearBridge.drain(), log: () => {} });
   const app = await buildApp({ services, webDist: opts.webDist ?? null, check: { dataDir: layout.swarmdData, volume: null }, allowedHosts: ["localhost:80", "127.0.0.1:4399"] });
 
   const api: Harness["api"] = async (method, url, body, cookie) => {
@@ -192,7 +185,7 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
 
   return {
     sim: (user) => sims.get(user)!,
-    base, layout, remote, services, app, db, protectedBranches, pullRequests, prStates, discord, cli, linear, linearWebhook, web: webState,
+    base, layout, remote, services, app, db, protectedBranches, pullRequests, prStates, discord, cli, web: webState,
     script: (steps) => faux.setResponses(steps),
     scriptAgents(scripts) {
       const queues = new Map(Object.entries(scripts).map(([k, v]) => [k, [...v]]));
@@ -223,8 +216,6 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
     remoteBranches: () => execFileSync("/usr/bin/git", ["for-each-ref", "--format=%(refname:short)", "refs/heads"], { cwd: remote }).toString().trim().split("\n"),
     async close() {
       services.watcher.stop();
-      services.linearBridge.stop();
-      await linearWebhook.close();
       await services.discord.stop();
       await services.runs.stopAll();
       await app.close();

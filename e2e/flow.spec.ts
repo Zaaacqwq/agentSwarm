@@ -1,3 +1,4 @@
+import { deflateSync } from "node:zlib";
 import { expect, test } from "@playwright/test";
 
 const SHOTS = "test-results/screens";
@@ -8,7 +9,7 @@ test("set up agentSwarm, add a project and an agent, and watch a run fix a bug",
   await page.getByLabel("Username").fill("admin");
   await page.getByLabel("Password").fill("correct horse battery staple");
   await page.getByRole("button", { name: "Create account" }).click();
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Tickets" })).toBeVisible();
 
   await page.getByRole("link", { name: "Settings" }).click();
   await page.getByLabel("API key").fill("sk-or-e2e-key-value");
@@ -157,19 +158,16 @@ test("connect Claude Code and Codex, then watch a Claude Code sub-agent do the w
   await page.screenshot({ path: `${SHOTS}/cli-settings-375.png`, fullPage: true });
 });
 
-test("set up Linear, a project's profile and local files, and the ports agents may not reach", async ({ page }) => {
+test("the board's limit, a project's profile and local files, and the ports agents may not reach", async ({ page }) => {
   await page.goto("/settings");
   await page.getByLabel("Password").fill("correct horse battery staple");
   await page.getByRole("button", { name: "Sign in" }).click();
-  const linear = page.getByRole("region", { name: "Linear" });
-  await expect(linear.getByText("not installed")).toBeVisible();
-  await expect(linear.getByText("/api/linear/callback")).toBeVisible();
-  await linear.getByLabel("Client ID").fill("client-id-e2e");
-  await linear.getByLabel("Client secret").fill("client-secret-e2e");
-  await linear.getByLabel("Webhook signing secret").fill("webhook-secret-e2e");
-  await linear.getByRole("button", { name: "Save" }).click();
-  await expect(linear.getByRole("button", { name: "Install in Linear" })).toBeEnabled();
-  await expect(linear.getByText("Stored; leave empty to keep it.").first()).toBeVisible();
+  await expect(page.getByRole("region", { name: "Linear" })).toHaveCount(0);
+  const board = page.getByRole("region", { name: "Tickets" });
+  await board.getByLabel("Tickets worked on at once").fill("2");
+  await board.getByRole("button", { name: "Save" }).click();
+  await page.reload();
+  await expect(page.getByRole("region", { name: "Tickets" }).getByLabel("Tickets worked on at once")).toHaveValue("2");
 
   const mac = page.getByRole("region", { name: "This Mac" });
   await expect(mac.getByText("simulators and browsers in use", { exact: false })).toBeVisible();
@@ -177,7 +175,7 @@ test("set up Linear, a project's profile and local files, and the ports agents m
   await mac.getByRole("button", { name: "Save" }).click();
   await page.reload();
   await expect(page.getByRole("region", { name: "This Mac" }).getByLabel("Local ports agents may not connect to")).toHaveValue("3000, 5432");
-  await page.screenshot({ path: `${SHOTS}/linear-settings-1440.png`, fullPage: true });
+  await page.screenshot({ path: `${SHOTS}/settings-1440.png`, fullPage: true });
 
   await page.getByRole("link", { name: "Projects" }).click();
   await page.getByRole("button", { name: "Profile and files" }).first().click();
@@ -200,5 +198,93 @@ test("set up Linear, a project's profile and local files, and the ports agents m
   await page.setViewportSize({ width: 375, height: 812 });
   await page.screenshot({ path: `${SHOTS}/project-profile-375.png`, fullPage: true });
   await page.goto("/settings");
-  await page.screenshot({ path: `${SHOTS}/linear-settings-375.png`, fullPage: true });
+  await page.screenshot({ path: `${SHOTS}/settings-375.png`, fullPage: true });
 });
+
+test("the board: a ticket with a picture, dragged into Todo, answered on the phone, and stopped", async ({ page }) => {
+  await page.goto("/");
+  await page.getByLabel("Password").fill("correct horse battery staple");
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page.getByRole("heading", { name: "Tickets" })).toBeVisible();
+  await page.getByRole("button", { name: "New ticket" }).click();
+  const form = page.getByRole("region", { name: "New ticket" });
+  await form.getByLabel("Title").fill("Make the button orange");
+  await form.getByLabel("Details").fill("The main button is grey; it should stand out.");
+  await form.getByLabel("Kind").selectOption("feature");
+  await form.getByLabel("Priority").selectOption("2");
+  await form.getByLabel("Pictures").setInputFiles({ name: "button.png", mimeType: "image/png", buffer: PNG });
+  await expect(form.getByRole("img", { name: "button.png" })).toBeVisible();
+  await form.getByRole("button", { name: "Add to the backlog" }).click();
+  await expect(page.getByRole("heading", { name: "Make the button orange" })).toBeVisible();
+  await expect(page.getByRole("img", { name: "button.png" })).toBeVisible();
+  await page.getByRole("link", { name: "Tickets" }).click();
+  await page.getByRole("button", { name: "Board", exact: true }).click();
+  const card = page.getByRole("article", { name: /DEM-\d+ Make the button orange/ });
+  await page.goto("/?view=board");
+  await expect(page.getByRole("region", { name: "Backlog" }).getByRole("article")).toHaveCount(1);
+  // Two more in the backlog, then a drag within the column: the last one goes to the top.
+  for (const title of ["Second idea", "Third idea"]) {
+    await page.evaluate(`fetch("/api/tickets", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ space: "ideas", kind: "research", title: "${title}", description: "" }) })`);
+  }
+  const backlog = page.getByRole("region", { name: "Backlog" });
+  await expect(backlog.getByRole("article")).toHaveCount(3);
+  const titles = () => backlog.locator(".ticket-title").allTextContents();
+  const order = await titles();
+  const last = backlog.getByRole("article").nth(2);
+  const top = backlog.getByRole("article").nth(0);
+  const from = (await last.boundingBox())!;
+  const dest = (await top.boundingBox())!;
+  await page.mouse.move(from.x + 20, from.y + 12);
+  await page.mouse.down();
+  await page.mouse.move(from.x + 24, from.y + 2, { steps: 3 });
+  await page.mouse.move(dest.x + 20, dest.y + 4, { steps: 12 });
+  await page.mouse.up();
+  await expect.poll(titles).toEqual([order[2], order[0], order[1]]);
+  await page.reload();
+  await expect.poll(titles).toEqual([order[2], order[0], order[1]]);
+  await page.screenshot({ path: `${SHOTS}/board-1440.png`, fullPage: true });
+  // Drag it into Todo: it starts, its lead asks, and it lands in Needs you.
+  const box = (await card.boundingBox())!;
+  const todo = (await page.getByRole("region", { name: "Todo" }).boundingBox())!;
+  await page.mouse.move(box.x + 20, box.y + 12);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 40, box.y + 30, { steps: 4 });
+  await page.mouse.move(todo.x + todo.width / 2, todo.y + 60, { steps: 12 });
+  await page.mouse.up();
+  const needs = page.getByRole("region", { name: "Needs you" });
+  await expect(needs.getByText("Answer the lead")).toBeVisible({ timeout: 30_000 });
+  await page.screenshot({ path: `${SHOTS}/board-needs-you-1440.png`, fullPage: true });
+
+  // On a phone: the list, the ticket, the question, the answer.
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.goto("/?view=list");
+  await expect(page.getByRole("region", { name: "Needs you" })).toBeVisible();
+  await page.screenshot({ path: `${SHOTS}/board-list-375.png`, fullPage: true });
+  await page.getByRole("link", { name: "Make the button orange" }).click();
+  const chat = page.getByRole("region", { name: "Conversation" });
+  await expect(chat.getByText("Which colour should the button be?")).toBeVisible();
+  await expect(page.getByText("Answer the lead").first()).toBeVisible();
+  await page.screenshot({ path: `${SHOTS}/ticket-375.png`, fullPage: true });
+  await page.getByLabel("Your answer").fill("Orange, like the logo.");
+  await page.getByRole("button", { name: "Answer" }).click();
+  await expect(chat.getByText("Got it: orange. Anything else?")).toBeVisible({ timeout: 30_000 });
+  const overflow = await page.evaluate("document.documentElement.scrollWidth - document.documentElement.clientWidth") as number;
+  expect(overflow).toBeLessThanOrEqual(0);
+  await page.emulateMedia({ colorScheme: "dark" });
+  await page.screenshot({ path: `${SHOTS}/ticket-375-dark.png`, fullPage: true });
+  await page.emulateMedia({ colorScheme: "light" });
+  page.once("dialog", (d) => void d.accept());
+  await page.getByRole("button", { name: "Stop", exact: true }).click();
+  await expect(page.getByText("Canceled", { exact: true }).first()).toBeVisible({ timeout: 30_000 });
+});
+
+/** A small orange PNG (40×24), built here so the test has no binary fixture. */
+const PNG = (() => {
+  const w = 40, h = 24;
+  const crc = (buf: Buffer) => { let c = ~0; for (const b of buf) { c ^= b; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; } return ~c >>> 0; };
+  const chunk = (t: string, d: Buffer) => { const l = Buffer.alloc(4); l.writeUInt32BE(d.length); const b = Buffer.concat([Buffer.from(t), d]); const s = Buffer.alloc(4); s.writeUInt32BE(crc(b)); return Buffer.concat([l, b, s]); };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr.set([8, 2, 0, 0, 0], 8);
+  const rows = Buffer.alloc((w * 3 + 1) * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) rows.set([0xe8, 0x59, 0x0c], y * (w * 3 + 1) + 1 + x * 3);
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk("IHDR", ihdr), chunk("IDAT", deflateSync(rows)), chunk("IEND", Buffer.alloc(0))]);
+})();

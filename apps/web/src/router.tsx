@@ -18,7 +18,8 @@ export function navigate(to: string): void {
 }
 
 export function Link({ to, children, className }: { to: string; children: ReactNode; className?: string }) {
-  const current = location.pathname === to || (to !== "/" && location.pathname.startsWith(`${to}/`));
+  // Home is the board: its tickets count as home too.
+  const current = location.pathname === to || (to !== "/" && location.pathname.startsWith(`${to}/`)) || (to === "/" && location.pathname.startsWith("/tickets"));
   const click = (e: MouseEvent) => {
     if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
     e.preventDefault();

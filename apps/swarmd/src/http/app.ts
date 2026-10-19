@@ -4,18 +4,17 @@ import cookie from "@fastify/cookie";
 import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import {
-  CreateAgent, CreateEndpoint, CreateMission, CreateProject, CreateRun, Credentials, MissionBudget, MissionReply, RunMessage, SetCli, SetDiscord, SetLinear, SetGitHubToken, SetProjectProfile, PutProjectFile, CreateLocalProject, MachineSettings, type Me,
+  CreateAgent, CreateEndpoint, CreateMission, CreateProject, CreateRun, Credentials, MissionBudget, MissionReply, RunMessage, SetCli, SetDiscord, SetGitHubToken, SetProjectProfile, PutProjectFile, CreateLocalProject, MachineSettings, CreateTicket, UpdateTicket, MoveTicket, TicketSettings, PromoteTicket, type Me,
 } from "@agentswarm/contracts";
 import type { Services } from "../app/services.ts";
 import { RateLimiter } from "../auth/rate-limit.ts";
 import { SESSION_TTL_MS } from "../auth/auth-service.ts";
-import { HttpError, forbidden, unauthorized } from "../errors.ts";
+import { HttpError, badRequest, forbidden, unauthorized } from "../errors.ts";
+import { MAX_UPLOAD_BYTES } from "../tickets/attachments.ts";
 import { systemCheck, type CheckOptions } from "../system/system-check.ts";
 
 export const SESSION_COOKIE = "swarm_session";
-// The Linear OAuth callback arrives as a cross-site navigation (no SameSite=Strict cookie); its one-time
-// state, issued only to a signed-in session, is what authorises it.
-const PUBLIC = new Set(["/api/health", "/api/setup", "/api/auth/login", "/api/linear/callback"]);
+const PUBLIC = new Set(["/api/health", "/api/setup", "/api/auth/login"]);
 
 export interface AppOptions {
   readonly services: Services;
@@ -24,8 +23,6 @@ export interface AppOptions {
   /** Host headers the dashboard answers to (DNS rebinding); Origins must match one of them. */
   readonly allowedHosts: readonly string[];
   readonly logger?: boolean;
-  /** The dashboard's own address; Linear's OAuth callback comes back to it. */
-  readonly dashboardUrl?: string;
 }
 
 declare module "fastify" {
@@ -46,6 +43,8 @@ function sameSite(origin: string, hosts: ReadonlySet<string>): boolean {
 export async function buildApp(o: AppOptions): Promise<FastifyInstance> {
   const s = o.services;
   const app = Fastify({ logger: o.logger ?? false, bodyLimit: 1024 * 1024, trustProxy: false });
+  // Ticket pictures arrive as raw bytes (R7); only that route accepts a body this large.
+  app.addContentTypeParser(["image/jpeg", "image/png", "image/heic", "image/heif", "application/octet-stream"], { parseAs: "buffer" }, (_req, body, done) => done(null, body));
   await app.register(cookie);
   await app.register(websocket);
   app.decorateRequest("me", null);
@@ -66,7 +65,10 @@ export async function buildApp(o: AppOptions): Promise<FastifyInstance> {
     if (origin && !sameSite(origin, hosts)) throw forbidden("Cross-origin request refused");
     // CSRF: state changes must be JSON (forms cannot send JSON cross-site).
     if (req.method !== "GET" && req.method !== "HEAD") {
-      if (req.headers["content-length"] !== "0" && req.headers["content-length"] !== undefined && !String(req.headers["content-type"] ?? "").startsWith("application/json")) {
+      const type = String(req.headers["content-type"] ?? "");
+      // A ticket's picture is sent as itself: a type no form can send, and that a cross-site fetch would have to preflight.
+      const picture = /^\/api\/tickets\/[^/]+\/attachments(\?|$)/.test(req.url) && /^(image\/(jpeg|png|heic|heif)|application\/octet-stream)$/.test(type);
+      if (req.headers["content-length"] !== "0" && req.headers["content-length"] !== undefined && !type.startsWith("application/json") && !picture) {
         throw new HttpError(415, "Send JSON");
       }
     }
@@ -175,6 +177,30 @@ export async function buildApp(o: AppOptions): Promise<FastifyInstance> {
   app.post<{ Params: { id: string } }>("/api/runs/:id/cancel", async (req) => s.runs.cancel(actor(req), req.params.id));
 
   // ---- missions -----------------------------------------------------------------------------
+  // ---- the board (R7) ----
+  app.get("/api/tickets", async () => s.tickets.list());
+  app.post<{ Body: CreateTicket }>("/api/tickets", { schema: { body: CreateTicket } }, async (req) => s.tickets.create(actor(req), req.body));
+  app.get("/api/tickets/settings", async () => s.tickets.settings());
+  app.put<{ Body: TicketSettings }>("/api/tickets/settings", { schema: { body: TicketSettings } }, async (req) => s.tickets.setSettings(actor(req), req.body));
+  app.get<{ Params: { key: string } }>("/api/tickets/:key", async (req) => s.tickets.view(req.params.key));
+  app.patch<{ Params: { key: string }; Body: UpdateTicket }>("/api/tickets/:key", { schema: { body: UpdateTicket } }, async (req) => s.tickets.update(actor(req), req.params.key, req.body));
+  app.post<{ Params: { key: string }; Body: MoveTicket }>("/api/tickets/:key/move", { schema: { body: MoveTicket } }, async (req) => s.tickets.move(actor(req), req.params.key, req.body));
+  app.delete<{ Params: { key: string } }>("/api/tickets/:key", async (req, reply) => {
+    s.tickets.remove(actor(req), req.params.key);
+    return reply.code(204).send();
+  });
+  app.get<{ Params: { key: string } }>("/api/tickets/:key/events", async (req) => s.tickets.events(req.params.key));
+  app.post<{ Params: { key: string }; Body: PromoteTicket }>("/api/tickets/:key/promote", { schema: { body: PromoteTicket } }, async (req) => s.tickets.promote(actor(req), req.params.key, req.body.repo ?? null));
+  // Pictures: the raw image as the body (the browser's type and the name are not trusted; the bytes are checked).
+  app.post<{ Params: { key: string }; Querystring: { name?: string }; Body: Buffer }>("/api/tickets/:key/attachments", { bodyLimit: MAX_UPLOAD_BYTES + 1024 }, async (req) => {
+    if (!Buffer.isBuffer(req.body)) throw badRequest("Send the picture itself as the body");
+    return s.tickets.attach(actor(req), req.params.key, String(req.query.name ?? "picture"), req.body);
+  });
+  app.get<{ Params: { key: string; id: string } }>("/api/tickets/:key/attachments/:id", async (req, reply) => {
+    const t = s.tickets.row(req.params.key);
+    return reply.type("image/jpeg").header("x-content-type-options", "nosniff").header("cache-control", "private, max-age=86400").send(s.tickets.picture(t.id, req.params.id));
+  });
+  app.delete<{ Params: { key: string; id: string } }>("/api/tickets/:key/attachments/:id", async (req) => s.tickets.detach(actor(req), req.params.key, req.params.id));
   app.get("/api/missions", async () => s.missions.list());
   app.post<{ Body: CreateMission }>("/api/missions", { schema: { body: CreateMission } }, async (req) => s.missions.create(actor(req), req.body, "dashboard"));
   app.get<{ Params: { id: string } }>("/api/missions/:id", async (req) => s.missions.view(req.params.id));
@@ -206,33 +232,6 @@ export async function buildApp(o: AppOptions): Promise<FastifyInstance> {
     return s.cli.status();
   });
   app.post<{ Params: { ws: string } }>("/api/cli/codex/:ws/logout", { schema: { params: WS_ID } }, async (req) => s.cli.codexLogout(actor(req), req.params.ws));
-
-  // ---- Linear (R5) --------------------------------------------------------------------------
-  const linearCallback = `${o.dashboardUrl ?? "http://127.0.0.1:4318"}/api/linear/callback`;
-  app.get("/api/linear", async () => ({ ...(await s.linear.status()), redirectUri: linearCallback }));
-  app.put<{ Body: SetLinear }>("/api/linear", { schema: { body: SetLinear } }, async (req) => {
-    const v = await s.linear.configure(actor(req), req.body);
-    // A new owner or more room may let queued tickets start.
-    void s.linearBridge.pump().catch(() => undefined);
-    return { ...v, redirectUri: linearCallback };
-  });
-  app.get("/api/linear/options", async () => s.linear.options());
-  app.get("/api/linear/connect", async () => ({ url: s.linear.connectUrl(linearCallback) }));
-  app.post("/api/linear/disconnect", async (req) => s.linear.disconnect(actor(req)));
-  app.get<{ Querystring: { code?: string; state?: string; error?: string } }>("/api/linear/callback", async (req, reply) => {
-    let message = "Linear is connected.";
-    try {
-      if (req.query.error || !/^[0-9a-f]{32}$/.test(String(req.query.state ?? ""))) throw new Error("refused or invalid");
-      await s.linear.callback("linear-oauth", String(req.query.code ?? ""), String(req.query.state ?? ""), linearCallback);
-    } catch (error) {
-      // A fixed text: anyone can send a browser to this page with any query.
-      void s.linear.noteError(`Linear sign-in failed: ${(error as Error).message.slice(0, 200)}`);
-      message = "Linear was not connected (the link expired or was refused). Start again from the settings.";
-    }
-    const safe = message.replace(/[<>&"]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" })[c]!);
-    // A page of our own, so the way back to the settings is a same-site navigation (the session cookie is Strict).
-    return reply.type("text/html; charset=utf-8").send(`<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="2;url=/settings"><title>agentSwarm</title><p>${safe}</p><p><a href="/settings">Back to the settings</a></p>`);
-  });
 
   // ---- live updates -------------------------------------------------------------------------
   app.get("/api/ws", { websocket: true }, (socket) => {

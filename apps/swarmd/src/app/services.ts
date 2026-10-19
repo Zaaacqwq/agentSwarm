@@ -1,5 +1,7 @@
 import type { Layout } from "@agentswarm/ws-exec";
 import { memoryPressure } from "../system/memory.ts";
+import { TicketService } from "../tickets/ticket-service.ts";
+import { Attachments } from "../tickets/attachments.ts";
 import type { Db } from "../db/client.ts";
 import type { SecretBox } from "../crypto/secret-box.ts";
 import { AuthService } from "../auth/auth-service.ts";
@@ -25,9 +27,6 @@ import { DiscordBridge } from "../discord/bridge.ts";
 import type { ChatTransport } from "../discord/transport.ts";
 import { CliService } from "../cli/cli-service.ts";
 import { MachineService } from "../system/machine.ts";
-import { LinearService } from "../linear/linear-service.ts";
-import { LinearBridge } from "../linear/linear-bridge.ts";
-import { LinearGraphql, type LinearApi } from "../linear/linear-client.ts";
 
 export type Logger = (level: "info" | "warn" | "error", msg: string, extra?: Record<string, unknown>) => void;
 
@@ -43,6 +42,8 @@ export interface ServiceDeps {
   readonly heavySlots?: number;
   /** R6: where runs' screenshots are kept for the dashboard. */
   readonly screensDir: string;
+  /** R7: where tickets' pictures are kept. */
+  readonly attachmentsDir: string;
   /** R6: tests pretend memory is tight. */
   readonly memoryPressure?: () => number;
   readonly log: Logger;
@@ -57,10 +58,6 @@ export interface ServiceDeps {
   /** Links in Discord messages point here. */
   readonly dashboardUrl: string;
   readonly prPollMs?: number;
-  /** Tests fake Linear; production talks to api.linear.app. */
-  readonly linearApi?: LinearApi;
-  /** The webhook port: agents may never connect to it. */
-  readonly linearPort?: number;
 }
 
 export interface Services {
@@ -81,8 +78,7 @@ export interface Services {
   readonly discord: DiscordBridge;
   readonly cli: CliService;
   readonly machine: MachineService;
-  readonly linear: LinearService;
-  readonly linearBridge: LinearBridge;
+  readonly tickets: TicketService;
 }
 
 export function createServices(d: ServiceDeps): Services {
@@ -120,7 +116,9 @@ export function createServices(d: ServiceDeps): Services {
     },
   });
   const discord = new DiscordBridge({ db: d.db, secrets: d.secrets, bus, missions, projects, transport: d.transport, dashboardUrl: d.dashboardUrl, log: warn, quota: () => cli.quota() });
-  const linear = new LinearService({ db: d.db, secrets: d.secrets, api: d.linearApi ?? new LinearGraphql(), log: warn });
-  const linearBridge = new LinearBridge({ db: d.db, bus, linear, missions, projects, agents, tree, github, git: d.git, dashboardUrl: d.dashboardUrl, log: warn });
-  return { bus, auth: new AuthService(d.db), endpoints, gateway, github, projects, pool, agents, relay, runs, tree, cleanup, missions, watcher, discord, cli, machine: new MachineService(d.db, d.layout.mirrors, d.linearPort ? [d.linearPort] : []), linear, linearBridge };
+  const tickets = new TicketService({
+    db: d.db, bus, missions, projects, agents, runs, tree, github, git: d.git, attachments: new Attachments(d.db, d.attachmentsDir), log: warn,
+    notify: (t, what) => discord.notifyTicket(t, what),
+  });
+  return { bus, auth: new AuthService(d.db), endpoints, gateway, github, projects, pool, agents, relay, runs, tree, cleanup, missions, watcher, discord, cli, machine: new MachineService(d.db, d.layout.mirrors), tickets };
 }
