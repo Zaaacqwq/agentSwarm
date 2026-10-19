@@ -14,10 +14,7 @@ final class Commands {
     private var lastLook: Look?
     /// The helper ends a session at its time even if swarmd does not.
     private var lapse: DispatchWorkItem?
-    /// The workstation user the app under test runs as (nil: as you, the fallback when none is given).
-    private var targetUser: String?
     private let clipboard = Clipboard()
-    static let wsApp = "/usr/local/libexec/agentswarm/ws-app"
     private static let sessionCommands: Set<String> = ["ping", "status", "request_access", "arm", "disarm", "ack_stop"]
 
     init(appsDir: String) {
@@ -79,8 +76,7 @@ final class Commands {
         if let until = session.pausedUntil, cmd != "look", cmd != "close" { throw HelperError.paused(until) }
         if cmd == "open" { return try open(req, token: token) }
         guard let target = session.target else { throw HelperError.bad("No app is open yet; open it first (desktop_open)") }
-        // It may run as a workstation user: kill(0) says whether it is there without signalling it.
-        guard kill(target, 0) == 0 || errno == EPERM else {
+        guard let app = NSRunningApplication(processIdentifier: target), !app.isTerminated else {
             throw HelperError.failed("The app under test has quit; open it again (desktop_open)")
         }
         // Run before every event of an action: the session and your pause are checked again; for keys, also
@@ -99,7 +95,7 @@ final class Commands {
             quit(target)
             return [:]
         case "focus":
-            try focus(target)
+            try focus(app)
         case "click":
             let p = try point(req)!
             try Input.click(at: p, button: req["button"] as? String ?? "left", count: int(req, "count") ?? 1) { try stillOurs(); try self.onTarget(p, target) }
@@ -129,75 +125,36 @@ final class Commands {
     }
 
     /**
-     * Opens an app swarmd staged (and only from there). With `user` (ws-N) it runs as that workstation user through
-     * ws-app: in your GUI session, but with none of your files, keychain or clipboard. Without, it is started by the
-     * system as you. Either way it is not the helper's child and has none of its permissions, and an app that is not
-     * in the App Sandbox is closed at once.
+     * Opens an app swarmd staged (and only from there), as a new instance started by the system, so it is not
+     * the helper's child and has none of its permissions. An app that is not in the App Sandbox is closed at once.
      */
     private func open(_ req: [String: Any], token: String) throws -> [String: Any] {
-        guard let path = req["path"] as? String, path.hasSuffix(".app"), !path.contains("/../") else { throw HelperError.bad("open needs the path of a .app") }
-        let root = (appsDir as NSString).standardizingPath + "/"
-        guard (path as NSString).standardizingPath.hasPrefix(root) else { throw HelperError.denied("Only apps agentSwarm staged can be opened") }
-        let user = req["user"] as? String
-        if let user, user.range(of: "^ws-[0-9]{1,2}$", options: .regularExpression) == nil { throw HelperError.bad("user must be a workstation user") }
-        let pid = try user.map { try launchAs($0, path) } ?? launchAsYou(path)
-        guard Sandbox.applies(to: pid) else {
-            stop(pid, user: user)
-            throw HelperError.denied("The app was not running in the App Sandbox, so it was closed")
-        }
-        do {
-            if let previous = try arming.setTarget(pid, session: token), previous != pid { quit(previous) }
-        } catch {
-            // The session ended while the app was starting: it does not stay open.
-            stop(pid, user: user)
-            throw error
-        }
-        targetUser = user
-        setLook(nil)
-        usleep(1_500_000)
-        let name = NSRunningApplication(processIdentifier: pid)?.localizedName ?? (path as NSString).lastPathComponent.replacingOccurrences(of: ".app", with: "")
-        return ["pid": Int(pid), "name": name].merging(settle(pid)) { a, _ in a }
-    }
-
-    private func launchAsYou(_ path: String) throws -> pid_t {
+        guard let path = req["path"] as? String, path.hasSuffix(".app") else { throw HelperError.bad("open needs the path of a .app") }
+        let root = URL(fileURLWithPath: appsDir).resolvingSymlinksInPath().path + "/"
+        let url = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+        guard url.path.hasPrefix(root), FileManager.default.fileExists(atPath: url.path) else { throw HelperError.denied("Only apps agentSwarm staged can be opened") }
         let config = NSWorkspace.OpenConfiguration()
         config.createsNewApplicationInstance = true
         config.activates = true
         config.addsToRecentItems = false
         config.promptsUserIfNeeded = false
-        let url = URL(fileURLWithPath: path)
         let opened: NSRunningApplication = try blocking(seconds: 60) {
             try await NSWorkspace.shared.openApplication(at: url, configuration: config)
         }
-        return opened.processIdentifier
-    }
-
-    /// Through ws-app, which checks the path again and prints the app's pid.
-    private func launchAs(_ user: String, _ path: String) throws -> pid_t {
-        let out = try sudoWsApp(user, "open", path)
-        guard let pid = pid_t(out.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 1 else { throw HelperError.failed("ws-app did not say which process the app is") }
-        // Give it a moment to put up its window and come forward.
-        for _ in 0..<30 where !Windows.onScreen().contains(where: { $0.pid == pid }) { usleep(200_000) }
-        return pid
-    }
-
-    @discardableResult
-    private func sudoWsApp(_ args: String...) throws -> String {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
-        p.arguments = ["-n", Commands.wsApp] + args
-        let out = Pipe(), err = Pipe()
-        p.standardOutput = out
-        p.standardError = err
-        p.standardInput = FileHandle.nullDevice
-        try p.run()
-        p.waitUntilExit()
-        let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        guard p.terminationStatus == 0 else {
-            let why = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            throw HelperError.failed("Could not start the app as \(args.first ?? "?"): \(why.trimmingCharacters(in: .whitespacesAndNewlines))")
+        guard Sandbox.applies(to: opened.processIdentifier) else {
+            opened.forceTerminate()
+            throw HelperError.denied("The app was not running in the App Sandbox, so it was closed")
         }
-        return text
+        do {
+            if let previous = try arming.setTarget(opened.processIdentifier, session: token), previous != opened.processIdentifier { quit(previous) }
+        } catch {
+            // The session ended while the app was starting: it does not stay open.
+            opened.forceTerminate()
+            throw error
+        }
+        setLook(nil)
+        usleep(1_500_000)
+        return ["pid": Int(opened.processIdentifier), "name": opened.localizedName ?? ""].merging(settle(opened.processIdentifier)) { a, _ in a }
     }
 
     private func look(_ target: pid_t, _ req: [String: Any]) throws -> [String: Any] {
@@ -239,22 +196,19 @@ final class Commands {
 
     /// Typing and keys go to whatever has focus: it must be the app under test (unknown focus counts as not).
     private func frontmost(_ target: pid_t) throws {
-        guard isFront(target), Windows.focusedPid() == target else {
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == target, Windows.focusedPid() == target else {
             throw HelperError.denied("The app under test is not in front; bring it forward first (desktop_focus)")
         }
     }
 
-    /// In front: the frontmost app, or (for another user's app, which NSWorkspace may not report) the owner of the topmost window.
-    private func isFront(_ target: pid_t) -> Bool {
-        if let front = NSWorkspace.shared.frontmostApplication?.processIdentifier, front == target { return true }
-        return Windows.topmostAppWindow()?.pid == target
-    }
-
-    private func focus(_ target: pid_t) throws {
-        _ = NSRunningApplication(processIdentifier: target)?.activate(options: [.activateAllWindows])
-        AXUIElementSetAttributeValue(AXUIElementCreateApplication(target), kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+    private func focus(_ app: NSRunningApplication) throws {
+        _ = app.activate(options: [.activateAllWindows])
+        let ax = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetAttributeValue(ax, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
         usleep(300_000)
-        guard isFront(target) else { throw HelperError.failed("macOS did not bring the app forward; try again") }
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier else {
+            throw HelperError.failed("macOS did not bring the app forward; try again")
+        }
     }
 
     /// At the session's end the helper closes the app itself, whether or not swarmd says so.
@@ -276,18 +230,7 @@ final class Commands {
     }
 
     private func quit(_ pid: pid_t?) {
-        guard let pid else { return }
-        stop(pid, user: targetUser)
-        targetUser = nil
-    }
-
-    /// Yours: terminate (then force). A workstation user's: ws-app stops it (the helper may not signal it).
-    private func stop(_ pid: pid_t, user: String?) {
-        if let user {
-            do { try sudoWsApp(user, "stop", String(pid)) } catch { log("could not stop the app: \(error)") }
-            return
-        }
-        guard let app = NSRunningApplication(processIdentifier: pid) else { return }
+        guard let pid, let app = NSRunningApplication(processIdentifier: pid) else { return }
         app.terminate()
         DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
             if !app.isTerminated { app.forceTerminate() }
@@ -297,7 +240,7 @@ final class Commands {
     /// Lets the UI react before the agent looks again, and says whether the app is still in front.
     private func settle(_ target: pid_t, wait: Bool = true) -> [String: Any] {
         if wait { usleep(250_000) }
-        return ["inFront": isFront(target)]
+        return ["inFront": NSWorkspace.shared.frontmostApplication?.processIdentifier == target]
     }
 
     func status() -> [String: Any] {

@@ -1,5 +1,5 @@
 // R9.0: checks on the real Mac, with agentSwarm Desktop installed and granted. Opens an app on your screen.
-//   node scripts/probe-r9.ts <path to a built .app> [--as ws-N] [--watch]
+//   node scripts/probe-r9.ts <path to a built .app> [--watch]
 // Stages the app as swarmd would (renamed, App Sandbox, ad hoc signed), opens it in a short session, looks at it,
 // prints what it shows (the probe app prints what the sandbox let it do), and with --watch asks you to move the
 // mouse to check the pause. The session is always ended at the end.
@@ -26,9 +26,7 @@ if (!status.screenRecording || !status.accessibility) throw new Error("Grant Scr
 
 const work = mkdtempSync(join(tmpdir(), "probe-r9-"));
 execFileSync("/usr/bin/tar", ["-czf", join(work, "app.tgz"), "-C", dirname(app), basename(app)]);
-const as = process.argv.includes("--as") ? process.argv[process.argv.indexOf("--as") + 1] : undefined;
-const appsDir = "/Volumes/SwarmWS/desktop-apps";
-const staged = await stageApp({ archive: readFileSync(join(work, "app.tgz")), dir: join(appsDir, "probe-r9"), app: basename(app), projectSlug: "probe", network: false });
+const staged = await stageApp({ archive: readFileSync(join(work, "app.tgz")), dir: join(support, "apps", "probe-r9"), app: basename(app), projectSlug: "probe", network: false });
 rmSync(work, { recursive: true, force: true });
 console.log("staged:", staged);
 console.log(execFileSync("/usr/bin/codesign", ["-d", "--entitlements", "-", staged], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
@@ -37,7 +35,7 @@ const session = randomBytes(24).toString("hex");
 try {
   if (status.stoppedByUser) await helper.call({ cmd: "ack_stop" });
   await helper.call({ cmd: "arm", untilMs: Date.now() + 5 * 60_000, holder: "R9 probe", session });
-  const opened = await helper.call<{ pid: number; name: string; inFront: boolean }>({ cmd: "open", session, path: staged, ...(as ? { user: as } : {}) }, 60_000);
+  const opened = await helper.call<{ pid: number; name: string; inFront: boolean }>({ cmd: "open", session, path: staged }, 60_000);
   console.log("opened:", JSON.stringify(opened));
   // The probe app needs a while (its network attempt has to fail first).
   let look = await helper.call<{ image: string; width: number; height: number; ui: string }>({ cmd: "look", session }, 30_000);
@@ -73,7 +71,7 @@ try {
   }
 } finally {
   await helper.call({ cmd: "disarm", session }).catch(() => undefined);
-  rmSync(join(appsDir, "probe-r9"), { recursive: true, force: true });
+  rmSync(join(support, "apps", "probe-r9"), { recursive: true, force: true });
   rmSync(marker, { force: true });
   console.log("session ended");
 }

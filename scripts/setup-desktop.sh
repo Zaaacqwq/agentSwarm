@@ -16,8 +16,7 @@ PLIST="${HOME}/Library/LaunchAgents/${LABEL}.plist"
 # In your own Library: workstation users cannot reach your home directory.
 SUPPORT="${HOME}/Library/Application Support/agentSwarm"
 SOCKET="${SUPPORT}/desktop.sock"
-# Apps under test: staged by swarmd, run as workstation users (made by sudo zsh scripts/setup.sh).
-APPS="/Volumes/SwarmWS/desktop-apps"
+APPS="${SUPPORT}/apps"
 LOG="${HOME}/Library/Logs/agentswarm-desktop.log"
 
 say() { print -r -- "== $*"; }
@@ -28,7 +27,7 @@ die() { print -u2 -r -- "ERROR: $*"; exit 1; }
 if [[ "${1:-}" == "--uninstall" ]]; then
   launchctl bootout "gui/${UID}/${LABEL}" 2>/dev/null || true
   rm -f "$PLIST" "$SOCKET"
-  rm -rf "$APP"
+  rm -rf "$APP" "$APPS"
   say "Removed. You can also delete \"agentSwarm Desktop\" from Privacy & Security."
   exit 0
 fi
@@ -53,9 +52,8 @@ else
   say "agentSwarm Desktop is up to date"
 fi
 
-mkdir -p "${HOME}/Library/LaunchAgents" "${HOME}/Library/Logs" "$SUPPORT"
-chmod 0700 "$SUPPORT"
-[[ -d "$APPS" ]] || say "Run sudo zsh scripts/setup.sh --update-exec first: ${APPS} is missing"
+mkdir -p "${HOME}/Library/LaunchAgents" "${HOME}/Library/Logs" "$SUPPORT" "$APPS"
+chmod 0700 "$SUPPORT" "$APPS"
 cat > "$PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

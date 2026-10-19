@@ -45,8 +45,7 @@ async function main(): Promise<void> {
     // R9: agentSwarm Desktop (scripts/setup-desktop.sh) listens in your own Library.
     desktop: {
       helper: new SocketHelper(join(homedir(), "Library", "Application Support", "agentSwarm", "desktop.sock")),
-      // On the workstation volume: you write, workstation users read and run (scripts/setup.sh makes it).
-      appsDir: join("/Volumes", "SwarmWS", "desktop-apps"),
+      appsDir: join(homedir(), "Library", "Application Support", "agentSwarm", "apps"),
     },
     dashboardUrl: config.dashboardUrl ?? `http://${config.host === "::1" ? "[::1]" : config.host}:${config.port}`,
   });
