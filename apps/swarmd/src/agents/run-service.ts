@@ -380,8 +380,9 @@ export class RunService {
         if (this.active.size >= this.deps.maxConcurrent) break;
         if (run.needs?.length) {
           if (heavy >= this.deps.heavySlots) continue;
+          // Simulators and browsers stay up for the whole run; a desktop test is a small app you approved.
           pressure ??= this.deps.memoryPressure();
-          if (pressure > 1) {
+          if (pressure > 1 && run.needs.some((n) => n !== "desktop")) {
             this.retryOnMemory();
             continue;
           }
