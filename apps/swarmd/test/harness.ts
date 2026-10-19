@@ -17,6 +17,7 @@ import { type GitHubClient, type PullRequestState } from "../src/github/github-c
 import type { WebAccess } from "../src/web/web-access.ts";
 import { FakeDiscord } from "./fake-discord.ts";
 import type { RunLimits } from "../src/db/schema.ts";
+import { installFakeCli, type FakeCli } from "../../../packages/ws-exec/test/fake-cli.ts";
 
 const LOCAL_MAIN = fileURLToPath(new URL("../../../packages/ws-exec/src/local-main.ts", import.meta.url));
 export const ADMIN = { username: "admin", password: "correct horse battery staple" };
@@ -33,6 +34,8 @@ export interface Harness {
   /** What the fake GitHub says about pull request N (default open). */
   readonly prStates: Map<number, PullRequestState>;
   readonly discord: FakeDiscord;
+  /** Fake `claude` and `codex` the CLI runs use (R4). */
+  readonly cli: FakeCli;
   /** Pages web_fetch can read, by URL; web_search answers with `searchResult`. */
   readonly web: { pages: Map<string, string>; searches: string[]; searchResult: string };
   /** Scripted model replies, consumed one per model request. */
@@ -71,7 +74,7 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
   const volume = join(base, "SwarmWS");
   const layout: Layout = {
     volume, wsRoot: join(volume, "ws"), mirrors: join(volume, "mirrors"), inbox: join(volume, "inbox"),
-    swarmdData: join(volume, "swarmd"), nodeBin: process.execPath.replace(/\/node$/, ""), swarmdPort: 4318,
+    swarmdData: join(volume, "swarmd"), nodeBin: process.execPath.replace(/\/node$/, ""), swarmdPort: 4318, cliDir: join(base, "cli"),
   };
   const envs = new Map<string, ExecEnv>();
   for (const user of ["ws-1", "ws-2"]) {
@@ -83,6 +86,7 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
   mkdirSync(layout.swarmdData, { recursive: true, mode: 0o700 });
   writeFileSync(join(layout.wsRoot, "ws-2", "secret.txt"), "ws-2 only\n");
   const remote = makeRemote(base);
+  const cli = installFakeCli(layout.cliDir);
 
   const faux = createFauxCore({ models: [{ id: "fake-model", input: ["text", "image"] }] });
   const protectedBranches = new Set<string>();
@@ -158,7 +162,7 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
   };
 
   return {
-    base, layout, remote, services, app, db, protectedBranches, pullRequests, prStates, discord, web: webState,
+    base, layout, remote, services, app, db, protectedBranches, pullRequests, prStates, discord, cli, web: webState,
     script: (steps) => faux.setResponses(steps),
     scriptAgents(scripts) {
       const queues = new Map(Object.entries(scripts).map(([k, v]) => [k, [...v]]));

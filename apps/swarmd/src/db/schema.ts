@@ -68,6 +68,8 @@ export const workstations = sqliteTable("workstations", {
   lastCheckAt: integer("last_check_at"),
   lastError: text("last_error"),
   updatedAt: integer("updated_at").notNull(),
+  /** R4: when Codex was last confirmed signed in on this workstation (null: not signed in). */
+  codexLoginAt: integer("codex_login_at"),
 });
 
 export const agents = sqliteTable("agents", {
@@ -78,7 +80,7 @@ export const agents = sqliteTable("agents", {
   endpointId: text("endpoint_id").notNull().references(() => endpoints.id),
   modelId: text("model_id").notNull(),
   instructions: text("instructions").notNull(),
-  runtime: text("runtime", { enum: ["native"] }).notNull(),
+  runtime: text("runtime", { enum: ["native", "claude_code", "codex"] }).notNull(),
   // R2: the agent tree.
   parentId: text("parent_id"),
   depth: integer("depth").notNull(),
@@ -141,6 +143,11 @@ export const runs = sqliteTable("runs", {
   prState: text("pr_state", { enum: ["open", "merged", "closed"] }),
   /** When the tree's worktrees and branches were removed (after its pull request was merged or closed). */
   cleanedAt: integer("cleaned_at"),
+  // R4: CLI workers.
+  /** Claude Code's session id or Codex's thread id: follow-ups continue it. */
+  cliSession: text("cli_session"),
+  /** What a subscription run would have cost at API prices (as the CLI reports it); not charged to budgets. */
+  estimatedUsd: real("estimated_usd").notNull().default(0),
 }, (t) => [
   index("runs_agent_idx").on(t.agentId, t.createdAt),
   index("runs_status_idx").on(t.status),

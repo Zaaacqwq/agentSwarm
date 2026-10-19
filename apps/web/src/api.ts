@@ -31,3 +31,12 @@ export const ago = (ms: number | null) => {
   if (s < 86400) return `${Math.round(s / 3600)}h ago`;
   return new Date(ms).toLocaleDateString();
 };
+
+/** A future moment, relative: "in 40 min", "in 3 h", "in 2 days". */
+export const until = (ms: number) => {
+  const mins = Math.round((ms - Date.now()) / 60_000);
+  if (mins <= 0) return "now";
+  if (mins < 120) return `in ${mins} min`;
+  if (mins < 48 * 60) return `in ${Math.round(mins / 60)} h`;
+  return `in ${Math.round(mins / 1440)} days`;
+};

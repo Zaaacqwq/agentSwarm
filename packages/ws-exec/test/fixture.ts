@@ -15,7 +15,7 @@ export function fixture(sandbox = true): { env: ExecEnv; other: string; layout: 
     inbox: join(volume, "inbox"),
     swarmdData: join(volume, "swarmd"),
     nodeBin: process.execPath.replace(/\/node$/, ""),
-    swarmdPort: 4318,
+    swarmdPort: 4318, cliDir: join(base, "cli"),
   };
   const root = join(layout.wsRoot, "ws-1");
   const other = join(layout.wsRoot, "ws-2");

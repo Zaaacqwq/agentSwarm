@@ -14,6 +14,8 @@ export interface Layout {
   readonly nodeBin: string;
   /** swarmd's port on loopback; agent commands may not connect to it. */
   readonly swarmdPort: number;
+  /** Pinned CLI workers (R4): <cliDir>/claude/claude and <cliDir>/codex/bin/codex, installed by scripts/setup.sh. */
+  readonly cliDir: string;
 }
 
 export const PRODUCTION_LAYOUT: Layout = {
@@ -24,6 +26,7 @@ export const PRODUCTION_LAYOUT: Layout = {
   swarmdData: "/Volumes/SwarmWS/swarmd",
   nodeBin: "/usr/local/libexec/agentswarm/node/bin",
   swarmdPort: 4318,
+  cliDir: "/usr/local/libexec/agentswarm/cli",
 };
 
 export const WS_USER_PATTERN = /^ws-[0-9]{1,2}$/;

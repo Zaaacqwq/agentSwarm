@@ -4,10 +4,12 @@ import { OpError, type Request, type Response } from "./protocol.ts";
 import * as fs from "./ops/fs.ts";
 import { exec } from "./ops/exec.ts";
 import * as git from "./ops/git.ts";
+import * as cli from "./ops/cli.ts";
 
-export async function dispatch(env: ExecEnv, request: Request): Promise<Response> {
+/** `emit` receives the events of streaming ops (cli.*); callers write them as `{"event": …}` lines. */
+export async function dispatch(env: ExecEnv, request: Request, emit: cli.Emit = () => undefined): Promise<Response> {
   try {
-    return { ok: true, result: await run(env, request) };
+    return { ok: true, result: await run(env, request, emit) };
   } catch (error) {
     if (error instanceof OpError) return { ok: false, code: error.code, error: error.message };
     const message = error instanceof Error ? error.message : String(error);
@@ -40,7 +42,7 @@ function reap(env: ExecEnv): { reaped: number } {
   return { reaped };
 }
 
-function run(env: ExecEnv, r: Request): unknown {
+function run(env: ExecEnv, r: Request, emit: cli.Emit): unknown {
   switch (r.op) {
     case "info": return { user: env.user, root: env.root, sandbox: env.sandbox };
     case "fs.list": return fs.list(env, r.scope, r.path, r.depth);
@@ -55,6 +57,10 @@ function run(env: ExecEnv, r: Request): unknown {
     case "git.pushInbox": return git.pushInbox(env, r.scope, r.branch);
     case "git.remove": return git.remove(env, r.scope);
     case "git.merge": return git.merge(env, r.scope, r.branch, r.sha, r.message);
+    case "cli.run": return cli.run(env, r, emit);
+    case "cli.login": return cli.login(env, emit);
+    case "cli.logout": return cli.logout(env);
+    case "cli.status": return cli.status(env);
     case "reap": return reap(env);
     default: throw new OpError("bad_request", `Unknown op ${(r as { op?: unknown }).op}`);
   }

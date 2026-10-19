@@ -23,10 +23,10 @@ export class AgentService {
   }
 
   /** A one-run agent spawned by another agent: same project, the parent's endpoint unless told otherwise. */
-  createEphemeral(parent: AgentRow, input: { name: string; role: string; modelId?: string }, now = Date.now()): AgentRow {
+  createEphemeral(parent: AgentRow, input: { name: string; role: string; modelId?: string; runtime?: AgentRow["runtime"] }, now = Date.now()): AgentRow {
     const row: AgentRow = {
       id: newId("agt"), name: input.name, projectId: parent.projectId, role: input.role, endpointId: parent.endpointId,
-      modelId: input.modelId ?? parent.modelId, instructions: "", runtime: "native", parentId: parent.id, depth: parent.depth + 1,
+      modelId: input.modelId ?? parent.modelId, instructions: "", runtime: input.runtime ?? "native", parentId: parent.id, depth: parent.depth + 1,
       budgetUsd: null, ephemeral: true, createdAt: now,
     };
     this.db.insert(schema.agents).values(row).run();

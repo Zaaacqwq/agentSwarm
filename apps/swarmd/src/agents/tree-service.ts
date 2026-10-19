@@ -1,9 +1,10 @@
 import { createHash, randomBytes } from "node:crypto";
 import { BRANCH_PATTERN } from "@agentswarm/ws-exec";
 import { and, eq, inArray, desc } from "drizzle-orm";
-import type { RunReport } from "@agentswarm/contracts";
+import type { AgentRuntime, RunReport } from "@agentswarm/contracts";
 import type { Db } from "../db/client.ts";
 import { schema } from "../db/client.ts";
+import { CLI_DEFAULT_MODEL } from "../cli/cli-prompts.ts";
 import type { RunLimits } from "../db/schema.ts";
 import { newId } from "../crypto/tokens.ts";
 import { gitOk, type GitRunner } from "../github/git.ts";
@@ -44,6 +45,8 @@ export interface SpawnInput {
   readonly brief: string;
   readonly budgetUsd?: number;
   readonly modelId?: string;
+  /** R4: who does the work. CLI workers use your subscription, so they get no dollar budget. */
+  readonly runtime?: AgentRuntime;
 }
 
 const slug = (text: string, max: number) => text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, max).replace(/-+$/, "");
@@ -130,12 +133,14 @@ export class TreeService {
       if (fresh.kind !== "task") throw new TreeError("Reviewers cannot spawn agents");
       if (fresh.depth >= TREE_LIMITS.maxDepth) throw new TreeError(`Depth limit reached (${TREE_LIMITS.maxDepth}); do this part yourself`);
       this.checkLive(fresh);
-      const budget = this.carve(fresh, input.budgetUsd);
+      const runtime = input.runtime ?? "native";
+      const budget = runtime === "native" ? this.carve(fresh, input.budgetUsd) : 0;
       const parentAgent = agents.get(fresh.agentId);
       const name = input.name.trim().slice(0, 30) || "helper";
-      const agent = agents.createEphemeral(parentAgent, { name, role: input.role.trim().slice(0, 40) || "developer", ...(input.modelId ? { modelId: input.modelId } : {}) }, now);
+      const modelId = runtime === "native" ? input.modelId : input.modelId ?? CLI_DEFAULT_MODEL;
+      const agent = agents.createEphemeral(parentAgent, { name, role: input.role.trim().slice(0, 40) || "developer", runtime, ...(modelId ? { modelId } : {}) }, now);
       const node = this.uniqueNode(fresh, slug(name, 20) || "part");
-      const row = this.childRow(fresh, project, agent.id, name, input.brief, node, base, budget, now);
+      const row = this.childRow(fresh, project, agent.id, name, input.brief, node, base, budget, now, runtime);
       db.insert(schema.runs).values(row).run();
       return row;
     }, { behavior: "immediate" });
@@ -146,16 +151,16 @@ export class TreeService {
     if (live >= TREE_LIMITS.maxLivePerTree) throw new TreeError(`This tree already has ${live} unfinished agents (limit ${TREE_LIMITS.maxLivePerTree}); wait for some to finish`);
   }
 
-  private childRow(parent: RunRow, project: ProjectRow, agentId: string, name: string, brief: string, node: string, base: string | null, budget: number, now: number): RunRow {
+  private childRow(parent: RunRow, project: ProjectRow, agentId: string, name: string, brief: string, node: string, base: string | null, budget: number, now: number, runtime: AgentRuntime): RunRow {
     const parentAgent = this.deps.agents.get(parent.agentId);
     return {
       id: newId("run"), agentId, projectId: project.id, title: name, brief,
       branch: `swarm/${project.slug}/${parent.treeId}/${node}`, worktreeScope: `worktrees/${project.slug}/${parent.treeId}--${node}`,
-      workstationId: null, status: "queued", pendingMessage: this.childBrief(parentAgent.name, brief, base ?? project.defaultBranch),
+      workstationId: null, status: "queued", pendingMessage: this.childBrief(parentAgent.name, brief, base ?? project.defaultBranch, runtime),
       report: null, error: null, turns: 0, tokensIn: 0, tokensOut: 0, costUsd: 0, limits: this.deps.limits,
       createdAt: now, startedAt: null, endedAt: null, treeId: parent.treeId, parentRunId: parent.id, depth: parent.depth + 1,
       baseBranch: base, budgetUsd: budget, kind: "task", reviewOf: null, review: null, mergedAt: null, prUrl: null, waitingFor: null, reviewSha: null,
-      missionId: parent.missionId, prState: null, cleanedAt: null,
+      missionId: parent.missionId, prState: null, cleanedAt: null, cliSession: null, estimatedUsd: 0,
     };
   }
 
@@ -183,7 +188,7 @@ export class TreeService {
       createdAt: now, startedAt: null, endedAt: null, treeId: parent.treeId, parentRunId: parent.id, depth: parent.depth + 1,
       baseBranch: base, budgetUsd: this.carve(parent, TREE_LIMITS.reviewBudgetUsd, true), kind: "review", reviewOf: child.id,
       review: null, mergedAt: null, prUrl: null, waitingFor: null, reviewSha: sha,
-      missionId: parent.missionId, prState: null, cleanedAt: null,
+      missionId: parent.missionId, prState: null, cleanedAt: null, cliSession: null, estimatedUsd: 0,
     };
     db.insert(schema.runs).values(row).run();
     return row;
@@ -292,12 +297,11 @@ export class TreeService {
     return node;
   }
 
-  private childBrief(parentName: string, brief: string, base: string): string {
-    return [
-      brief.trim(),
-      "",
-      `(You are a sub-agent of ${parentName}. Your branch starts from ${base}. When the work is done: if you changed files, run the tests, git_commit and git_push; then report. Your parent only sees your report.)`,
-    ].join("\n");
+  private childBrief(parentName: string, brief: string, base: string, runtime: AgentRuntime): string {
+    const finish = runtime === "native"
+      ? "When the work is done: if you changed files, run the tests, git_commit and git_push; then report. Your parent only sees your report."
+      : "When the work is done: run the tests and commit with git; agentSwarm pushes your branch. Your parent only sees your final structured answer.";
+    return [brief.trim(), "", `(You are a sub-agent of ${parentName}. Your branch starts from ${base}. ${finish})`].join("\n");
   }
 
   private async inMirror(project: ProjectRow, branch: string | null): Promise<boolean> {

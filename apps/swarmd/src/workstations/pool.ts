@@ -4,7 +4,8 @@ import type { Db } from "../db/client.ts";
 import { schema } from "../db/client.ts";
 import type { WorkstationBackend } from "./backend.ts";
 
-type Row = typeof schema.workstations.$inferSelect;
+export type WorkstationRow = typeof schema.workstations.$inferSelect;
+type Row = WorkstationRow;
 
 /**
  * The pool of workstation users. A running run holds exactly one; its worktree lives there,
@@ -62,11 +63,14 @@ export class WorkstationPool {
     return this.db.select().from(schema.workstations).all().sort((a, b) => Number(a.id.slice(3)) - Number(b.id.slice(3))).map(view);
   }
 
-  /** Takes `preferred` (a run's own workstation) or any free one; null when none is free. */
-  acquire(runId: string, preferred: string | null, now = Date.now()): string | null {
+  /**
+   * Takes `preferred` (a run's own workstation) or any free one that `allowed` accepts (Codex runs only
+   * where Codex is signed in); null when none is free.
+   */
+  acquire(runId: string, preferred: string | null, now = Date.now(), allowed: (row: Row) => boolean = () => true): string | null {
     const id = this.db.transaction((tx) => {
       const free = tx.select().from(schema.workstations).where(eq(schema.workstations.status, "free")).all()
-        .sort((a, b) => Number(a.id.slice(3)) - Number(b.id.slice(3)));
+        .filter(allowed).sort((a, b) => Number(a.id.slice(3)) - Number(b.id.slice(3)));
       const pick = preferred ? free.find((w) => w.id === preferred) : free[0];
       if (!pick) return null;
       tx.update(schema.workstations).set({ status: "busy", runId, updatedAt: now }).where(eq(schema.workstations.id, pick.id)).run();
@@ -81,6 +85,19 @@ export class WorkstationPool {
     if (!row || row.runId !== runId) return;
     this.db.update(schema.workstations).set({ status: row.lastError ? "unhealthy" : "free", runId: null, updatedAt: now }).where(eq(schema.workstations.id, id)).run();
     this.emit(id);
+  }
+
+  /** Workstations where Codex is signed in. */
+  codexReady(): string[] {
+    return this.db.select().from(schema.workstations).all().filter((w) => w.codexLoginAt !== null && w.status !== "unhealthy").map((w) => w.id);
+  }
+
+  setCodexLogin(id: string, at: number | null): void {
+    this.db.update(schema.workstations).set({ codexLoginAt: at }).where(eq(schema.workstations.id, id)).run();
+  }
+
+  rows(): Row[] {
+    return this.db.select().from(schema.workstations).all().sort((a, b) => Number(a.id.slice(3)) - Number(b.id.slice(3)));
   }
 
   private row(id: string): Row | undefined {

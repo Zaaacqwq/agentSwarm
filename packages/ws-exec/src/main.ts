@@ -46,7 +46,11 @@ async function main(): Promise<Response> {
     return fail(`Bad request: ${(error as Error).message}`);
   }
   const env: ExecEnv = { user: me.username, home: me.home, root, layout: PRODUCTION_LAYOUT, sandbox: true, reapAll: true };
-  return dispatch(env, request);
+  return dispatch(env, request, writeEvent);
+}
+
+function writeEvent(event: unknown): void {
+  process.stdout.write(`${JSON.stringify({ event })}\n`);
 }
 
 function fail(error: string): Response {

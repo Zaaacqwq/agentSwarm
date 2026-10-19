@@ -6,7 +6,7 @@ import { space } from "./space.ts";
  * deny broad areas first, then re-allow exactly this workstation's own paths. Network is allowed
  * (decision 0004). This is the second wall; the first is the separate OS user on an owned volume.
  */
-export function sandboxProfile(env: ExecEnv, scope: string): string {
+export function sandboxProfile(env: ExecEnv, scope: string, extraWritable: readonly string[] = []): string {
   const { layout } = env;
   const q = (p: string) => JSON.stringify(p);
   const inbox = `${layout.inbox}/${env.user}.git`;
@@ -15,7 +15,8 @@ export function sandboxProfile(env: ExecEnv, scope: string): string {
   const mirror = project ? `${layout.mirrors}/${project}.git` : null;
   // Only this scope's own space: not the workstation's other worktrees, homes or temp dirs.
   const s = space(env, scope);
-  const writable = [s.dir, s.home, s.tmp, s.cache, inbox];
+  // Extra paths are given only by ws-exec itself (a CLI worker's sign-in), never by a request.
+  const writable = [s.dir, s.home, s.tmp, s.cache, inbox, ...extraWritable];
   return [
     "(version 1)",
     "(allow default)",
@@ -47,6 +48,6 @@ function ancestors(paths: readonly string[]): string[] {
   return [...out].sort();
 }
 
-export function sandboxed(env: ExecEnv, argv: readonly string[], scope: string): string[] {
-  return env.sandbox ? ["/usr/bin/sandbox-exec", "-p", sandboxProfile(env, scope), ...argv] : [...argv];
+export function sandboxed(env: ExecEnv, argv: readonly string[], scope: string, extraWritable: readonly string[] = []): string[] {
+  return env.sandbox ? ["/usr/bin/sandbox-exec", "-p", sandboxProfile(env, scope, extraWritable), ...argv] : [...argv];
 }
