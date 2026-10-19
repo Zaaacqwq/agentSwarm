@@ -29,7 +29,7 @@ export interface GitHubClient {
   /** A new, empty, private repository under the token's user (R5: an idea becomes a project). */
   createRepo(token: string, name: string, description: string): Promise<{ fullName: string }>;
   /** R10: only ever on your click on the dashboard (with a confirmation): agents never merge. */
-  mergePullRequest(token: string, fullName: string, number: number): Promise<void>;
+  mergePullRequest(token: string, fullName: string, number: number, sha?: string): Promise<void>;
   /** R10: a retried ticket's earlier pull request. */
   closePullRequest(token: string, fullName: string, number: number): Promise<void>;
 }
@@ -124,8 +124,9 @@ export class GitHubRest implements GitHubClient {
     return body.state === "open" ? "open" : "closed";
   }
 
-  async mergePullRequest(token: string, fullName: string, number: number): Promise<void> {
-    await this.call(token, "PUT", `/repos/${fullName}/pulls/${number}/merge`, {});
+  /** With `sha`, GitHub refuses (409) when the head is no longer the commit the person looked at. */
+  async mergePullRequest(token: string, fullName: string, number: number, sha?: string): Promise<void> {
+    await this.call(token, "PUT", `/repos/${fullName}/pulls/${number}/merge`, sha ? { sha } : {});
   }
 
   async closePullRequest(token: string, fullName: string, number: number): Promise<void> {

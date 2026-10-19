@@ -25,6 +25,8 @@ async function main(): Promise<void> {
   const config = loadConfig();
   const production = config.dataDir.startsWith(`${PRODUCTION_LAYOUT.volume}/`);
   mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
+  // R10: files you want to give a ticket without uploading; only you (and swarmd, as you) can write here.
+  mkdirSync(join(homedir(), "agentSwarm-inbox"), { recursive: true, mode: 0o700 });
   chmodSync(config.dataDir, 0o700);
 
   const secrets = await SecretBox.fromKeyFile(join(config.dataDir, "master.key"));

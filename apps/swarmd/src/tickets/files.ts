@@ -95,6 +95,12 @@ export class TicketFiles {
     rmSync(join(this.dir, ticketId, "files", row.file), { force: true });
   }
 
+  /** A deleted ticket's files, rows and bytes. */
+  removeAll(ticketId: string): void {
+    this.db.delete(schema.ticketFiles).where(eq(schema.ticketFiles.ticketId, ticketId)).run();
+    rmSync(join(this.dir, ticketId, "files"), { recursive: true, force: true });
+  }
+
   /** What goes into the worktree when the ticket starts: inputs/<name>. */
   forWorktree(ticketId: string): { path: string; base64: string }[] {
     return this.rows(ticketId).map((r) => ({ path: `inputs/${r.name}`, base64: readFileSync(join(this.dir, ticketId, "files", r.file)).toString("base64") }));

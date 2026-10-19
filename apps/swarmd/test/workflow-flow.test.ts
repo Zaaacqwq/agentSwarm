@@ -88,7 +88,10 @@ describe("R10: the three kinds of ticket", () => {
     await ticket(h, t.key, (x) => x.status === "review" && x.stage === "awaiting_merge" && saw.length >= 3, "back in review");
     assert.match(saw[2]!, /sent it back with these comments[\s\S]*1\. math\.js:1: Add a doc comment\./);
     // You merge it here; something went wrong on the way, so there is a short retrospective.
-    const merged = await h.api("POST", `/api/tickets/${t.key}/merge`, {}, cookie);
+    // Only what you looked at is merged: an old commit is refused.
+    const seenDiff = (await h.api("GET", `/api/tickets/${t.key}/diff`, undefined, cookie)).body as TicketDiffView;
+    assert.equal((await h.api("POST", `/api/tickets/${t.key}/merge`, { sha: diff.head }, cookie)).status, 409, "the change moved on since the first look");
+    const merged = await h.api("POST", `/api/tickets/${t.key}/merge`, { sha: seenDiff.head }, cookie);
     assert.equal(merged.status, 200, JSON.stringify(merged.body));
     assert.equal(h.prStates.get(1), "merged");
     const done = await ticket(h, t.key, (x) => x.status === "done", "done");
@@ -124,7 +127,8 @@ describe("R10: the three kinds of ticket", () => {
     await ticket(h, t.key, (x) => x.status === "review", "in review");
     assert.match(merges[0]!, /Merged swarm\/.*qa/, "screenshots only: no review needed");
     assert.match(merges[1]!, /has not been approved by a review/, "code still needs a review");
-    await h.api("POST", `/api/tickets/${t.key}/merge`, {}, cookie);
+    const head = ((await h.api("GET", `/api/tickets/${t.key}/diff`, undefined, cookie)).body as TicketDiffView).head;
+    assert.equal((await h.api("POST", `/api/tickets/${t.key}/merge`, { sha: head }, cookie)).status, 200);
     const done = await ticket(h, t.key, (x) => x.status === "done", "done at once");
     const m = h.services.missions.view(done.missionId!);
     assert.equal(m.stage, "done");
@@ -178,8 +182,9 @@ describe("R10: the three kinds of ticket", () => {
     const ready = await ticket(h, t.key, (x) => x.status === "review", "ready for you");
     assert.equal(ready.need, "decide");
     const localId = ready.projectId!;
-    const kept = await h.api("POST", `/api/tickets/${t.key}/keep`, {}, cookie);
-    assert.equal(kept.status, 200, JSON.stringify(kept.body));
+    // A double click keeps it once.
+    const [kept, again] = await Promise.all([h.api("POST", `/api/tickets/${t.key}/keep`, {}, cookie), h.api("POST", `/api/tickets/${t.key}/keep`, {}, cookie)]);
+    assert.deepEqual([kept.status, again.status].sort(), [200, 409], JSON.stringify([kept.body, again.body]));
     const done = await ticket(h, t.key, (x) => x.status === "done", "done");
     const project = h.services.projects.list().find((p) => p.githubRepo.startsWith("tester/csv-to-markdown"))!;
     assert.ok(project, JSON.stringify(h.services.projects.list().map((p) => p.githubRepo)));
@@ -187,6 +192,10 @@ describe("R10: the three kinds of ticket", () => {
     assert.match(execFileSync("/usr/bin/git", ["ls-tree", "-r", "--name-only", "main"], { cwd: h.services.projects.get(project.id).mirrorPath }).toString(), /index\.html/);
     assert.ok(!h.services.projects.list().some((p) => p.id === localId), "the local repository is archived");
     assert.ok(h.services.tickets.events(done.key).some((e) => e.kind === "kept"));
+    assert.equal(h.services.tickets.events(done.key).filter((e) => e.kind === "promoted").length, 1, "one repository");
+    // Its results are still there, now from the new project.
+    const outputs = (await h.api("GET", `/api/tickets/${t.key}/outputs`, undefined, cookie)).body as { path: string }[];
+    assert.ok(outputs.some((o) => o.path.endsWith("/results.md")), JSON.stringify(outputs));
   });
 
   test("quick tests: a result to read; finished results are cleaned up after a week; a dropped one at once", async () => {
@@ -207,9 +216,12 @@ describe("R10: the three kinds of ticket", () => {
     assert.equal((await h.api("POST", `/api/tickets/${a.key}/finish`, {}, cookie)).status, 200);
     await ticket(h, a.key, (x) => x.status === "done", "done");
     assert.ok(h.services.projects.list().some((p) => p.id === ra.projectId), "kept for a week");
+    assert.equal(h.services.tickets.view(a.key).keepable, true, "finished, it can still be kept until then");
     await h.services.tickets.sweepQuick(Date.now() + QUICK_KEEP_MS + 60_000);
     assert.ok(!h.services.projects.list().some((p) => p.id === ra.projectId), "cleaned up after a week");
     assert.ok(h.services.tickets.events(a.key).some((e) => e.kind === "cleaned"));
+    // A finished one can still be kept until it is cleaned up; then not.
+    assert.equal(h.services.tickets.view(a.key).keepable, false, "cleaned up");
     const b = await make("Try B");
     const rb = await ticket(h, b.key, (x) => x.status === "review", "a result for you");
     assert.equal((await h.api("POST", `/api/tickets/${b.key}/drop`, {}, cookie)).status, 200);

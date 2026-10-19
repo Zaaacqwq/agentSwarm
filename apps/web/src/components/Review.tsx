@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { DiffFileView, ReviewComment, TicketDiffView, TicketView } from "@agentswarm/contracts";
 import { api, when } from "../api.ts";
 import { useResource } from "../live.ts";
@@ -33,12 +33,22 @@ const keyOf = (path: string, line: number) => `${path}:${line}`;
 export function ReviewPanel({ t }: { t: TicketView }) {
   const waiting = t.status === "review";
   const diff = useResource<TicketDiffView>(t.missionId ? `/tickets/${t.key}/diff` : null);
-  // The lead pushes as it works: what you see follows each stage and each return to review.
-  useEffect(() => {
-    diff.reload();
-  }, [t.stage, t.status]);
   const [comments, setComments] = useState<Record<string, string>>({});
   const [general, setGeneral] = useState("");
+  // The lead pushes as it works: what you see follows each stage and each return to review. Comments on lines
+  // that may have moved are dropped once it is back with the lead.
+  const first = useRef(true);
+  useEffect(() => {
+    if (first.current) {
+      first.current = false;
+      return;
+    }
+    diff.reload();
+    if (t.status !== "review") {
+      setComments({});
+      setGeneral("");
+    }
+  }, [t.stage, t.status]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const filled: ReviewComment[] = [
@@ -72,12 +82,18 @@ export function ReviewPanel({ t }: { t: TicketView }) {
       {waiting && (
         <div className="review-actions" role="group" aria-label="Decide">
           {t.kind === "change" && t.prUrl && (
-            <button className="btn signal" disabled={busy} onClick={() => confirm(`Merge the pull request of ${t.key} into the default branch?`) && void act("merge")}>Merge</button>
+            <button className="btn signal" disabled={busy || !diff.data?.head} onClick={() => confirm(`Merge the pull request of ${t.key} into the default branch, as you see it here?`) && void act("merge", { sha: diff.data!.head })}>Merge</button>
           )}
-          {local && <Keep t={t} busy={busy} act={act} />}
+          {t.keepable && <Keep t={t} busy={busy} act={act} />}
           {t.kind === "quick" && <button className="btn ghost" disabled={busy} onClick={() => void act("finish")}>Done</button>}
           {local && <button className="btn ghost" disabled={busy} onClick={() => confirm(`Drop ${t.key}? Its local repository is removed.`) && void act("drop")}>Drop</button>}
           {t.prUrl && <a className="btn ghost" href={t.prUrl} target="_blank" rel="noreferrer">On GitHub ↗</a>}
+        </div>
+      )}
+      {!waiting && t.keepable && (
+        <div className="review-actions" role="group" aria-label="Keep it">
+          <Keep t={t} busy={busy} act={act} />
+          <span className="faint">Finished; its local repository is removed a week after it ended unless you keep it.</span>
         </div>
       )}
       {error && <p className="error" role="alert">{error}</p>}

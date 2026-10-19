@@ -4,7 +4,7 @@ import cookie from "@fastify/cookie";
 import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import {
-  CreateAgent, CreateEndpoint, CreateMission, CreateProject, CreateRun, Credentials, MissionBudget, MissionReply, RunMessage, SetCli, SetDiscord, SetGitHubToken, SetProjectProfile, PutProjectFile, CreateLocalProject, MachineSettings, ModelSettings, CreateTicket, UpdateTicket, MoveTicket, TicketSettings, PromoteTicket, SendBack, RetryTicket, FromInbox, CreateLesson, UpdateLesson, SetHandbook, DecideProposal, ROLES, type Role, type Me,
+  CreateAgent, CreateEndpoint, CreateMission, CreateProject, CreateRun, Credentials, MissionBudget, MissionReply, RunMessage, SetCli, SetDiscord, SetGitHubToken, SetProjectProfile, PutProjectFile, CreateLocalProject, MachineSettings, ModelSettings, CreateTicket, UpdateTicket, MoveTicket, TicketSettings, PromoteTicket, SendBack, RetryTicket, FromInbox, MergeTicket, CreateLesson, UpdateLesson, SetHandbook, DecideProposal, ROLES, type Role, type Me,
 } from "@agentswarm/contracts";
 import type { Services } from "../app/services.ts";
 import { RateLimiter } from "../auth/rate-limit.ts";
@@ -227,7 +227,7 @@ export async function buildApp(o: AppOptions): Promise<FastifyInstance> {
   // R10: look at the change, send it back with comments, merge, retry; keep, finish or drop a local result.
   app.get<{ Params: { key: string } }>("/api/tickets/:key/diff", async (req) => s.tickets.diff(req.params.key));
   app.post<{ Params: { key: string }; Body: SendBack }>("/api/tickets/:key/send-back", { schema: { body: SendBack } }, async (req) => s.tickets.sendBack(actor(req), req.params.key, req.body.comments));
-  app.post<{ Params: { key: string } }>("/api/tickets/:key/merge", async (req) => s.tickets.merge(actor(req), req.params.key));
+  app.post<{ Params: { key: string }; Body: MergeTicket }>("/api/tickets/:key/merge", { schema: { body: MergeTicket } }, async (req) => s.tickets.merge(actor(req), req.params.key, req.body.sha));
   app.post<{ Params: { key: string }; Body: RetryTicket }>("/api/tickets/:key/retry", { schema: { body: RetryTicket } }, async (req) => s.tickets.retry(actor(req), req.params.key, req.body));
   app.post<{ Params: { key: string }; Body: PromoteTicket }>("/api/tickets/:key/keep", { schema: { body: PromoteTicket } }, async (req) => s.tickets.keep(actor(req), req.params.key, req.body.repo ?? null));
   app.post<{ Params: { key: string } }>("/api/tickets/:key/finish", async (req) => s.tickets.finishTicket(actor(req), req.params.key));

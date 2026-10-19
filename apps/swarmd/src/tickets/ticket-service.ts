@@ -75,7 +75,8 @@ export const keyOf = (t: Pick<TicketRow, "prefix" | "number">) => `${t.prefix}-$
 export class TicketService {
   private readonly deps: TicketDeps;
   private pumping: Promise<void> = Promise.resolve();
-  private readonly promoting = new Set<string>();
+  /** Tickets with one of your actions under way (promote, merge, retry, keep, drop): one at a time. */
+  private readonly busy = new Set<string>();
   /** Tickets between "start" and their mission existing: nothing else may change them meanwhile. */
   private readonly starting = new Set<string>();
   /** The last status and need seen per mission ticket, to notify once per change. */
@@ -255,7 +256,10 @@ export class TicketService {
   remove(actor: Actor, idOrKey: string, now = Date.now()): void {
     const t = this.row(idOrKey);
     this.notStarted(t, "cancel it instead, so its record stays");
+    const waiting = this.deps.db.select().from(schema.tickets).all().filter((r) => r.blockedBy?.includes(t.id));
+    if (waiting.length) throw conflict(`${waiting.map((r) => keyOf(r)).join(", ")} ${waiting.length === 1 ? "waits" : "wait"} for ${keyOf(t)}: take it out of "Waits for" there first, or cancel it`);
     this.deps.attachments.removeAll(t.id);
+    this.deps.files?.removeAll(t.id);
     this.deps.db.delete(schema.tickets).where(eq(schema.tickets.id, t.id)).run();
     audit(this.deps.db, actor, "ticket.delete", t.id, { key: keyOf(t) }, now);
     this.deps.bus.publish({ kind: "ticket_removed", id: t.id });
@@ -314,13 +318,22 @@ export class TicketService {
   async promote(actor: Actor, idOrKey: string, givenRepo: string | null, now = Date.now()): Promise<TicketView> {
     const t = this.row(idOrKey);
     // A double click must not create two repositories.
-    if (this.promoting.has(t.id)) throw conflict(`${keyOf(t)} is becoming a project already`);
-    this.promoting.add(t.id);
+    return this.exclusive(t, () => this.promoteOnce(actor, this.row(t.id), givenRepo, now));
+  }
+
+  /** One action at a time per ticket: a double click, a second tab or a retried request must not run it twice. */
+  private async exclusive<T>(t: TicketRow, fn: () => Promise<T> | T): Promise<T> {
+    this.notBusy(t);
+    this.busy.add(t.id);
     try {
-      return await this.promoteOnce(actor, t, givenRepo, now);
+      return await fn();
     } finally {
-      this.promoting.delete(t.id);
+      this.busy.delete(t.id);
     }
+  }
+
+  private notBusy(t: TicketRow): void {
+    if (this.busy.has(t.id)) throw conflict(`${keyOf(t)} is still busy with your last action; wait a moment`);
   }
 
   /**
@@ -334,6 +347,9 @@ export class TicketService {
     // An agent wrote the branch: GitHub Actions workflows in it would run with the repository's rights.
     const workflows = await gitOk(git, ["ls-tree", "-r", "--name-only", `refs/heads/${root.branch}`, "--", ".github/workflows"], { cwd: local.mirrorPath, timeoutMs: 60_000 });
     if (workflows.trim()) throw conflict(`What it produced contains GitHub Actions workflows (${workflows.trim().split("\n").slice(0, 3).join(", ")}): remove them first, or start the project yourself`);
+    // Your files stay yours: they are never meant to be committed.
+    const inputs = await gitOk(git, ["ls-tree", "--name-only", `refs/heads/${root.branch}`, "--", "inputs"], { cwd: local.mirrorPath, timeoutMs: 60_000 });
+    if (inputs.trim()) throw conflict("Your files (inputs/) were committed: send it back to have them removed first");
     const token = await github.token();
     let repo = givenRepo ?? (this.events(t.id).find((e) => e.kind === "promoted" && e.data.repo)?.data.repo as string | undefined) ?? null;
     if (!repo) {
@@ -661,34 +677,45 @@ export class TicketService {
 
   /** What the work produced: outputs/ and the results document, on its branch (in the mirror). */
   async outputs(idOrKey: string): Promise<OutputFileView[]> {
-    const { m } = this.live(idOrKey);
-    const project = this.deps.projects.get(m.projectId);
-    const root = this.deps.tree.run(m.rootRunId);
-    const out = await gitOk(this.deps.git, ["ls-tree", "-r", "-l", "-z", `refs/heads/${root.branch}`, "--", "outputs", `${m.docsPath}/results.md`], { cwd: project.mirrorPath, timeoutMs: 60_000 }).catch(() => "");
+    const { t, m } = this.live(idOrKey);
+    const { mirror, ref } = this.source(t, m);
+    const out = await gitOk(this.deps.git, ["ls-tree", "-r", "-l", "-z", ref, "--", "outputs", `${m.docsPath}/results.md`], { cwd: mirror, timeoutMs: 60_000 }).catch(() => "");
+    // Plain files only: a link an agent committed would point at your files once unzipped.
     return out.split("\0").filter(Boolean).flatMap((entry) => {
-      const m2 = /^\d+ blob [0-9a-f]+\s+(\d+)\t(.+)$/.exec(entry);
+      const m2 = /^100(?:644|755) blob [0-9a-f]+\s+(\d+)\t(.+)$/.exec(entry);
       return m2 ? [{ path: m2[2]!, bytes: Number(m2[1]) }] : [];
     }).slice(0, 500);
+  }
+
+  /**
+   * Where a ticket's work is: its branch in the local or project mirror; once kept, the new project's main (the local
+   * repository is gone by then).
+   */
+  private source(t: TicketRow, m: ReturnType<MissionService["row"]>): { mirror: string; ref: string; kept: string | null } {
+    const kept = this.events(t.id).find((e) => e.kind === "kept" && e.data.project);
+    if (kept) {
+      const p = this.deps.projects.get(String(kept.data.project));
+      return { mirror: p.mirrorPath, ref: `refs/heads/${p.defaultBranch}`, kept: p.githubRepo };
+    }
+    return { mirror: this.deps.projects.get(m.projectId).mirrorPath, ref: `refs/heads/${this.deps.tree.run(m.rootRunId).branch}`, kept: null };
   }
 
   /** One produced file, as it is on the branch; only paths the listing shows. */
   async output(idOrKey: string, path: string): Promise<Buffer> {
     const files = await this.outputs(idOrKey);
     if (!files.some((f) => f.path === path)) throw notFound("No such output");
-    const { m } = this.live(idOrKey);
-    const project = this.deps.projects.get(m.projectId);
-    const root = this.deps.tree.run(m.rootRunId);
-    return execFileBuffer("/usr/bin/git", ["show", `refs/heads/${root.branch}:${path}`], project.mirrorPath);
+    const { t, m } = this.live(idOrKey);
+    const { mirror, ref } = this.source(t, m);
+    return execFileBuffer("/usr/bin/git", ["show", `${ref}:${path}`], mirror);
   }
 
   /** Everything it produced, as one zip. */
   async outputsZip(idOrKey: string): Promise<Buffer> {
     const files = await this.outputs(idOrKey);
     if (!files.length) throw notFound("It has produced no files");
-    const { m } = this.live(idOrKey);
-    const project = this.deps.projects.get(m.projectId);
-    const root = this.deps.tree.run(m.rootRunId);
-    return execFileBuffer("/usr/bin/git", ["--literal-pathspecs", "archive", "--format=zip", `refs/heads/${root.branch}`, "--", ...files.map((f) => f.path)], project.mirrorPath);
+    const { t, m } = this.live(idOrKey);
+    const { mirror, ref } = this.source(t, m);
+    return execFileBuffer("/usr/bin/git", ["--literal-pathspecs", "archive", "--format=zip", ref, "--", ...files.map((f) => f.path)], mirror);
   }
 
   // ---- R10: review, send back, merge, retry, keep ------------------------------------------
@@ -701,6 +728,7 @@ export class TicketService {
 
   /** Your comments on lines of the change (or on the whole), sent to the lead as one message. */
   sendBack(actor: Actor, idOrKey: string, comments: readonly ReviewComment[], now = Date.now()): TicketView {
+    this.notBusy(this.row(idOrKey));
     const { t, m } = this.live(idOrKey);
     const text = comments.map((c, i) => `${i + 1}. ${c.path ? `${c.path}${c.line ? `:${c.line}` : ""}: ` : ""}${c.text.trim()}`).join("\n");
     this.deps.missions.sendBack(actor, m.id, text);
@@ -710,18 +738,25 @@ export class TicketService {
   }
 
   /** Your click: merges the pull request on GitHub (agents never merge). The mission then ends as merged. */
-  async merge(actor: Actor, idOrKey: string): Promise<TicketView> {
+  async merge(actor: Actor, idOrKey: string, sha: string): Promise<TicketView> {
+    return this.exclusive(this.row(idOrKey), () => this.mergeOnce(actor, idOrKey, sha));
+  }
+
+  /** `sha`: the commit you looked at. Anything pushed since is not merged unseen: you look again. */
+  private async mergeOnce(actor: Actor, idOrKey: string, sha: string): Promise<TicketView> {
     const { t, m } = this.live(idOrKey);
     if (m.stage !== "awaiting_merge") throw conflict("There is no pull request waiting for you");
     const root = this.deps.tree.run(m.rootRunId);
     const pr = root.prUrl ? parsePullRequestUrl(root.prUrl) : null;
     if (!pr) throw conflict("This ticket has no pull request");
+    const head = (await gitOk(this.deps.git, ["rev-parse", "--verify", `refs/heads/${root.branch}^{commit}`], { cwd: this.deps.projects.get(m.projectId).mirrorPath, timeoutMs: 30_000 })).trim();
+    if (head !== sha) throw conflict("The change has moved on since you looked at it: look at it again, then merge");
     try {
-      await this.deps.github.client.mergePullRequest(await this.deps.github.token(), pr.repo, pr.number);
+      await this.deps.github.client.mergePullRequest(await this.deps.github.token(), pr.repo, pr.number, sha);
     } catch (error) {
       throw conflict(`GitHub did not merge it (${(error as Error).message.slice(0, 200)}). Merge it on GitHub instead: ${root.prUrl}`);
     }
-    audit(this.deps.db, actor, "ticket.merge", t.id, { pr: root.prUrl });
+    audit(this.deps.db, actor, "ticket.merge", t.id, { pr: root.prUrl, sha });
     this.deps.db.update(schema.runs).set({ prState: "merged" }).where(eq(schema.runs.id, root.id)).run();
     await this.deps.missions.pullRequestSettled(this.deps.tree.run(root.id), "merged");
     return this.view(t.id);
@@ -732,17 +767,27 @@ export class TicketService {
    * ticket's record; the new lead may write the code through Claude Code or Codex this time.
    */
   async retry(actor: Actor, idOrKey: string, input: RetryTicket, now = Date.now()): Promise<TicketView> {
+    return this.exclusive(this.row(idOrKey), () => this.retryOnce(actor, idOrKey, input, now));
+  }
+
+  private async retryOnce(actor: Actor, idOrKey: string, input: RetryTicket, now: number): Promise<TicketView> {
     const { t, m } = this.live(idOrKey);
     if (t.kind !== "change") throw conflict("Only a change to a project is retried");
     const root = this.deps.tree.run(m.rootRunId);
-    const pr = root.prUrl && root.prState !== "merged" ? parsePullRequestUrl(root.prUrl) : null;
-    if (root.prState === "merged") throw conflict("Its pull request is already merged");
-    if (pr) await this.deps.github.client.closePullRequest(await this.deps.github.token(), pr.repo, pr.number).catch((e: Error) => this.deps.log("could not close the pull request", { pr: root.prUrl, error: e.message }));
-    if (m.stage !== "done" && m.stage !== "cancelled") this.deps.missions.cancel(actor, m.id);
+    if (root.prState === "merged" || m.stage === "done") throw conflict("Its pull request is already merged");
+    const pr = root.prUrl ? parsePullRequestUrl(root.prUrl) : null;
+    if (pr) {
+      const token = await this.deps.github.token();
+      // Merged on GitHub a moment ago (before agentSwarm noticed): nothing to retry.
+      if (await this.deps.github.client.pullRequestState(token, pr.repo, pr.number).catch(() => null) === "merged") throw conflict("Its pull request was merged on GitHub; there is nothing to retry");
+      await this.deps.github.client.closePullRequest(token, pr.repo, pr.number).catch((e: Error) => this.deps.log("could not close the pull request", { pr: root.prUrl, error: e.message }));
+    }
     const worker = input.worker ?? "native";
+    // The ticket lets go of the attempt first: stopping it is then not "the ticket was stopped".
+    this.deps.db.update(schema.tickets).set({ missionId: null, status: "todo", updatedAt: now, endedAt: null }).where(eq(schema.tickets.id, t.id)).run();
+    if (m.stage !== "cancelled") this.deps.missions.cancel(actor, m.id);
     this.event(t.id, actor, "retried", { missionId: m.id, prUrl: root.prUrl, worker, note: input.note ?? "" }, now);
     audit(this.deps.db, actor, "ticket.retry", t.id, { worker });
-    this.deps.db.update(schema.tickets).set({ missionId: null, status: "todo", updatedAt: now, endedAt: null }).where(eq(schema.tickets.id, t.id)).run();
     const extra = [
       "This is a new attempt: an earlier one was stopped by the person. Start from the default branch; do not reuse its branch.",
       ...(worker !== "native" ? [`Write the code through a ${worker === "claude_code" ? "Claude Code" : "Codex"} sub-agent this time (spawn_agent with runtime "${worker}", a complete brief), then review and merge it.`] : []),
@@ -759,8 +804,18 @@ export class TicketService {
 
   /** A new project or a quick test you keep: it becomes a GitHub repository and a project, with the settings its lead suggested. */
   async keep(actor: Actor, idOrKey: string, givenRepo: string | null = null): Promise<TicketView> {
+    return this.exclusive(this.row(idOrKey), () => this.keepOnce(actor, idOrKey, givenRepo));
+  }
+
+  /** A new project or quick test waiting for you, or a finished quick test not cleaned up yet. */
+  private keepable(t: TicketRow, stage: string, events = this.events(t.id)): boolean {
+    if (!LOCAL_R10.has(t.kind) || events.some((e) => e.kind === "kept" || e.kind === "dropped" || e.kind === "cleaned")) return false;
+    return stage === "review" || (t.kind === "quick" && stage === "done");
+  }
+
+  private async keepOnce(actor: Actor, idOrKey: string, givenRepo: string | null): Promise<TicketView> {
     const { t, m } = this.live(idOrKey);
-    if (!LOCAL_R10.has(t.kind) || m.stage !== "review") throw conflict("Only a new project or a quick test waiting for you is kept");
+    if (!this.keepable(t, m.stage)) throw conflict("Only a new project or a quick test that is still here is kept");
     const project = await this.toGitHub(actor, t, m, givenRepo);
     const profile = m.options?.profile;
     // Only into a project without settings of its own (an existing repository you named keeps yours).
@@ -771,9 +826,9 @@ export class TicketService {
         this.deps.log("suggested profile not applied", { ticket: keyOf(t), error: (error as Error).message });
       }
     }
-    this.deps.missions.finish(actor, m.id);
-    this.deps.projects.archiveLocal(actor, m.projectId);
+    if (this.deps.missions.row(m.id).stage === "review") this.deps.missions.finish(actor, m.id);
     this.event(t.id, actor, "kept", { repo: project.githubRepo, project: project.id });
+    this.deps.projects.archiveLocal(actor, m.projectId);
     audit(this.deps.db, actor, "ticket.keep", t.id, { repo: project.githubRepo });
     this.emit(t.id);
     return this.view(t.id);
@@ -782,6 +837,7 @@ export class TicketService {
   /** A quick test's result you are done with (its repository is cleaned up after a week). */
   finishTicket(actor: Actor, idOrKey: string): TicketView {
     const { t, m } = this.live(idOrKey);
+    this.notBusy(t);
     if (t.kind !== "quick") throw conflict("Only a quick test is finished this way");
     this.deps.missions.finish(actor, m.id);
     return this.view(t.id);
@@ -790,7 +846,9 @@ export class TicketService {
   /** A new project or a quick test you drop: it stops, and its local repository is removed. */
   drop(actor: Actor, idOrKey: string, now = Date.now()): TicketView {
     const { t, m } = this.live(idOrKey);
+    this.notBusy(t);
     if (!LOCAL_R10.has(t.kind)) throw conflict("Only a new project or a quick test is dropped; stop a change instead");
+    if (this.events(t.id).some((e) => e.kind === "kept" || e.kind === "dropped" || e.kind === "cleaned")) throw conflict(`${keyOf(t)} has been kept or removed already`);
     if (m.stage !== "done" && m.stage !== "cancelled") this.deps.missions.cancel(actor, m.id);
     this.deps.projects.archiveLocal(actor, m.projectId, now);
     this.event(t.id, actor, "dropped", {}, now);
@@ -800,7 +858,9 @@ export class TicketService {
 
   /** The change its mission made: its branch against the branch it started from, file by file (from the mirror). */
   async diff(idOrKey: string): Promise<TicketDiffView> {
-    const { m } = this.live(idOrKey);
+    const { t, m } = this.live(idOrKey);
+    const kept = this.source(t, m).kept;
+    if (kept) throw conflict(`Kept as ${kept}: the code is there`);
     const project = this.deps.projects.get(m.projectId);
     const root = this.deps.tree.run(m.rootRunId);
     const base = root.baseBranch ?? project.defaultBranch;
@@ -808,7 +868,8 @@ export class TicketService {
     const opts = { cwd: project.mirrorPath, timeoutMs: 60_000 };
     const numstat = await gitOk(this.deps.git, ["diff", "--no-color", "--numstat", "-M", ...range], opts).catch(() => "");
     const patch = await gitOk(this.deps.git, ["diff", "--no-color", "-M", "--unified=3", ...range], opts).catch(() => "");
-    return { base, branch: root.branch, ...parseDiff(numstat, patch) };
+    const head = (await gitOk(this.deps.git, ["rev-parse", "--verify", `refs/heads/${root.branch}^{commit}`], opts).catch(() => "")).trim();
+    return { base, branch: root.branch, head, ...parseDiff(numstat, patch) };
   }
 
   /**
@@ -818,19 +879,28 @@ export class TicketService {
   async sweepQuick(now = Date.now()): Promise<void> {
     const rows = this.deps.db.select().from(schema.tickets).where(and(eq(schema.tickets.kind, "quick"), inArray(schema.tickets.status, ["review", "done"]), isNotNull(schema.tickets.missionId))).all();
     for (const t of rows) {
-      const events = this.events(t.id);
-      if (events.some((e) => e.kind === "kept" || e.kind === "cleaned" || e.kind === "dropped")) continue;
-      const m = this.deps.missions.row(t.missionId!);
-      const since = (m.stage === "review" ? m.updatedAt : t.endedAt) ?? t.updatedAt;
-      if (now - since >= QUICK_KEEP_MS) {
-        if (m.stage === "review") this.deps.missions.finish(SYSTEM, m.id);
-        this.deps.projects.archiveLocal(SYSTEM, m.projectId, now);
-        this.event(t.id, SYSTEM, "cleaned", {}, now);
-        this.emit(t.id);
-      } else if (now - since >= QUICK_KEEP_MS - DAY_MS && !events.some((e) => e.kind === "status" && e.data.warned)) {
-        this.event(t.id, SYSTEM, "status", { warned: true }, now);
-        this.deps.notify?.(this.view(t.id), "will be cleaned up tomorrow (its local repository is removed); keep it as a project to save it");
+      // One that fails (and is tried again next hour) must not hold back the others.
+      try {
+        this.sweepOne(t, now);
+      } catch (error) {
+        this.deps.log("quick test not cleaned up", { ticket: keyOf(t), error: (error as Error).message });
       }
+    }
+  }
+
+  private sweepOne(t: TicketRow, now: number): void {
+    const events = this.events(t.id);
+    if (this.busy.has(t.id) || events.some((e) => e.kind === "kept" || e.kind === "cleaned" || e.kind === "dropped")) return;
+    const m = this.deps.missions.row(t.missionId!);
+    const since = (m.stage === "review" ? m.updatedAt : t.endedAt) ?? t.updatedAt;
+    if (now - since >= QUICK_KEEP_MS) {
+      if (m.stage === "review") this.deps.missions.finish(SYSTEM, m.id);
+      this.deps.projects.archiveLocal(SYSTEM, m.projectId, now);
+      this.event(t.id, SYSTEM, "cleaned", {}, now);
+      this.emit(t.id);
+    } else if (now - since >= QUICK_KEEP_MS - DAY_MS && !events.some((e) => e.kind === "status" && e.data.warned)) {
+      this.event(t.id, SYSTEM, "status", { warned: true }, now);
+      this.deps.notify?.(this.view(t.id), "will be cleaned up tomorrow (its local repository is removed); keep it as a project to save it");
     }
   }
 
@@ -872,6 +942,7 @@ export class TicketService {
       working, queuePosition: order.get(t.id) ?? null,
       files: this.deps.files?.list(t.id) ?? [],
       blockedBy: this.keysOf(t.blockedBy ?? []), blocked: this.isBlocked(t),
+      keepable: Boolean(mission) && (t.status === "review" || t.status === "done") && this.keepable(t, mission!.stage),
     };
   }
 

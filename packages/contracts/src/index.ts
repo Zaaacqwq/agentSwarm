@@ -522,6 +522,8 @@ export interface TicketView {
   /** R10: the keys of tickets that must be done first, and whether one of them is not done yet. */
   readonly blockedBy: readonly string[];
   readonly blocked: boolean;
+  /** R10: a new project or quick test that can still become a GitHub repository (Keep). */
+  readonly keepable: boolean;
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly startedAt: number | null;
@@ -759,10 +761,16 @@ export const RetryTicket = Type.Object({
 });
 export type RetryTicket = Static<typeof RetryTicket>;
 
+/** R10: merge the pull request, as it was when you looked at it. */
+export const MergeTicket = Type.Object({ sha: Type.String({ pattern: "^[0-9a-f]{40}$" }) });
+export type MergeTicket = Static<typeof MergeTicket>;
+
 /** The change a ticket's mission made, from its branch against where it started. */
 export interface TicketDiffView {
   readonly base: string;
   readonly branch: string;
+  /** The commit shown: Merge sends it back, so only what you looked at is merged. */
+  readonly head: string;
   readonly files: readonly DiffFileView[];
   /** Files left out: the change was too big to show whole. */
   readonly truncated: boolean;

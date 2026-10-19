@@ -127,6 +127,7 @@ describe("R10: tickets that wait for others", () => {
     assert.deepEqual([b.blockedBy, b.blocked], [[a.key], true]);
     assert.equal((await h.api("PATCH", `/api/tickets/${a.key}`, { blockedBy: [b.key] }, cookie)).status, 400, "no circles");
     assert.equal((await h.api("PATCH", `/api/tickets/${b.key}`, { blockedBy: [b.key] }, cookie)).status, 400, "not itself");
+    assert.equal((await h.api("DELETE", `/api/tickets/${a.key}`, undefined, cookie)).status, 409, "deleting it would let B start unasked");
 
     await h.api("POST", `/api/tickets/${a.key}/move`, { status: "todo" }, cookie);
     await ticket(h, a.key, (x) => x.status === "review", "A in review");
