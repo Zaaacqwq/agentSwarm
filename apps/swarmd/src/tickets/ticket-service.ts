@@ -1,6 +1,7 @@
 import { and, asc, desc, eq, inArray, isNotNull, isNull, max } from "drizzle-orm";
 import { randomBytes } from "node:crypto";
-import type { CreateTicket, LiveMessage, MissionView, MoveTicket, TicketEventView, TicketNeed, TicketSettings, TicketStatus, TicketView, UpdateTicket } from "@agentswarm/contracts";
+import type { CreateTicket, DiffFileView, LiveMessage, MissionView, MoveTicket, ProjectView, RetryTicket, ReviewComment, TicketAttemptView, TicketDiffView, TicketEventView, TicketNeed, TicketSettings, TicketStatus, TicketView, UpdateTicket } from "@agentswarm/contracts";
+import { parsePullRequestUrl } from "../github/github-client.ts";
 import { audit } from "../audit.ts";
 import type { Db } from "../db/client.ts";
 import { schema } from "../db/client.ts";
@@ -25,8 +26,17 @@ const COUNTERS_ROW = "ticket_counters";
 const DEFAULT_MAX_ACTIVE = 3;
 /** Yours to set; the others follow the ticket's mission. */
 const YOURS = new Set<TicketStatus>(["backlog", "todo", "canceled"]);
+/** Statuses that hold one of the slots: a pull request or result waiting for your review (R10) does not. */
 const OPEN = new Set<TicketStatus>(["in_progress", "needs_you"]);
-const SPACE_PREFIX = { sandbox: "SBX", ideas: "IDEA" } as const;
+/** Statuses in which a ticket may wait for you. */
+const LIVE = new Set<TicketStatus>(["in_progress", "needs_you", "review"]);
+const SPACE_PREFIX = { sandbox: "SBX", ideas: "IDEA", newproject: "NEW" } as const;
+/** R10: a quick test's repository is cleaned up this long after it finished (a reminder a day before). */
+export const QUICK_KEEP_MS = 7 * 24 * 3600_000;
+const DAY_MS = 24 * 3600_000;
+/** R10 kinds that live in a local repository until you keep them. */
+const LOCAL_R10 = new Set<TicketRow["kind"]>(["newproject", "quick"]);
+const SANDBOX_KINDS = new Set<TicketRow["kind"]>(["newproject", "quick", "experiment"]);
 /** At most this many follow-ups a lead may file from one ticket (file_ticket). */
 const MAX_FILED = 5;
 /** Around text agents wrote, in what a lead is given. */
@@ -135,6 +145,7 @@ export class TicketService {
         id: newId(), prefix, number, space: input.space, projectId, title: input.title.trim(), description: input.description.trim(), kind: input.kind,
         priority: input.priority ?? 0, status, position: this.topOf(status), missionId: null, createdBy: from?.by ?? "you", fromTicketId: from?.ticketId ?? null,
         commitAttachments: input.commitAttachments ?? true, external, createdAt: now, updatedAt: now, startedAt: null, endedAt: null,
+        options: input.options ?? {},
       };
       this.deps.db.insert(schema.tickets).values(row).run();
       return row;
@@ -148,12 +159,12 @@ export class TicketService {
 
   /** The kind fits the place (without fixing a prefix). */
   private checkKind(space: TicketRow["space"], projectId: string | null, kind: TicketRow["kind"]): { projectId: string | null } {
-    if (space === "sandbox" && kind !== "experiment") throw badRequest("The sandbox runs experiments");
+    if (space === "sandbox" && !SANDBOX_KINDS.has(kind)) throw badRequest("The sandbox runs new projects and quick tests");
     if (space === "ideas" && kind !== "research") throw badRequest("An idea is researched first (kind research); make it a project when it is worth building");
     if (space === "project") {
       const project = this.deps.projects.get(projectId ?? "");
       if (project.kind === "local" && kind !== "research" && kind !== "experiment") throw badRequest("A local project runs research and experiments only");
-      if (project.kind === "github" && kind === "experiment") throw badRequest("Experiments run in the sandbox");
+      if (project.kind === "github" && SANDBOX_KINDS.has(kind)) throw badRequest("New projects and quick tests run in the sandbox");
     }
     return { projectId: space === "project" ? projectId : null };
   }
@@ -161,8 +172,8 @@ export class TicketService {
   /** Where a ticket goes: its project's prefix, or SBX and IDEA for work that has no project yet. */
   private place(space: TicketRow["space"], projectId: string | null, kind: TicketRow["kind"]): { prefix: string; projectId: string | null } {
     if (space === "sandbox") {
-      if (kind !== "experiment") throw badRequest("The sandbox runs experiments");
-      return { prefix: SPACE_PREFIX.sandbox, projectId: null };
+      if (!SANDBOX_KINDS.has(kind)) throw badRequest("The sandbox runs new projects and quick tests");
+      return { prefix: kind === "newproject" ? SPACE_PREFIX.newproject : SPACE_PREFIX.sandbox, projectId: null };
     }
     if (space === "ideas") {
       if (kind !== "research") throw badRequest("An idea is researched first (kind research); make it a project when it is worth building");
@@ -171,7 +182,7 @@ export class TicketService {
     if (!projectId) throw badRequest("Choose a project");
     const project = this.deps.projects.get(projectId);
     if (project.kind === "local" && kind !== "research" && kind !== "experiment") throw badRequest("A local project runs research and experiments only");
-    if (project.kind === "github" && kind === "experiment") throw badRequest("Experiments run in the sandbox");
+    if (project.kind === "github" && SANDBOX_KINDS.has(kind)) throw badRequest("New projects and quick tests run in the sandbox");
     return { prefix: this.deps.projects.ensurePrefix(project.id), projectId: project.id };
   }
 
@@ -301,14 +312,12 @@ export class TicketService {
     }
   }
 
-  private async promoteOnce(actor: Actor, t: TicketRow, givenRepo: string | null, now: number): Promise<TicketView> {
-    const { projects, github, missions, git } = this.deps;
-    if (t.status !== "done" || !t.missionId || t.space === "project" || (t.kind !== "research" && t.kind !== "experiment")) {
-      throw conflict("Only a finished sandbox experiment or idea becomes a project");
-    }
-    const done = this.events(t.id).find((e) => e.kind === "promoted" && e.data.ticket);
-    if (done) throw conflict(`${keyOf(t)} is already a project: ${String(done.data.ticket)}`);
-    const old = missions.row(t.missionId);
+  /**
+   * What a local mission produced becomes a GitHub repository (new and private unless `givenRepo`) with its branch as
+   * main, and a project. Repeating it continues where a failure stopped (the repository is remembered).
+   */
+  private async toGitHub(actor: Actor, t: TicketRow, old: ReturnType<MissionService["row"]>, givenRepo: string | null, now = Date.now()): Promise<ProjectView> {
+    const { projects, github, git } = this.deps;
     const local = projects.get(old.projectId);
     const root = this.deps.tree.run(old.rootRunId);
     // An agent wrote the branch: GitHub Actions workflows in it would run with the repository's rights.
@@ -336,15 +345,27 @@ export class TicketService {
       }
       project = await projects.create(actor, { githubRepo: repo, name: t.title.slice(0, 80) });
     }
+    return project;
+  }
+
+  private async promoteOnce(actor: Actor, t: TicketRow, givenRepo: string | null, now: number): Promise<TicketView> {
+    const { projects, github, missions, git } = this.deps;
+    if (t.status !== "done" || !t.missionId || t.space === "project" || (t.kind !== "research" && t.kind !== "experiment")) {
+      throw conflict("Only a finished sandbox experiment or idea becomes a project");
+    }
+    const done = this.events(t.id).find((e) => e.kind === "promoted" && e.data.ticket);
+    if (done) throw conflict(`${keyOf(t)} is already a project: ${String(done.data.ticket)}`);
+    const old = missions.row(t.missionId);
+    const project = await this.toGitHub(actor, t, old, givenRepo, now);
     const docs = old.docs.map((d) => `${old.docsPath}/${d}`).join(", ");
     // In the backlog, not started: the conclusion is the agents' words; you read it before it becomes the work.
     const conclusion = (old.retro ?? old.stageSummary ?? "").slice(0, 4000);
     const next = this.create(actor, {
-      space: "project", projectId: project.id, kind: "feature", status: "backlog", priority: t.priority, title: t.title,
+      space: "project", projectId: project.id, kind: "change", status: "backlog", priority: t.priority, title: t.title,
       description: `${t.description}\n\nThis started as ${keyOf(t)} (${t.kind === "experiment" ? "an experiment" : "an idea"}); what was found is already in this repository (${docs || old.docsPath}).\n\nThe agents' conclusion (their words, not yours):\n${AGENT_TEXT_START}\n${conclusion}\n${AGENT_TEXT_END}`.slice(0, 8000),
     }, Date.now(), { by: "you", ticketId: t.id });
-    this.event(t.id, actor, "promoted", { repo, project: project.id, ticket: next.key }, Date.now());
-    audit(this.deps.db, actor, "ticket.promote", t.id, { repo, ticket: next.key }, now);
+    this.event(t.id, actor, "promoted", { repo: project.githubRepo, project: project.id, ticket: next.key }, Date.now());
+    audit(this.deps.db, actor, "ticket.promote", t.id, { repo: project.githubRepo, ticket: next.key }, now);
     this.emit(t.id);
     return next;
   }
@@ -422,7 +443,8 @@ export class TicketService {
     }
   }
 
-  private async start(t: TicketRow, now = Date.now()): Promise<void> {
+  /** `extra`: what a retry adds for the new lead (R10). */
+  private async start(t: TicketRow, now = Date.now(), extra = ""): Promise<void> {
     const { missions, projects, db } = this.deps;
     // Marked first, before any await: another pass cannot start it twice, and nothing can change it meanwhile.
     this.starting.add(t.id);
@@ -441,7 +463,7 @@ export class TicketService {
         ? `(${pictures} picture${pictures === 1 ? "" : "s"} attached: you see ${pictures === 1 ? "it" : "them"} in this message${t.commitAttachments ? "; they are also in the mission documents folder under request/, commit them with your documents" : ""}.)`
         : "";
       const intent = [t.title, this.describe(t), attached, `(Ticket ${keyOf(t)}${t.external ? `, from ${t.external.key}` : ""})`].filter(Boolean).join("\n\n");
-      const m = missions.create(SYSTEM, { projectId, idea: intent, kind: t.kind }, "dashboard", now, { origin: "ticket", title: `${keyOf(t)} ${t.title}` });
+      const m = missions.create(SYSTEM, { projectId, idea: extra ? `${intent}\n\n${extra}` : intent, kind: t.kind }, "dashboard", now, { origin: "ticket", title: `${keyOf(t)} ${t.title}`, options: t.options });
       db.update(schema.tickets).set({ missionId: m.id }).where(eq(schema.tickets.id, t.id)).run();
       this.starting.delete(t.id);
       this.event(t.id, SYSTEM, "started", { missionId: m.id, projectId }, now);
@@ -513,7 +535,9 @@ export class TicketService {
       if (t && m.stage === "cancelled" && !t.endedAt) this.deps.db.update(schema.tickets).set({ endedAt: m.endedAt ?? now }).where(eq(schema.tickets.id, t.id)).run();
       return;
     }
-    const status: TicketStatus = m.stage === "done" ? "done" : m.stage === "cancelled" ? "canceled" : needOf(m) ? "needs_you" : "in_progress";
+    // R10: a pull request or a result waiting for you is in review; a question or a plan is "needs you".
+    const review = m.stage === "awaiting_merge" || m.stage === "review";
+    const status: TicketStatus = m.stage === "done" ? "done" : m.stage === "cancelled" ? "canceled" : review ? "review" : needOf(m) ? "needs_you" : "in_progress";
     const need = needOf(m);
     if (status !== t.status) {
       this.deps.db.update(schema.tickets).set({ status, updatedAt: now, ...(status === "done" || status === "canceled" ? { endedAt: m.endedAt ?? now, position: this.topOf(status) } : {}) })
@@ -536,9 +560,153 @@ export class TicketService {
       : status === "canceled" ? "was stopped"
       : need === "answer" ? "has a question for you"
       : need === "approve" ? "has a plan for you to approve"
-      : need === "merge" ? "has a pull request for you to merge"
+      : need === "merge" ? "has a pull request for you to review and merge"
+      : need === "decide" ? "has a result for you to look at"
       : need === "failed" ? "stopped and needs you" : null;
     if (what) this.deps.notify?.(t, what);
+  }
+
+  // ---- R10: review, send back, merge, retry, keep ------------------------------------------
+
+  private live(idOrKey: string): { t: TicketRow; m: ReturnType<MissionService["row"]> } {
+    const t = this.row(idOrKey);
+    if (!t.missionId) throw conflict(`${keyOf(t)} has not started`);
+    return { t, m: this.deps.missions.row(t.missionId) };
+  }
+
+  /** Your comments on lines of the change (or on the whole), sent to the lead as one message. */
+  sendBack(actor: Actor, idOrKey: string, comments: readonly ReviewComment[], now = Date.now()): TicketView {
+    const { t, m } = this.live(idOrKey);
+    const text = comments.map((c, i) => `${i + 1}. ${c.path ? `${c.path}${c.line ? `:${c.line}` : ""}: ` : ""}${c.text.trim()}`).join("\n");
+    this.deps.missions.sendBack(actor, m.id, text);
+    this.event(t.id, actor, "sent_back", { comments: comments.length }, now);
+    this.emit(t.id);
+    return this.view(t.id);
+  }
+
+  /** Your click: merges the pull request on GitHub (agents never merge). The mission then ends as merged. */
+  async merge(actor: Actor, idOrKey: string): Promise<TicketView> {
+    const { t, m } = this.live(idOrKey);
+    if (m.stage !== "awaiting_merge") throw conflict("There is no pull request waiting for you");
+    const root = this.deps.tree.run(m.rootRunId);
+    const pr = root.prUrl ? parsePullRequestUrl(root.prUrl) : null;
+    if (!pr) throw conflict("This ticket has no pull request");
+    try {
+      await this.deps.github.client.mergePullRequest(await this.deps.github.token(), pr.repo, pr.number);
+    } catch (error) {
+      throw conflict(`GitHub did not merge it (${(error as Error).message.slice(0, 200)}). Merge it on GitHub instead: ${root.prUrl}`);
+    }
+    audit(this.deps.db, actor, "ticket.merge", t.id, { pr: root.prUrl });
+    this.deps.db.update(schema.runs).set({ prState: "merged" }).where(eq(schema.runs.id, root.id)).run();
+    await this.deps.missions.pullRequestSettled(this.deps.tree.run(root.id), "merged");
+    return this.view(t.id);
+  }
+
+  /**
+   * Starts the ticket again from the start: the attempt so far is stopped (its pull request closed) and kept in the
+   * ticket's record; the new lead may write the code through Claude Code or Codex this time.
+   */
+  async retry(actor: Actor, idOrKey: string, input: RetryTicket, now = Date.now()): Promise<TicketView> {
+    const { t, m } = this.live(idOrKey);
+    if (t.kind !== "change") throw conflict("Only a change to a project is retried");
+    const root = this.deps.tree.run(m.rootRunId);
+    const pr = root.prUrl && root.prState !== "merged" ? parsePullRequestUrl(root.prUrl) : null;
+    if (root.prState === "merged") throw conflict("Its pull request is already merged");
+    if (pr) await this.deps.github.client.closePullRequest(await this.deps.github.token(), pr.repo, pr.number).catch((e: Error) => this.deps.log("could not close the pull request", { pr: root.prUrl, error: e.message }));
+    if (m.stage !== "done" && m.stage !== "cancelled") this.deps.missions.cancel(actor, m.id);
+    const worker = input.worker ?? "native";
+    this.event(t.id, actor, "retried", { missionId: m.id, prUrl: root.prUrl, worker, note: input.note ?? "" }, now);
+    audit(this.deps.db, actor, "ticket.retry", t.id, { worker });
+    this.deps.db.update(schema.tickets).set({ missionId: null, status: "todo", updatedAt: now, endedAt: null }).where(eq(schema.tickets.id, t.id)).run();
+    const extra = [
+      "This is a new attempt: an earlier one was stopped by the person. Start from the default branch; do not reuse its branch.",
+      ...(worker !== "native" ? [`Write the code through a ${worker === "claude_code" ? "Claude Code" : "Codex"} sub-agent this time (spawn_agent with runtime "${worker}", a complete brief), then review and merge it.`] : []),
+      ...(input.note?.trim() ? [`The person says: ${input.note.trim()}`] : []),
+    ].join("\n");
+    await this.start(this.row(t.id), now, extra);
+    return this.view(t.id);
+  }
+
+  private attempts(ticketId: string): TicketAttemptView[] {
+    return this.deps.db.select().from(schema.ticketEvents).where(and(eq(schema.ticketEvents.ticketId, ticketId), eq(schema.ticketEvents.kind, "retried"))).orderBy(asc(schema.ticketEvents.id)).all()
+      .map((e) => ({ missionId: String(e.data.missionId ?? ""), prUrl: (e.data.prUrl as string | null) ?? null, worker: String(e.data.worker ?? "native"), note: String(e.data.note ?? ""), at: e.createdAt }));
+  }
+
+  /** A new project or a quick test you keep: it becomes a GitHub repository and a project, with the settings its lead suggested. */
+  async keep(actor: Actor, idOrKey: string, givenRepo: string | null = null): Promise<TicketView> {
+    const { t, m } = this.live(idOrKey);
+    if (!LOCAL_R10.has(t.kind) || m.stage !== "review") throw conflict("Only a new project or a quick test waiting for you is kept");
+    const project = await this.toGitHub(actor, t, m, givenRepo);
+    const profile = m.options?.profile;
+    // Only into a project without settings of its own (an existing repository you named keeps yours).
+    if (profile && Object.keys(project.profile ?? {}).length === 0) {
+      try {
+        this.deps.projects.setProfile(actor, project.id, { profile: profile as never });
+      } catch (error) {
+        this.deps.log("suggested profile not applied", { ticket: keyOf(t), error: (error as Error).message });
+      }
+    }
+    this.deps.missions.finish(actor, m.id);
+    this.deps.projects.archiveLocal(actor, m.projectId);
+    this.event(t.id, actor, "kept", { repo: project.githubRepo, project: project.id });
+    audit(this.deps.db, actor, "ticket.keep", t.id, { repo: project.githubRepo });
+    this.emit(t.id);
+    return this.view(t.id);
+  }
+
+  /** A quick test's result you are done with (its repository is cleaned up after a week). */
+  finishTicket(actor: Actor, idOrKey: string): TicketView {
+    const { t, m } = this.live(idOrKey);
+    if (t.kind !== "quick") throw conflict("Only a quick test is finished this way");
+    this.deps.missions.finish(actor, m.id);
+    return this.view(t.id);
+  }
+
+  /** A new project or a quick test you drop: it stops, and its local repository is removed. */
+  drop(actor: Actor, idOrKey: string, now = Date.now()): TicketView {
+    const { t, m } = this.live(idOrKey);
+    if (!LOCAL_R10.has(t.kind)) throw conflict("Only a new project or a quick test is dropped; stop a change instead");
+    if (m.stage !== "done" && m.stage !== "cancelled") this.deps.missions.cancel(actor, m.id);
+    this.deps.projects.archiveLocal(actor, m.projectId, now);
+    this.event(t.id, actor, "dropped", {}, now);
+    this.emit(t.id);
+    return this.view(t.id);
+  }
+
+  /** The change its mission made: its branch against the branch it started from, file by file (from the mirror). */
+  async diff(idOrKey: string): Promise<TicketDiffView> {
+    const { m } = this.live(idOrKey);
+    const project = this.deps.projects.get(m.projectId);
+    const root = this.deps.tree.run(m.rootRunId);
+    const base = root.baseBranch ?? project.defaultBranch;
+    const range = [`refs/heads/${base}...refs/heads/${root.branch}`];
+    const opts = { cwd: project.mirrorPath, timeoutMs: 60_000 };
+    const numstat = await gitOk(this.deps.git, ["diff", "--no-color", "--numstat", "-M", ...range], opts).catch(() => "");
+    const patch = await gitOk(this.deps.git, ["diff", "--no-color", "-M", "--unified=3", ...range], opts).catch(() => "");
+    return { base, branch: root.branch, ...parseDiff(numstat, patch) };
+  }
+
+  /**
+   * Quick tests are cleaned up a week after they finished, unless you kept them: a reminder a day before, then the
+   * result is finished and the local repository removed. Run hourly.
+   */
+  async sweepQuick(now = Date.now()): Promise<void> {
+    const rows = this.deps.db.select().from(schema.tickets).where(and(eq(schema.tickets.kind, "quick"), inArray(schema.tickets.status, ["review", "done"]), isNotNull(schema.tickets.missionId))).all();
+    for (const t of rows) {
+      const events = this.events(t.id);
+      if (events.some((e) => e.kind === "kept" || e.kind === "cleaned" || e.kind === "dropped")) continue;
+      const m = this.deps.missions.row(t.missionId!);
+      const since = (m.stage === "review" ? m.updatedAt : t.endedAt) ?? t.updatedAt;
+      if (now - since >= QUICK_KEEP_MS) {
+        if (m.stage === "review") this.deps.missions.finish(SYSTEM, m.id);
+        this.deps.projects.archiveLocal(SYSTEM, m.projectId, now);
+        this.event(t.id, SYSTEM, "cleaned", {}, now);
+        this.emit(t.id);
+      } else if (now - since >= QUICK_KEEP_MS - DAY_MS && !events.some((e) => e.kind === "status" && e.data.warned)) {
+        this.event(t.id, SYSTEM, "status", { warned: true }, now);
+        this.deps.notify?.(this.view(t.id), "will be cleaned up tomorrow (its local repository is removed); keep it as a project to save it");
+      }
+    }
   }
 
   // ---- the record --------------------------------------------------------------------------
@@ -552,7 +720,12 @@ export class TicketService {
   }
 
   private toView(t: TicketRow, queue?: Map<string, number>): TicketView {
-    const project = t.projectId ? this.deps.projects.list().find((p) => p.id === t.projectId) ?? null : null;
+    let project: { name: string; kind: string; githubRepo: string } | null = null;
+    try {
+      project = t.projectId ? this.deps.projects.get(t.projectId) : null;
+    } catch {
+      project = null;
+    }
     let mission: MissionView | null = null;
     if (t.missionId) {
       try {
@@ -569,7 +742,8 @@ export class TicketService {
       title: t.title, description: t.description, kind: t.kind, priority: t.priority, status: t.status, position: t.position, missionId: t.missionId,
       createdBy: t.createdBy, fromTicket: from ? keyOf(from) : null, commitAttachments: t.commitAttachments, external: t.external,
       attachments: this.deps.attachments.list(t.id), createdAt: t.createdAt, updatedAt: t.updatedAt, startedAt: t.startedAt, endedAt: t.endedAt,
-      stage: mission?.stage ?? null, need: mission && OPEN.has(t.status) ? needOf(mission) : null, costUsd: mission?.costUsd ?? 0, prUrl: mission?.prUrl ?? null,
+      stage: mission?.stage ?? null, need: mission && LIVE.has(t.status) ? needOf(mission) : null, costUsd: mission?.costUsd ?? 0, prUrl: mission?.prUrl ?? null,
+      options: t.options ?? {}, attempts: this.attempts(t.id),
       working, queuePosition: order.get(t.id) ?? null,
     };
   }
@@ -585,6 +759,48 @@ export class TicketService {
 export function needOf(m: MissionView): TicketNeed | null {
   if (m.stage === "awaiting_approval") return "approve";
   if (m.stage === "awaiting_merge") return "merge";
+  if (m.stage === "review") return "decide";
   if (!m.waitingForYou) return null;
   return m.leadStatus === "failed" || m.error ? "failed" : "answer";
+}
+
+/** A diff too big to show whole: files past this many characters of patch are listed without their lines. */
+const MAX_PATCH = 1_500_000;
+
+/** `git diff --numstat` and the unified diff, file by file. */
+export function parseDiff(numstat: string, patch: string): { files: DiffFileView[]; truncated: boolean } {
+  const counts = numstat.split("\n").filter(Boolean).map((l) => {
+    const [a, d, ...rest] = l.split("\t");
+    const path = rest.join("\t");
+    // Renames read "old => new" or "dir/{old => new}/file".
+    const renamed = /^(.*)\{(.*) => (.*)\}(.*)$/.exec(path) ?? /^()(.*) => (.*)()$/.exec(path);
+    return {
+      path: renamed ? `${renamed[1]}${renamed[3]}${renamed[4]}`.replace("//", "/") : path,
+      oldPath: renamed ? `${renamed[1]}${renamed[2]}${renamed[4]}`.replace("//", "/") : null,
+      additions: a === "-" ? 0 : Number(a), deletions: d === "-" ? 0 : Number(d), binary: a === "-",
+    };
+  });
+  const chunks = new Map<string, { patch: string; status: DiffFileView["status"] }>();
+  let used = 0;
+  let truncated = false;
+  for (const part of patch.split(/^diff --git /m).slice(1)) {
+    const header = part.slice(0, part.indexOf("\n"));
+    const plus = /^\+\+\+ b\/(.*)$/m.exec(part)?.[1];
+    const rename = /^rename to (.*)$/m.exec(part)?.[1];
+    const path = plus ?? rename ?? /^a\/.* b\/(.*)$/.exec(header)?.[1] ?? "";
+    const status: DiffFileView["status"] = /^new file mode/m.test(part) ? "added" : /^deleted file mode/m.test(part) ? "deleted" : rename ? "renamed" : "modified";
+    const at = part.indexOf("\n@@");
+    let hunks = at >= 0 ? part.slice(at + 1) : "";
+    if (used + hunks.length > MAX_PATCH) {
+      hunks = "";
+      truncated = true;
+    }
+    used += hunks.length;
+    chunks.set(path, { patch: hunks.replace(/\n$/, ""), status });
+  }
+  const files = counts.map((c) => {
+    const chunk = chunks.get(c.path);
+    return { ...c, status: chunk?.status ?? (c.oldPath ? "renamed" : "modified"), patch: chunk?.patch ?? "" };
+  });
+  return { files, truncated };
 }

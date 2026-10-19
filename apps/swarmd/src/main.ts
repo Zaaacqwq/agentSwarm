@@ -62,6 +62,10 @@ async function main(): Promise<void> {
   services.runs.recover();
   await services.desktop.start();
   services.tickets.recover();
+  // R10: quick tests are cleaned up a week after they finished.
+  const sweepQuick = () => void services.tickets.sweepQuick().catch((e: Error) => log("warn", "quick-test cleanup failed", { error: e.message }));
+  sweepQuick();
+  setInterval(sweepQuick, 3600_000).unref();
   services.auth.pruneExpired();
   // Screenshots shown in the dashboard (R6) are kept for a month after their run ended.
   const pruneScreens = () => services.runs.pruneScreens(SCREENS_KEPT_MS);

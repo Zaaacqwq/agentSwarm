@@ -4,7 +4,7 @@ import cookie from "@fastify/cookie";
 import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import {
-  CreateAgent, CreateEndpoint, CreateMission, CreateProject, CreateRun, Credentials, MissionBudget, MissionReply, RunMessage, SetCli, SetDiscord, SetGitHubToken, SetProjectProfile, PutProjectFile, CreateLocalProject, MachineSettings, ModelSettings, CreateTicket, UpdateTicket, MoveTicket, TicketSettings, PromoteTicket, CreateLesson, UpdateLesson, SetHandbook, DecideProposal, ROLES, type Role, type Me,
+  CreateAgent, CreateEndpoint, CreateMission, CreateProject, CreateRun, Credentials, MissionBudget, MissionReply, RunMessage, SetCli, SetDiscord, SetGitHubToken, SetProjectProfile, PutProjectFile, CreateLocalProject, MachineSettings, ModelSettings, CreateTicket, UpdateTicket, MoveTicket, TicketSettings, PromoteTicket, SendBack, RetryTicket, CreateLesson, UpdateLesson, SetHandbook, DecideProposal, ROLES, type Role, type Me,
 } from "@agentswarm/contracts";
 import type { Services } from "../app/services.ts";
 import { RateLimiter } from "../auth/rate-limit.ts";
@@ -221,6 +221,14 @@ export async function buildApp(o: AppOptions): Promise<FastifyInstance> {
   });
   app.get<{ Params: { key: string } }>("/api/tickets/:key/events", async (req) => s.tickets.events(req.params.key));
   app.post<{ Params: { key: string }; Body: PromoteTicket }>("/api/tickets/:key/promote", { schema: { body: PromoteTicket } }, async (req) => s.tickets.promote(actor(req), req.params.key, req.body.repo ?? null));
+  // R10: look at the change, send it back with comments, merge, retry; keep, finish or drop a local result.
+  app.get<{ Params: { key: string } }>("/api/tickets/:key/diff", async (req) => s.tickets.diff(req.params.key));
+  app.post<{ Params: { key: string }; Body: SendBack }>("/api/tickets/:key/send-back", { schema: { body: SendBack } }, async (req) => s.tickets.sendBack(actor(req), req.params.key, req.body.comments));
+  app.post<{ Params: { key: string } }>("/api/tickets/:key/merge", async (req) => s.tickets.merge(actor(req), req.params.key));
+  app.post<{ Params: { key: string }; Body: RetryTicket }>("/api/tickets/:key/retry", { schema: { body: RetryTicket } }, async (req) => s.tickets.retry(actor(req), req.params.key, req.body));
+  app.post<{ Params: { key: string }; Body: PromoteTicket }>("/api/tickets/:key/keep", { schema: { body: PromoteTicket } }, async (req) => s.tickets.keep(actor(req), req.params.key, req.body.repo ?? null));
+  app.post<{ Params: { key: string } }>("/api/tickets/:key/finish", async (req) => s.tickets.finishTicket(actor(req), req.params.key));
+  app.post<{ Params: { key: string } }>("/api/tickets/:key/drop", async (req) => s.tickets.drop(actor(req), req.params.key));
   // Pictures: the raw image as the body (the browser's type and the name are not trusted; the bytes are checked).
   app.post<{ Params: { key: string }; Querystring: { name?: string }; Body: Buffer }>("/api/tickets/:key/attachments", { bodyLimit: MAX_UPLOAD_BYTES + 1024 }, async (req) => {
     if (!Buffer.isBuffer(req.body)) throw badRequest("Send the picture itself as the body");

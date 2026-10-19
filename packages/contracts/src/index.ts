@@ -299,7 +299,7 @@ export interface RunEventView {
 // ---- missions (R3) -----------------------------------------------------------------------
 export type MissionStage =
   | "intake" | "research" | "discussion" | "planning" | "awaiting_approval"
-  | "building" | "verifying" | "awaiting_merge" | "retro" | "done" | "cancelled";
+  | "building" | "verifying" | "awaiting_merge" | "review" | "retro" | "done" | "cancelled";
 
 export const CreateMission = Type.Object({
   projectId: Type.String(),
@@ -310,10 +310,17 @@ export const CreateMission = Type.Object({
   /** The lead; default: the project's agent named Lead, else its newest agent. */
   agentId: Type.Optional(Type.String()),
   /** R5: which flow (default feature). */
-  kind: Type.Optional(Type.Union([Type.Literal("feature"), Type.Literal("bug"), Type.Literal("research"), Type.Literal("experiment"), Type.Literal("marketing")])),
+  kind: Type.Optional(Type.Union([
+    Type.Literal("change"), Type.Literal("newproject"), Type.Literal("quick"),
+    Type.Literal("feature"), Type.Literal("bug"), Type.Literal("research"), Type.Literal("experiment"), Type.Literal("marketing"),
+  ])),
 });
 export type CreateMission = Static<typeof CreateMission>;
-export type MissionKind = "feature" | "bug" | "research" | "experiment" | "marketing";
+/**
+ * R10: "change" (an existing project), "newproject" and "quick" are what you choose; the older kinds remain for
+ * missions started before R10.
+ */
+export type MissionKind = "change" | "newproject" | "quick" | "feature" | "bug" | "research" | "experiment" | "marketing";
 
 export const MissionReply = Type.Object({ text: Type.String({ minLength: 1, maxLength: 8000 }) });
 export type MissionReply = Static<typeof MissionReply>;
@@ -471,12 +478,14 @@ export interface CheckItem {
 
 // ---- the board (R7) ----------------------------------------------------------------------------
 /** Backlog and todo are yours; in progress, needs you and done follow the ticket's mission. */
-export type TicketStatus = "backlog" | "todo" | "in_progress" | "needs_you" | "done" | "canceled";
-export const TICKET_STATUSES: readonly TicketStatus[] = ["backlog", "todo", "in_progress", "needs_you", "done", "canceled"];
+/** R10: "review": its pull request or result waits for you to look. */
+export type TicketStatus = "backlog" | "todo" | "in_progress" | "needs_you" | "review" | "done" | "canceled";
+export const TICKET_STATUSES: readonly TicketStatus[] = ["backlog", "todo", "in_progress", "needs_you", "review", "done", "canceled"];
 /** A registered project, a fresh local sandbox (experiments), or an idea with no repository yet. */
 export type TicketSpace = "project" | "sandbox" | "ideas";
 /** What the ticket waits for you to do, when it does. */
-export type TicketNeed = "answer" | "approve" | "merge" | "failed";
+/** R10: "decide": a new project or a quick test's result waits for you to keep it, send it back or finish it. */
+export type TicketNeed = "answer" | "approve" | "merge" | "decide" | "failed";
 
 export interface TicketAttachmentView {
   readonly id: string;
@@ -517,13 +526,27 @@ export interface TicketView {
   readonly need: TicketNeed | null;
   readonly costUsd: number;
   readonly prUrl: string | null;
+  /** R10: how it was asked to be worked. */
+  readonly options: TicketOptions;
+  /** R10: earlier attempts (retried), oldest first. */
+  readonly attempts: readonly TicketAttemptView[];
   /** Agents of its mission running right now. */
   readonly working: number;
   /** Todo tickets: how many are ahead of it. */
   readonly queuePosition: number | null;
 }
 
-const TicketKindT = Type.Union([Type.Literal("feature"), Type.Literal("bug"), Type.Literal("research"), Type.Literal("experiment"), Type.Literal("marketing")]);
+const TicketKindT = Type.Union([
+  Type.Literal("change"), Type.Literal("newproject"), Type.Literal("quick"),
+  Type.Literal("feature"), Type.Literal("bug"), Type.Literal("research"), Type.Literal("experiment"), Type.Literal("marketing"),
+]);
+/** R10: how a ticket is worked. planFirst: a plan for you before the change; marketing: a marketer takes part; researchOnly: a quick test that only finds out. */
+export const TicketOptions = Type.Object({
+  planFirst: Type.Optional(Type.Boolean()),
+  marketing: Type.Optional(Type.Boolean()),
+  researchOnly: Type.Optional(Type.Boolean()),
+});
+export type TicketOptions = Static<typeof TicketOptions>;
 const TicketSpaceT = Type.Union([Type.Literal("project"), Type.Literal("sandbox"), Type.Literal("ideas")]);
 const PriorityT = Type.Integer({ minimum: 0, maximum: 4 });
 
@@ -537,6 +560,7 @@ export const CreateTicket = Type.Object({
   priority: Type.Optional(PriorityT),
   status: Type.Optional(Type.Union([Type.Literal("backlog"), Type.Literal("todo")])),
   commitAttachments: Type.Optional(Type.Boolean()),
+  options: Type.Optional(TicketOptions),
 });
 export type CreateTicket = Static<typeof CreateTicket>;
 
@@ -564,7 +588,7 @@ export interface TicketEventView {
   readonly id: number;
   readonly ticketId: string;
   readonly actor: string;
-  readonly kind: "created" | "edited" | "status" | "started" | "ended" | "attachment" | "promoted";
+  readonly kind: "created" | "edited" | "status" | "started" | "ended" | "attachment" | "promoted" | "retried" | "sent_back" | "kept" | "dropped" | "cleaned";
   readonly data: Record<string, unknown>;
   readonly createdAt: number;
 }
@@ -699,4 +723,50 @@ export interface DesktopView {
   };
   /** The active session first, then the one waiting for you, then the queue. */
   readonly sessions: readonly DesktopSessionView[];
+}
+
+// ---- R10: review, send back, retry ---------------------------------------------------------------
+export interface TicketAttemptView {
+  readonly missionId: string;
+  readonly prUrl: string | null;
+  readonly worker: string;
+  readonly note: string;
+  readonly at: number;
+}
+
+/** A comment on a line of the change (the new side), or on the whole when path is absent. */
+export const ReviewComment = Type.Object({
+  path: Type.Optional(Type.String({ maxLength: 500 })),
+  line: Type.Optional(Type.Integer({ minimum: 1 })),
+  text: Type.String({ minLength: 1, maxLength: 2000 }),
+});
+export type ReviewComment = Static<typeof ReviewComment>;
+export const SendBack = Type.Object({ comments: Type.Array(ReviewComment, { minItems: 1, maxItems: 50 }) });
+export type SendBack = Static<typeof SendBack>;
+
+export const RetryTicket = Type.Object({
+  /** Who writes the code this time: the lead itself, or a Claude Code or Codex sub-agent. */
+  worker: Type.Optional(Type.Union([Type.Literal("native"), Type.Literal("claude_code"), Type.Literal("codex")])),
+  note: Type.Optional(Type.String({ maxLength: 2000 })),
+});
+export type RetryTicket = Static<typeof RetryTicket>;
+
+/** The change a ticket's mission made, from its branch against where it started. */
+export interface TicketDiffView {
+  readonly base: string;
+  readonly branch: string;
+  readonly files: readonly DiffFileView[];
+  /** Files left out: the change was too big to show whole. */
+  readonly truncated: boolean;
+}
+
+export interface DiffFileView {
+  readonly path: string;
+  readonly oldPath: string | null;
+  readonly status: "added" | "modified" | "deleted" | "renamed";
+  readonly additions: number;
+  readonly deletions: number;
+  readonly binary: boolean;
+  /** The unified diff's hunks (from the first @@), empty for binary files. */
+  readonly patch: string;
 }

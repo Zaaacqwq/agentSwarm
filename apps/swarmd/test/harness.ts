@@ -139,6 +139,8 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
       return `https://github.com/${fullName}/pull/${pullRequests.length}`;
     },
     pullRequestState: async (_t, _fullName, number) => prStates.get(number) ?? "open",
+    mergePullRequest: async (_t, _fullName, number) => void prStates.set(number, "merged"),
+    closePullRequest: async (_t, _fullName, number) => void prStates.set(number, "closed"),
     deleteBranch: async () => {
       throw new Error("the test remote is local; branches are deleted with git");
     },

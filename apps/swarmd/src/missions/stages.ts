@@ -8,6 +8,11 @@ import type { MissionKind, MissionStage } from "../db/schema.ts";
  *   research:   intake → research → discussion → done          (no code changes, no gates)
  *   experiment: intake → building → done                        (local sandbox only: nothing reaches GitHub)
  *   marketing:  intake → research → building (the copy) → verifying → [you merge] → retro → done   (R8)
+ * R10, what you choose now (the kinds above remain for missions started before):
+ *   change:     building (code, checks, one look at the screen, the pull request) → [you merge, or send it back] → done
+ *               (with a plan first: planning → [you approve] → building …; a retrospective only when something went wrong)
+ *   newproject: planning (questions, then one plan) → [you approve] → building → [you keep it, send it back or drop it] → done
+ *   quick:      building → [the result waits for you] → done
  * Only a person passes the gates; no agent can move a mission through them.
  */
 export type Actor = "lead" | "person" | "github" | "system";
@@ -16,14 +21,19 @@ export type Actor = "lead" | "person" | "github" | "system";
 export interface Flow {
   readonly kind: MissionKind;
   readonly fast: boolean;
+  /** R10, a change: a plan for you first. */
+  readonly plan?: boolean;
 }
 
 export const flowOf = (f: Flow | boolean): Flow => (typeof f === "boolean" ? { kind: "feature", fast: f } : f);
 
 /** The working stages a flow goes through, in order (for checklists). */
 export function stagesOf(f: Flow | boolean): MissionStage[] {
-  const { kind, fast } = flowOf(f);
+  const { kind, fast, plan } = flowOf(f);
   switch (kind) {
+    case "change": return [...(plan ? ["planning", "awaiting_approval"] as MissionStage[] : []), "building", "awaiting_merge", "done"];
+    case "newproject": return ["planning", "awaiting_approval", "building", "review", "done"];
+    case "quick": return ["building", "review", "done"];
     case "research": return ["intake", "research", "discussion", "done"];
     case "experiment": return ["intake", "building", "done"];
     case "marketing": return ["intake", "research", "building", "verifying", "awaiting_merge", "retro", "done"];
@@ -34,7 +44,10 @@ export function stagesOf(f: Flow | boolean): MissionStage[] {
 
 /** Stages in which the lead works. */
 export const WORKING: ReadonlySet<MissionStage> = new Set(["intake", "research", "discussion", "planning", "building", "verifying", "retro"]);
-export const GATES: ReadonlySet<MissionStage> = new Set(["awaiting_approval", "awaiting_merge"]);
+export const GATES: ReadonlySet<MissionStage> = new Set(["awaiting_approval", "awaiting_merge", "review"]);
+
+/** Where a mission starts: R10 kinds start working at once, with no intake stage. */
+export const firstStage = (f: Flow | boolean): MissionStage => stagesOf(f)[0]!;
 export const ENDED: ReadonlySet<MissionStage> = new Set(["done", "cancelled"]);
 
 /** Where stage_done leads; null where the stage does not end with stage_done. */
@@ -47,7 +60,10 @@ export function afterStageDone(stage: MissionStage, flow: Flow | boolean): Missi
       return kind === "bug" || fast ? "planning" : "research";
     case "research": return kind === "marketing" ? "building" : "discussion";
     case "discussion": return kind === "research" ? "done" : "planning";
-    case "building": return kind === "experiment" ? "done" : "verifying";
+    case "building":
+      if (kind === "change") return "awaiting_merge";
+      if (kind === "newproject" || kind === "quick") return "review";
+      return kind === "experiment" ? "done" : "verifying";
     case "verifying": return kind === "experiment" || kind === "research" ? null : "awaiting_merge";
     case "retro": return "done";
     default: return null;
@@ -59,8 +75,12 @@ const ALLOWED: Record<Actor, readonly (readonly [MissionStage | "*", MissionStag
     ["intake", "research"], ["intake", "planning"], ["research", "discussion"], ["discussion", "planning"],
     ["planning", "awaiting_approval"], ["building", "verifying"], ["verifying", "awaiting_merge"], ["retro", "done"],
   ],
-  person: [["awaiting_approval", "building"], ["awaiting_approval", "planning"], ["*", "cancelled"]],
-  github: [["verifying", "retro"], ["awaiting_merge", "retro"], ["*", "cancelled"]],
+  person: [
+    ["awaiting_approval", "building"], ["awaiting_approval", "planning"], ["*", "cancelled"],
+    // R10: send a pull request or a result back with your comments; keep a result.
+    ["awaiting_merge", "building"], ["review", "building"], ["review", "done"],
+  ],
+  github: [["verifying", "retro"], ["awaiting_merge", "retro"], ["awaiting_merge", "done"], ["*", "cancelled"]],
   system: [["*", "cancelled"]],
 };
 
@@ -69,7 +89,11 @@ export function canMove(from: MissionStage, to: MissionStage, by: Actor, flow: F
   const f = flowOf(flow);
   if (by === "lead") {
     // The lead only ever moves a mission one step along its own flow.
-    if (from === "planning" && to === "awaiting_approval") return f.kind === "feature" || f.kind === "bug";
+    if (to === "awaiting_approval") {
+      if (from === "planning") return ["feature", "bug", "change", "newproject"].includes(f.kind);
+      // A change the lead finds risky: it stops and shows you a plan first.
+      return from === "building" && f.kind === "change";
+    }
     return afterStageDone(from, f) === to && (from === "intake" || ALLOWED.lead.some(([a, b]) => a === from && b === to) || KIND_STEPS.some(([k, a, b]) => k === f.kind && a === from && b === to));
   }
   return ALLOWED[by].some(([a, b]) => (a === from || a === "*") && b === to);
@@ -77,6 +101,9 @@ export function canMove(from: MissionStage, to: MissionStage, by: Actor, flow: F
 
 /** Lead steps that only some kinds have. */
 const KIND_STEPS: readonly (readonly [MissionKind, MissionStage, MissionStage])[] = [
+  ["change", "building", "awaiting_merge"],
+  ["newproject", "building", "review"],
+  ["quick", "building", "review"],
   ["research", "discussion", "done"],
   ["experiment", "building", "done"],
   ["marketing", "research", "building"],
@@ -88,7 +115,9 @@ export function requiredDocs(stage: MissionStage, kind: MissionKind = "feature")
     case "research": return ["research.md"];
     case "discussion": return ["decisions.md"];
     case "planning": return ["plan.md"];
-    case "building": return kind === "experiment" ? ["results.md"] : kind === "marketing" ? ["marketing/positioning.md", "marketing/landing.md"] : [];
+    case "building":
+      if (kind === "experiment" || kind === "quick" || kind === "newproject") return ["results.md"];
+      return kind === "marketing" ? ["marketing/positioning.md", "marketing/landing.md"] : [];
     case "verifying": return ["acceptance.md"];
     default: return [];
   }
@@ -108,8 +137,12 @@ export interface StageTools {
   readonly requestApproval: boolean;
 }
 
-export function stageTools(stage: MissionStage): StageTools {
+export function stageTools(stage: MissionStage, kind: MissionKind = "feature"): StageTools {
   const base = { workstation: "all", tree: false, web: false, pullRequest: false, stageDone: true, requestApproval: false } as const;
+  // R10: a change is built, checked and proposed in one stage; it may still stop for a plan.
+  if (kind === "change" && stage === "building") return { ...base, tree: true, web: true, pullRequest: true, requestApproval: true };
+  if ((kind === "newproject" || kind === "quick") && stage === "building") return { ...base, tree: true, web: true };
+  if (kind === "newproject" && stage === "planning") return { ...base, tree: true, web: true, stageDone: false, requestApproval: true };
   switch (stage) {
     case "intake": return { ...base, workstation: "read" };
     case "research": return { ...base, tree: true, web: true };
@@ -121,11 +154,12 @@ export function stageTools(stage: MissionStage): StageTools {
     // Follow-ups on an open pull request: fix and push, but the stage only ends on GitHub.
     case "awaiting_merge": return { ...base, tree: true, pullRequest: true, stageDone: false };
     case "retro": return { ...base, workstation: "read" };
+    case "review": return { ...base, workstation: "read", stageDone: false };
     default: return { ...base, workstation: "read", stageDone: false };
   }
 }
 
 export const STAGE_LABEL: Record<MissionStage, string> = {
   intake: "Intake", research: "Research", discussion: "Discussion", planning: "Planning", awaiting_approval: "Waiting for your approval",
-  building: "Building", verifying: "Verifying", awaiting_merge: "Waiting for you to merge", retro: "Retrospective", done: "Done", cancelled: "Cancelled",
+  building: "Building", verifying: "Verifying", awaiting_merge: "Waiting for you to merge", review: "Waiting for your decision", retro: "Retrospective", done: "Done", cancelled: "Cancelled",
 };

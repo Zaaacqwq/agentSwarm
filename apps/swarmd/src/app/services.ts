@@ -135,7 +135,7 @@ export function createServices(d: ServiceDeps): Services {
   const warn = (msg: string, extra?: Record<string, unknown>) => d.log("warn", msg, extra);
   const cleanup = new TreeCleanup({ db: d.db, backend: d.backend, projects, github, git: d.git, log: warn, isActive: (id) => runs.isActive(id) });
   const missions = new MissionService({
-    db: d.db, bus, runs, tree, projects, agents, git: d.git, web: d.web?.(endpoints) ?? createWebAccess(endpoints), cleanup, log: warn, memory,
+    db: d.db, bus, runs, tree, projects, agents, git: d.git, web: d.web?.(endpoints) ?? createWebAccess(endpoints), cleanup, log: warn, memory, backend: d.backend,
   });
   runs.attach(missions);
   const watcher = new PullRequestWatcher({

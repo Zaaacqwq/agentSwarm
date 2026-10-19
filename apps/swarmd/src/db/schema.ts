@@ -66,6 +66,8 @@ export const projects = sqliteTable("projects", {
   profile: json<ProjectProfile>("profile"),
   /** R7: ticket ids look like <prefix>-<n>, e.g. FRI-12. */
   ticketPrefix: text("ticket_prefix"),
+  /** R10: a local project dropped or cleaned up: its repository is gone, its tickets and history stay. */
+  archivedAt: integer("archived_at"),
 }, (t) => [uniqueIndex("projects_slug_uq").on(t.slug), uniqueIndex("projects_repo_uq").on(t.githubRepo)]);
 
 export interface ProjectProfile {
@@ -228,10 +230,25 @@ export const gitPushes = sqliteTable("git_pushes", {
 }, (t) => [index("git_pushes_project_idx").on(t.projectId, t.id)]);
 
 export const MISSION_STAGES = [
-  "intake", "research", "discussion", "planning", "awaiting_approval", "building", "verifying", "awaiting_merge", "retro", "done", "cancelled",
+  "intake", "research", "discussion", "planning", "awaiting_approval", "building", "verifying", "awaiting_merge", "review", "retro", "done", "cancelled",
 ] as const;
 export type MissionStage = (typeof MISSION_STAGES)[number];
-export const MISSION_KINDS = ["feature", "bug", "research", "experiment", "marketing"] as const;
+export const MISSION_KINDS = ["change", "newproject", "quick", "feature", "bug", "research", "experiment", "marketing"] as const;
+
+/** R10: how a mission is worked (from its ticket), and what went wrong on the way (for a retrospective only then). */
+export interface MissionOptions {
+  readonly planFirst?: boolean;
+  readonly marketing?: boolean;
+  readonly researchOnly?: boolean;
+  /** Automatic checks that failed in a row, and the output of the last. */
+  readonly checkFailures?: number;
+  /** Something went wrong: checks failed, the lead stopped or failed, you sent changes back. */
+  readonly trouble?: string[];
+  /** Times the lead was told to go on after it stopped mid-stage. */
+  readonly nudges?: number;
+  /** A new project's suggested profile, applied when you keep it. */
+  readonly profile?: Record<string, unknown>;
+}
 export type MissionKind = (typeof MISSION_KINDS)[number];
 
 /** One idea pursued in one project, from your first sentence to a merged pull request (R3). */
@@ -265,6 +282,7 @@ export const missions = sqliteTable("missions", {
   kind: text("kind", { enum: MISSION_KINDS }).notNull().default("feature"),
   /** Where it was started. "linear": the R5 Linear integration, since removed (R7); "ticket": the board. */
   origin: text("origin", { enum: ["dashboard", "discord", "linear", "ticket"] }).notNull().default("dashboard"),
+  options: text("options", { mode: "json" }).$type<MissionOptions>().notNull().default({}),
 }, (t) => [index("missions_project_idx").on(t.projectId, t.createdAt), index("missions_stage_idx").on(t.stage)]);
 
 export const missionMessages = sqliteTable("mission_messages", {
@@ -288,7 +306,7 @@ export const settings = sqliteTable("settings", {
 });
 
 // ---- R7: the built-in board ------------------------------------------------------------------
-export const TICKET_STATUSES = ["backlog", "todo", "in_progress", "needs_you", "done", "canceled"] as const;
+export const TICKET_STATUSES = ["backlog", "todo", "in_progress", "needs_you", "review", "done", "canceled"] as const;
 export type TicketStatus = (typeof TICKET_STATUSES)[number];
 /** Where a ticket's work happens: a registered project, a fresh local sandbox, or an idea with no repository yet. */
 export const TICKET_SPACES = ["project", "sandbox", "ideas"] as const;
@@ -315,6 +333,8 @@ export const tickets = sqliteTable("tickets", {
   fromTicketId: text("from_ticket_id"),
   /** Attachments go into the repository (docs/agentswarm/<task>/request/) when it starts. */
   commitAttachments: integer("commit_attachments", { mode: "boolean" }).notNull().default(true),
+  /** R10: planFirst, marketing, researchOnly. */
+  options: text("options", { mode: "json" }).$type<{ planFirst?: boolean; marketing?: boolean; researchOnly?: boolean }>().notNull().default({}),
   /** Imported from elsewhere (Linear): its old id and link. */
   external: json<{ key: string; url: string }>("external"),
   createdAt: integer("created_at").notNull(),
@@ -332,7 +352,7 @@ export const ticketEvents = sqliteTable("ticket_events", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   ticketId: text("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
   actor: text("actor").notNull(),
-  kind: text("kind", { enum: ["created", "edited", "status", "started", "ended", "attachment", "promoted"] }).notNull(),
+  kind: text("kind", { enum: ["created", "edited", "status", "started", "ended", "attachment", "promoted", "retried", "sent_back", "kept", "dropped", "cleaned"] }).notNull(),
   data: json<Record<string, unknown>>("data").notNull(),
   createdAt: integer("created_at").notNull(),
 }, (t) => [index("ticket_events_ticket_idx").on(t.ticketId, t.id)]);

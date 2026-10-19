@@ -208,11 +208,13 @@ export class TreeService {
     const child = this.child(parent, childId, "task");
     if (child.mergedAt) throw new TreeError(`${child.title} is already merged`);
     if (child.status !== "succeeded") throw new TreeError(`${child.title} is ${child.status}; only finished work can be merged`);
-    if (!child.review?.approved) throw new TreeError(`${child.title} has not been approved by a review; call review_agent first`);
+    // R10: a branch that only adds screenshots (QA's evidence) needs no review; anything else does.
+    const sha = child.review?.approved ? child.review.headSha : await this.evidenceOnly(parent, child);
+    if (!sha) throw new TreeError(`${child.title} has not been approved by a review; call review_agent first`);
     if (!parent.workstationId) throw new TreeError("You have no workstation right now");
     const res = await this.deps.backend.call<{ merged: boolean; head: string | null; conflicts: string[] }>(
       parent.workstationId,
-      { op: "git.merge", scope: parent.worktreeScope, branch: child.branch, sha: child.review.headSha, message: `Merge ${child.branch} (${child.title})` },
+      { op: "git.merge", scope: parent.worktreeScope, branch: child.branch, sha, message: `Merge ${child.branch} (${child.title})` },
       signal ? { signal } : {},
     );
     if (!res.merged) {
@@ -220,6 +222,17 @@ export class TreeService {
     }
     this.deps.db.update(schema.runs).set({ mergedAt: now }).where(eq(schema.runs.id, child.id)).run();
     return `Merged ${child.branch} into your branch (now ${res.head?.slice(0, 10)}). Run the tests, then git_push.`;
+  }
+
+  /** The child's head, if all it changed are images under docs/agentswarm/ (screenshots); null otherwise. */
+  private async evidenceOnly(parent: RunRow, child: RunRow): Promise<string | null> {
+    if (!this.lastPushed(child)) return null;
+    const project = this.deps.projects.get(parent.projectId);
+    const opts = { cwd: project.mirrorPath, timeoutMs: 60_000 };
+    const sha = (await gitOk(this.deps.git, ["rev-parse", `refs/heads/${child.branch}`], opts)).trim();
+    const base = child.baseBranch ?? project.defaultBranch;
+    const files = (await gitOk(this.deps.git, ["diff", "--name-only", `refs/heads/${base}...${sha}`], opts)).split("\n").filter(Boolean);
+    return files.length && files.every((f) => /^docs\/agentswarm\/[^\0]*\.(jpe?g|png)$/i.test(f) && !f.split("/").includes("..")) ? sha : null;
   }
 
   async openPullRequest(root: RunRow, title: string, body: string): Promise<string> {

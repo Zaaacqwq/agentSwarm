@@ -28,6 +28,10 @@ export interface GitHubClient {
   listRepos(token: string): Promise<{ fullName: string; private: boolean; description: string; updatedAt: string }[]>;
   /** A new, empty, private repository under the token's user (R5: an idea becomes a project). */
   createRepo(token: string, name: string, description: string): Promise<{ fullName: string }>;
+  /** R10: only ever on your click on the dashboard (with a confirmation): agents never merge. */
+  mergePullRequest(token: string, fullName: string, number: number): Promise<void>;
+  /** R10: a retried ticket's earlier pull request. */
+  closePullRequest(token: string, fullName: string, number: number): Promise<void>;
 }
 
 export type PullRequestState = "open" | "merged" | "closed";
@@ -118,6 +122,14 @@ export class GitHubRest implements GitHubClient {
     const body = (await (await this.call(token, "GET", `/repos/${fullName}/pulls/${number}`)).json()) as { state: string; merged?: boolean; merged_at?: string | null };
     if (body.merged || body.merged_at) return "merged";
     return body.state === "open" ? "open" : "closed";
+  }
+
+  async mergePullRequest(token: string, fullName: string, number: number): Promise<void> {
+    await this.call(token, "PUT", `/repos/${fullName}/pulls/${number}/merge`, {});
+  }
+
+  async closePullRequest(token: string, fullName: string, number: number): Promise<void> {
+    await this.call(token, "PATCH", `/repos/${fullName}/pulls/${number}`, { state: "closed" });
   }
 
   async deleteBranch(token: string, fullName: string, branch: string): Promise<boolean> {

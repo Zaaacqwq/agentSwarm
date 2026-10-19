@@ -13,6 +13,10 @@ export interface BriefContext {
   readonly product?: boolean;
   /** R8: an iOS app (App Store copy and simulator screenshots). */
   readonly ios?: boolean;
+  /** R10: what the ticket asked for. */
+  readonly options?: { readonly planFirst?: boolean; readonly marketing?: boolean; readonly researchOnly?: boolean };
+  /** R10: how QA sees this project: simulator (iOS), desktop (macOS) or browser (the web). */
+  readonly screen?: "simulator" | "desktop" | "browser";
 }
 
 export function missionPromptSection(docs: string): string[] {
@@ -30,6 +34,9 @@ export function missionPromptSection(docs: string): string[] {
 export const MISSION_FINISH = "- Finish every stage by calling stage_done (in planning: request_approval) once its work is pushed. Do not stop without it.";
 
 const KIND_LINE: Record<MissionKind, string> = {
+  change: "This is a change to this project (a fix or a small feature): make it, check it, propose it in a pull request.",
+  newproject: "This is a new project: agree on a plan with the person, then build it in this repository (it exists only on this Mac until the person keeps it).",
+  quick: "This is a quick test in a throwaway repository on this Mac: nothing goes to GitHub and there is no pull request.",
   feature: "This is a feature.",
   bug: "This is a bug report: reproduce it with a failing test before fixing it.",
   research: "This is a research question: no code changes and no pull request; the result is your conclusion for the person.",
@@ -51,8 +58,67 @@ export function intakeBrief(c: BriefContext): string {
   ].join("\n");
 }
 
+/** R10: the first message of a ticket of the new kinds; there is no intake stage. */
+export function startBrief(c: BriefContext, stage: MissionStage): string {
+  return [`New ticket. The person said:\n\n${c.intent}`, "", KIND_LINE[c.kind ?? "change"], "", stageBrief(stage, c)].join("\n");
+}
+
+/** R10: one QA look at the screen, for a change or a new project. */
+function lookOnce(c: BriefContext, d: string): string {
+  const needs = `["${c.screen ?? "browser"}"]`;
+  return `- If the result can be seen and the request says how it should look or behave, spawn ONE QA sub-agent (role "qa") with needs ${needs} to check it on screen once, with sample data only: each criterion, one screenshot per criterion with save_as ${d}/screenshots/NN-what.jpg, git_commit and git_push them; it changes no code. merge_agent it (no review needed: it only adds screenshots). agentSwarm takes the screenshots itself: trust them, do not inspect the image files.`;
+}
+
+/** R10: the stages of the new kinds. */
+function r10Brief(stage: MissionStage, c: BriefContext): string | null {
+  const d = c.docs;
+  const o = c.options ?? {};
+  if (c.kind === "change" && stage === "building") return [
+    "Stage: building. Make the change and propose it in a pull request.",
+    "- Read what you need (ws_grep, ws_read). If something important is unclear, ask_user once: at most 3 numbered questions, each with your recommendation. If it is clear, do not ask.",
+    `- If the change is risky (large, a data migration, security, or a choice between approaches the person should make), stop and show a plan first: write ${d}/plan.md (what, how, the files, how it is checked), git_commit, git_push and call request_approval with a summary. You continue when they approve.`,
+    "- Do the work yourself. Spawn developer sub-agents only for parts that are big and independent (different files); review_agent and merge_agent them.",
+    "- Run the project's tests as you go.",
+    lookOnce(c, d),
+    ...(o.marketing ? ["- The person asked for marketing alongside: spawn a marketer sub-agent (role \"marketer\") to update the copy in docs/agentswarm/marketing/ for this change (claims only what it really does); review and merge it."] : []),
+    ...(c.product ? ["- This project is a product: add an entry for the change at the top of docs/agentswarm/CHANGELOG.md (date, a title, two to four sentences a user would understand)."] : []),
+    `- open_pull_request into ${c.defaultBranch}: title = the change; body = what changed and why, and how it was checked (the tests; the screenshots shown with ![01 what](${d}/screenshots/01-what.jpg)).`,
+    "- Then call stage_done with what changed (at most 8 lines). agentSwarm first runs the project's build and test commands: if they fail you get the output; fix, git_push and call stage_done again.",
+  ].join("\n");
+  if (c.kind === "newproject" && stage === "planning") return [
+    "Stage: planning a new project. Nothing exists yet but this empty repository.",
+    "- First ask_user once: at most 5 numbered questions that decide its shape (who it is for, the platform, what it must do, what to leave out), each with your recommendation. Skip what the request already says.",
+    "- Look up what you need (web_search, web_fetch; researcher sub-agents only for independent questions).",
+    `- Write ${d}/plan.md: requirements, each with an acceptance criterion; design (platform, stack, structure, what it reuses); tasks (packages with their files and criteria, independent where possible); how it will be checked; and the settings the project will need (build and test commands; the scheme for iOS or macOS). Under 150 lines.`,
+    "- git_commit, git_push, then request_approval with a summary (at most 15 lines). Nothing is built until the person approves.",
+  ].join("\n");
+  if (c.kind === "newproject" && stage === "building") return [
+    `Stage: building the new project as ${d}/plan.md says.`,
+    "- Spawn one developer sub-agent per package (complete briefs: files, criteria, how to test); review_agent and merge_agent them. Do small packages yourself.",
+    "- Make it runnable: a README with how to build, run and test it.",
+    lookOnce(c, d),
+    "- suggest_profile with the project's settings (platform, build and test commands, and the scheme for iOS or macOS), so it starts configured.",
+    `- Write ${d}/results.md: what was built, how to run it, how it was checked (the screenshots shown), and what is missing. git_commit, git_push.`,
+    "- Then call stage_done with a summary (at most 10 lines). The person keeps it (it becomes a GitHub repository), sends it back with comments, or drops it.",
+  ].join("\n");
+  if (c.kind === "quick" && stage === "building") return o.researchOnly ? [
+    "Stage: finding out. The person has a question; write no code.",
+    "- Search and read (web_search, web_fetch; researcher sub-agents for independent questions).",
+    `- Write ${d}/results.md: the answer first, then the findings with links, the options compared and your recommendation. git_commit, git_push.`,
+    "- Then call stage_done with the answer (at most 12 lines). That is what the person reads.",
+  ].join("\n") : [
+    "Stage: building. A quick test: do it, and say what you found.",
+    "- Do it yourself; sub-agents only if parts are big and independent. Commit what is worth keeping.",
+    `- Write ${d}/results.md: what you tried, what happened (numbers, output, errors) and what you conclude. git_commit, git_push.`,
+    "- Then call stage_done with the findings (at most 12 lines). The person reads them; they may keep it as a new project.",
+  ].join("\n");
+  return null;
+}
+
 export function stageBrief(stage: MissionStage, c: BriefContext, extra = ""): string {
   const d = c.docs;
+  const r10 = r10Brief(stage, c);
+  if (r10) return r10;
   switch (stage) {
     case "intake": return [
       "Stage: intake.",
@@ -159,5 +225,19 @@ export function changesBrief(c: BriefContext, comment: string): string {
     comment,
     "",
     `Stage: planning. Revise ${c.docs}/plan.md (and ${c.docs}/decisions.md if a decision changed), git_commit, git_push, then call request_approval again.`,
+  ].join("\n");
+}
+
+/** R10: you sent a pull request or a result back, with your comments on its lines. */
+export function sentBackBrief(c: BriefContext, comments: string): string {
+  const after = c.kind === "change"
+    ? "git_push (the pull request updates itself), then call stage_done again with what you changed."
+    : `update ${c.docs}/results.md, git_commit, git_push, then call stage_done again with what you changed.`;
+  return [
+    "The person sent it back with these comments (their words):",
+    "",
+    comments,
+    "",
+    `Stage: building. Address every comment. Then ${after}`,
   ].join("\n");
 }

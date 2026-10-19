@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, lstatSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import type { CreateProject, ProjectView, PutProjectFile, SetProjectProfile } from "@agentswarm/contracts";
 import type { SecretBox } from "../crypto/secret-box.ts";
 import type { Db } from "../db/client.ts";
@@ -60,8 +60,22 @@ export class ProjectService {
     this.deps = deps;
   }
 
+  /** Projects in use: archived local projects (R10) are left out. */
   list(): ProjectView[] {
-    return this.deps.db.select().from(schema.projects).all().map((r) => this.toView(r));
+    return this.deps.db.select().from(schema.projects).where(isNull(schema.projects.archivedAt)).all().map((r) => this.toView(r));
+  }
+
+  /**
+   * R10: a local project you dropped, or a quick test cleaned up after a week: its repository is removed; the
+   * project row stays (archived) so its tickets and missions keep their history.
+   */
+  archiveLocal(actor: string, id: string, now = Date.now()): void {
+    const row = this.get(id);
+    if (row.kind !== "local") throw badRequest("Only a local project is archived");
+    if (row.archivedAt) return;
+    rmSync(row.mirrorPath, { recursive: true, force: true });
+    this.deps.db.update(schema.projects).set({ archivedAt: now }).where(eq(schema.projects.id, id)).run();
+    audit(this.deps.db, actor, "project.archive", id, { name: row.name }, now);
   }
 
   get(id: string): ProjectRow {
@@ -102,7 +116,7 @@ export class ProjectService {
     }
     const row: ProjectRow = {
       id: newId("prj"), slug, name, githubRepo: `local/${slug}`, remoteUrl: "", defaultBranch: "main", mirrorPath,
-      protectedAt: null, lastFetchedAt: now, createdAt: now, kind: "local", profile: null, ticketPrefix: null,
+      protectedAt: null, lastFetchedAt: now, createdAt: now, kind: "local", profile: null, ticketPrefix: null, archivedAt: null,
     };
     db.insert(schema.projects).values(row).run();
     audit(db, actor, "project.create_local", row.id, { name }, now);
@@ -225,7 +239,7 @@ export class ProjectService {
     const row: ProjectRow = {
       id: newId("prj"), slug, name: input.name ?? info.fullName.split("/")[1] ?? slug, githubRepo: info.fullName, remoteUrl,
       defaultBranch: info.defaultBranch, mirrorPath, protectedAt: null, lastFetchedAt: now, createdAt: now,
-      kind: "github", profile: null, ticketPrefix: null,
+      kind: "github", profile: null, ticketPrefix: null, archivedAt: null,
     };
     db.insert(schema.projects).values(row).run();
     audit(db, actor, "project.create", row.id, { repo: row.githubRepo }, now);

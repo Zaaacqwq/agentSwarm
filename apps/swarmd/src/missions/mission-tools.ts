@@ -97,3 +97,22 @@ export function fileTicketTool(file: (input: { title: string; description: strin
     execute: async (_id, p) => text(file(p)),
   };
 }
+
+const Profile = Type.Object({
+  platform: Type.Optional(Type.String({ maxLength: 80 })),
+  setup: Type.Optional(Type.String({ maxLength: 1000 })),
+  build: Type.Optional(Type.String({ maxLength: 1000 })),
+  test: Type.Optional(Type.String({ maxLength: 1000 })),
+  ios: Type.Optional(Type.Object({ scheme: Type.Optional(Type.String({ maxLength: 100 })), project: Type.Optional(Type.String({ maxLength: 200, pattern: "\\.xcodeproj$" })), workspace: Type.Optional(Type.String({ maxLength: 200, pattern: "\\.xcworkspace$" })) })),
+  mac: Type.Optional(Type.Object({ scheme: Type.Optional(Type.String({ maxLength: 100 })), project: Type.Optional(Type.String({ maxLength: 200, pattern: "\\.xcodeproj$" })), workspace: Type.Optional(Type.String({ maxLength: 200, pattern: "\\.xcworkspace$" })) })),
+});
+
+/** R10: a new project's settings, applied when the person keeps it (they can change them later). */
+export function suggestProfileTool(save: (profile: Record<string, unknown>) => string): AgentTool<typeof Profile, undefined> {
+  return {
+    name: "suggest_profile", label: "suggest_profile", parameters: Profile,
+    description: "Suggest the new project's settings: its platform, the commands to set up, build and test it, and the scheme for an iOS or macOS app. They are applied when the person keeps the project.",
+    prepareArguments: clipToSchema(Profile),
+    execute: async (_id, p) => text(save(p as Record<string, unknown>)),
+  };
+}
