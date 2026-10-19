@@ -219,7 +219,11 @@ describe("the desktop (R9): sessions", () => {
     const results: string[] = [];
     rootSpawnsQa(h, [
       call("desktop_request", { purpose: "Check the main window" }),
-      seen(results, call("desktop_open", { scheme: "Demo", project: "App.xcodeproj" })),
+      seen(results, () => {
+        // You are at the Mac when it opens the app: it waits rather than failing.
+        h.desktop.pauseFor(1200);
+        return call("desktop_open", { scheme: "Demo", project: "App.xcodeproj" });
+      }),
       seen(results, call("desktop_look", {})),
       seen(results, () => {
         h.desktop.pauseFor(1200);
@@ -238,6 +242,7 @@ describe("the desktop (R9): sessions", () => {
     await h.api("POST", `/api/desktop/sessions/${s!.id}/approve`, {}, cookie);
     await until(() => h.services.runs.get(run.id).status === "succeeded", 60_000);
     assert.match(results[3]!, /Done \(waited \d+ s while the person used the Mac\)|Done/);
+    assert.match(results[1]!, /opened Demo/, "opening waited for the pause instead of failing");
 
     // A request whose run is cancelled is withdrawn.
     rootSpawnsQa(h, [call("desktop_request", { purpose: "Check it again" })], "QA");

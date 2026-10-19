@@ -10,6 +10,7 @@ import { MAX_EVIDENCE } from "../eyes/eyes.ts";
 import { saveScreen } from "../eyes/images.ts";
 import type { DesktopService } from "./desktop-service.ts";
 import { HelperError, type DesktopHelper } from "./helper.ts";
+import { clipToSchema } from "../agents/clip.ts";
 import { stageApp, type StageTools } from "./stage.ts";
 
 /** You use the Mac: the agent waits this long at most before it is told to try later. */
@@ -60,9 +61,9 @@ export class DesktopTools {
   tools(): AgentTool<any, Details>[] {
     const mac = this.deps.profile?.mac ?? {};
     const tools: AgentTool<any, Details>[] = [
-      tool("desktop_request", "Ask the person for a session on this Mac's desktop, to test the app this run builds. Say what you will test and for how long (minutes, default 15, at most 30). Your turn ends; you continue when they decide. Ask once, when you are ready to test.",
+      clipped(tool("desktop_request", "Ask the person for a session on this Mac's desktop, to test the app this run builds. Say what you will test and for how long (minutes, default 15, at most 30). Your turn ends; you continue when they decide. Ask once, when you are ready to test.",
         Type.Object({ purpose: Type.String({ minLength: 5, maxLength: 300 }), minutes: Type.Optional(Type.Integer({ minimum: 1, maximum: 30 })) }),
-        async (p) => this.request(p.purpose, p.minutes)),
+        async (p) => this.request(p.purpose, p.minutes))),
       tool("desktop_open", `Build this worktree's macOS app and open it on the desktop (in the App Sandbox: no access to the person's files${mac.network ? "" : ", no network"}). ${mac.scheme ? `Defaults: scheme ${mac.scheme}${mac.project ? `, ${mac.project}` : ""}${mac.workspace ? `, ${mac.workspace}` : ""}.` : "Find the scheme with `xcodebuild -list` first."} Opening again rebuilds and replaces it.`,
         Type.Object({ scheme: Type.Optional(Type.String({ maxLength: 100 })), project: Type.Optional(Type.String({ maxLength: 200 })), workspace: Type.Optional(Type.String({ maxLength: 200 })), configuration: Type.Optional(Type.String({ maxLength: 40 })) }),
         async (p, signal) => this.open(p, signal)),
@@ -113,14 +114,20 @@ export class DesktopTools {
     }, { ...(signal ? { signal } : {}), timeoutMs: BUILD_TIMEOUT_MS + 60_000 });
     if (!built.ok || !built.archive || !built.app) return `The build failed (${Math.round(built.durationMs / 1000)} s):\n${built.errors.join("\n") || "(no error lines; run xcodebuild yourself to see why)"}`;
     // The build can take long: the session may have ended meanwhile.
-    const { token: still } = this.deps.service.session(this.deps.run.id);
+    this.deps.service.session(this.deps.run.id);
     // A fresh folder per opening: the one before it may still be in use by the app being replaced.
     const runDir = join(this.deps.appsDir, this.deps.run.id);
     const dir = join(runDir, String(Date.now()));
     let opened: { name: string; inFront: boolean };
     try {
       const path = await stageApp({ archive: Buffer.from(built.archive, "base64"), dir, app: built.app, projectSlug: this.deps.projectSlug, network: Boolean(mac.network), ...(this.deps.stageTools ? { tools: this.deps.stageTools } : {}) });
-      opened = await this.deps.helper.call<{ name: string; inFront: boolean }>({ cmd: "open", session: still, path }, 60_000);
+      // Like any input, opening waits while you use the Mac (it would take the focus from you).
+      const result = await this.untilIdle((session) => this.deps.helper.call<{ name: string; inFront: boolean }>({ cmd: "open", session, path }, 60_000), signal);
+      if (result.gaveUp) {
+        rmSync(dir, { recursive: true, force: true });
+        return "The person is still using the Mac, so the app was not opened. Wait, then call desktop_open again.";
+      }
+      opened = result.value;
     } catch (error) {
       rmSync(dir, { recursive: true, force: true });
       throw error;
@@ -160,17 +167,23 @@ export class DesktopTools {
   private async act(request: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
     if (request.cmd === "click" && (request.x === undefined || request.y === undefined)) return "Give an element number, or both x and y.";
     this.deps.service.mayAct(this.deps.run.id);
+    const done = await this.untilIdle((session) => this.deps.helper.call<{ inFront: boolean }>({ ...request, session }), signal);
+    if (done.gaveUp) return "The person is still using the Mac. Wait, then try again; or release the desktop and report what you checked.";
+    this.deps.service.acted(this.deps.run.id);
+    const waited = done.waitedMs > 5_000 ? ` (waited ${Math.round(done.waitedMs / 1000)} s while the person used the Mac)` : "";
+    return `Done${waited}.${done.value.inFront ? "" : " The app is no longer in front."} Look (desktop_look) to see what it did.`;
+  }
+
+  /** Runs a helper call with the session's token; while you use the Mac, waits (up to 10 minutes) and tries again. */
+  private async untilIdle<T>(call: (token: string) => Promise<T>, signal?: AbortSignal): Promise<{ value: T; waitedMs: number; gaveUp?: false } | { value: never; waitedMs: number; gaveUp: true }> {
     const started = Date.now();
     for (;;) {
       const { token } = this.deps.service.session(this.deps.run.id);
       try {
-        const r = await this.deps.helper.call<{ inFront: boolean }>({ ...request, session: token });
-        this.deps.service.acted(this.deps.run.id);
-        const waited = Date.now() - started > 5_000 ? ` (waited ${Math.round((Date.now() - started) / 1000)} s while the person used the Mac)` : "";
-        return `Done${waited}.${r.inFront ? "" : " The app is no longer in front."} Look (desktop_look) to see what it did.`;
+        return { value: await call(token), waitedMs: Date.now() - started };
       } catch (error) {
         if (!(error instanceof HelperError) || error.code !== "paused") throw error;
-        if (Date.now() - started > MAX_PAUSE_WAIT_MS) return "The person is still using the Mac. Wait, then try again; or release the desktop and report what you checked.";
+        if (Date.now() - started > MAX_PAUSE_WAIT_MS) return { value: undefined as never, waitedMs: Date.now() - started, gaveUp: true };
         const until = error.pausedUntilMs ?? Date.now() + 5_000;
         await (this.deps.sleep ?? sleep)(Math.min(Math.max(1_000, until - Date.now() + 500), 15_000), signal);
         await this.deps.service.refresh();
@@ -188,6 +201,11 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
       reject(new Error("aborted"));
     }, { once: true });
   });
+}
+
+/** An over-long text is cut to the schema rather than refused (a refused request costs the agent a turn). */
+function clipped<P extends TSchema>(t: AgentTool<P, Details>): AgentTool<P, Details> {
+  return { ...t, prepareArguments: clipToSchema(t.parameters) };
 }
 
 function tool<P extends TSchema>(name: string, description: string, parameters: P, run: (params: any, signal?: AbortSignal) => Promise<string | AgentToolResult<Details>> | AgentToolResult<Details>): AgentTool<P, Details> {

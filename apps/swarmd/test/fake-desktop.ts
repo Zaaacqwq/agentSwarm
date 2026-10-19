@@ -67,6 +67,7 @@ export function fakeDesktop(): FakeDesktop {
       }
       if (!live || session !== live.session) fail("denied", "No approved desktop session is active");
       if (req.cmd === "open") {
+        if (pausedUntil > Date.now()) fail("paused", "The person is using this Mac", pausedUntil);
         if (!String(req.path).endsWith(".app")) fail("bad_request", "open needs the path of a .app");
         target = "Demo";
         return { ok: true, pid: 4321, name: "Demo", inFront: true } as unknown as T;
