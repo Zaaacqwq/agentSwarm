@@ -120,7 +120,8 @@ export class DesktopTools {
     let opened: { name: string; inFront: boolean };
     try {
       const path = await stageApp({ archive: Buffer.from(built.archive, "base64"), dir, app: built.app, projectSlug: this.deps.projectSlug, network: Boolean(mac.network), ...(this.deps.stageTools ? { tools: this.deps.stageTools } : {}) });
-      opened = await this.deps.helper.call<{ name: string; inFront: boolean }>({ cmd: "open", session: still, path }, 60_000);
+      // As this run's workstation user: none of your files, keychain or clipboard.
+      opened = await this.deps.helper.call<{ name: string; inFront: boolean }>({ cmd: "open", session: still, path, user: this.deps.workstation }, 60_000);
     } catch (error) {
       rmSync(dir, { recursive: true, force: true });
       throw error;

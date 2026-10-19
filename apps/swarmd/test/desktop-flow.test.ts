@@ -145,6 +145,7 @@ describe("the desktop (R9): sessions", () => {
     assert.ok(sign.includes("--deep") && sign.includes("--entitlements") && sign.at(-1)!.startsWith(h.appsDir), JSON.stringify(sign));
     const open = h.desktop.calls.find((c) => c.cmd === "open")!;
     assert.ok(String(open.path).startsWith(h.appsDir) && String(open.path).endsWith("Demo.app"));
+    assert.match(String(open.user), /^ws-\d+$/, "it runs as the run's workstation user");
     // Looking: the picture to the model and the dashboard, and as evidence in the worktree.
     assert.match(results[3]!, /New Note/);
     assert.match(results[3]!, /"type":"image"/);

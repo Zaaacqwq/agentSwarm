@@ -20,6 +20,9 @@ DATA_VOLUME="/Volumes/Data"
 LIBEXEC="/usr/local/libexec/agentswarm"
 EXEC="${LIBEXEC}/ws-exec"
 LAUNCH="${LIBEXEC}/ws-launch"
+WSAPP="${LIBEXEC}/ws-app"
+# R9: apps under test, staged by swarmd (you), read and run by workstation users.
+APPS_DIR="${VOLUME}/desktop-apps"
 SUDOERS="/etc/sudoers.d/agentswarm"
 GROUP="swarm-ws"
 NODE_VERSION="24.22.0"
@@ -191,8 +194,51 @@ case "\$user" in ws-[0-9]|ws-[0-9][0-9]) ;; *) fail "not a workstation user" ;; 
 uid="\$(/usr/bin/id -u "\$user")"
 exec /bin/launchctl asuser "\$uid" /usr/bin/sudo -n -H -u "\$user" ${EXEC}
 LAUNCHER
-  chown -R root:wheel "$LIBEXEC" && chmod 0755 "$LIBEXEC" "$EXEC" "$LAUNCH"
-  say "Installed ${EXEC} and ${LAUNCH}"
+  # ws-app (R9): an app under test runs as the run's workstation user, in your GUI session (so it has windows)
+  # but with none of your files, keychain or clipboard. sudo runs it as root; it checks everything it is given.
+  cat > "$WSAPP" <<WSAPP
+#!/bin/sh
+# Installed by agentswarm scripts/setup.sh.
+#   ws-app ws-N open <path of a .app under ${APPS_DIR}>   starts it as ws-N and prints its pid
+#   ws-app ws-N stop <pid>                                 ends that app (only a process of ws-N)
+set -eu
+fail() { echo "ws-app: \$1" >&2; exit 2; }
+[ \$# -eq 3 ] || fail "usage: ws-app ws-N open|stop <arg>"
+user="\$1"; cmd="\$2"; arg="\$3"
+case "\$user" in ws-[0-9]|ws-[0-9][0-9]) ;; *) fail "not a workstation user" ;; esac
+/usr/bin/dscl . -read /Groups/${GROUP} GroupMembership 2>/dev/null | /usr/bin/grep -qw -- "\$user" || fail "\$user is not in ${GROUP}"
+uid="\$(/usr/bin/id -u "\$user")"
+home="\$(/usr/bin/dscl . -read "/Users/\$user" NFSHomeDirectory | /usr/bin/awk '{print \$2}')"
+case "\$cmd" in
+  open)
+    real="\$(/usr/bin/realpath "\$arg")" || fail "no such app"
+    case "\$real" in ${APPS_DIR}/*.app) ;; *) fail "not an app agentSwarm staged" ;; esac
+    [ -d "\$real" ] || fail "not an app"
+    exe="\$(/usr/bin/plutil -extract CFBundleExecutable raw -o - "\$real/Contents/Info.plist")" || fail "no main program"
+    case "\$exe" in ""|.*|*/*) fail "odd main program" ;; esac
+    bin="\$real/Contents/MacOS/\$exe"
+    [ -f "\$bin" ] && [ ! -L "\$bin" ] || fail "no main program"
+    /usr/bin/sudo -n -u "\$user" /usr/bin/env -i HOME="\$home" USER="\$user" PATH=/usr/bin:/bin "\$bin" </dev/null >/dev/null 2>&1 &
+    i=0
+    while [ \$i -lt 100 ]; do
+      pid="\$(/bin/ps -U "\$uid" -o pid=,comm= | while read -r p c; do [ "\$c" = "\$bin" ] && echo "\$p"; done | /usr/bin/head -1)"
+      [ -n "\$pid" ] && { echo "\$pid"; exit 0; }
+      i=\$((i + 1)); /bin/sleep 0.1
+    done
+    fail "the app did not start"
+    ;;
+  stop)
+    case "\$arg" in ""|*[!0-9]*) fail "not a pid" ;; esac
+    [ "\$(/bin/ps -o uid= -p "\$arg" | /usr/bin/tr -d ' ')" = "\$uid" ] || exit 0
+    /bin/kill -TERM "\$arg" 2>/dev/null || true
+    ( /bin/sleep 3; /bin/kill -KILL "\$arg" 2>/dev/null || true ) >/dev/null 2>&1 &
+    ;;
+  *) fail "unknown command" ;;
+esac
+WSAPP
+  mkdir -p "$APPS_DIR" && chown "${OWNER}:staff" "$APPS_DIR" && chmod 0755 "$APPS_DIR"
+  chown -R root:wheel "$LIBEXEC" && chmod 0755 "$LIBEXEC" "$EXEC" "$LAUNCH" "$WSAPP"
+  say "Installed ${EXEC}, ${LAUNCH} and ${WSAPP}"
 }
 
 # ---- CLI workers (R4) -----------------------------------------------------------------------------
@@ -355,6 +401,8 @@ write_sudoers() {
   {
     print -r -- "# Managed by agentswarm scripts/setup.sh"
     for user in $(workstation_users); do print -r -- "${OWNER} ALL=(root) NOPASSWD: ${LAUNCH} ${user}"; done
+    # R9: open or stop an app under test as that workstation user (ws-app checks its arguments).
+    for user in $(workstation_users); do print -r -- "${OWNER} ALL=(root) NOPASSWD: ${WSAPP} ${user} open *, ${WSAPP} ${user} stop *"; done
   } > "$tmp"
   visudo -cf "$tmp" >/dev/null || { rm -f "$tmp"; die "sudoers validation failed; nothing installed."; }
   install -o root -g wheel -m 0440 "$tmp" "$SUDOERS"

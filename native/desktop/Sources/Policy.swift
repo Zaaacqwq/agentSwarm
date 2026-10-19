@@ -76,6 +76,19 @@ enum Windows {
         return nil
     }
 
+    /// The frontmost ordinary window (layer 0) that is not ours.
+    static func topmostAppWindow() -> WindowHit? {
+        let opts: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        guard let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]] else { return nil }
+        let me = ProcessInfo.processInfo.processIdentifier
+        for info in list where (info[kCGWindowLayer as String] as? Int) == 0 {
+            guard let pid = info[kCGWindowOwnerPID as String] as? pid_t, pid != me,
+                  let boundsDict = info[kCGWindowBounds as String] as? NSDictionary, let bounds = CGRect(dictionaryRepresentation: boundsDict) else { continue }
+            return WindowHit(pid: pid, bounds: bounds)
+        }
+        return nil
+    }
+
     /// On-screen windows front to back.
     static func onScreen() -> [WindowHit] {
         let opts: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]

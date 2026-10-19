@@ -136,7 +136,8 @@ export async function stageApp(input: { archive: Buffer; dir: string; app: strin
     writeFileSync(archive, input.archive, { mode: 0o600, flag: "wx" });
     checkListing(await tools.tar(["-tvzf", archive]), input.app);
     rmSync(input.dir, { recursive: true, force: true });
-    mkdirSync(input.dir, { recursive: true, mode: 0o700 });
+    // Readable by the workstation user who runs it, writable only by swarmd.
+    mkdirSync(input.dir, { recursive: true, mode: 0o755 });
     await tools.tar(["-xzf", archive, "-C", input.dir, "--no-same-owner", "--no-same-permissions"]);
     const app = join(input.dir, input.app);
     const st = lstatSync(app);
