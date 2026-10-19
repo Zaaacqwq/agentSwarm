@@ -1,0 +1,17 @@
+name: Probe
+options:
+  bundleIdPrefix: dev.agentswarm.probe
+  deploymentTarget:
+    macOS: "14.0"
+targets:
+  Probe:
+    type: application
+    platform: macOS
+    sources: [Probe]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.agentswarm.probe
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Probe
+        SWIFT_VERSION: "5.0"
+        ENABLE_HARDENED_RUNTIME: NO
