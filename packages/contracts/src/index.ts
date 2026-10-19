@@ -132,6 +132,12 @@ export type CreateLocalProject = Static<typeof CreateLocalProject>;
 export const MachineSettings = Type.Object({ denyPorts: Type.Array(Type.Integer({ minimum: 1, maximum: 65535 }), { maxItems: 200 }) });
 export type MachineSettings = Static<typeof MachineSettings>;
 
+/** The model a native run switches to when its own refuses the content or keeps failing. */
+export const BackupModel = Type.Object({ endpointId: Type.String({ minLength: 1, maxLength: 100 }), modelId: Type.String({ minLength: 1, maxLength: 200 }) });
+export type BackupModel = Static<typeof BackupModel>;
+export const ModelSettings = Type.Object({ backup: Type.Union([BackupModel, Type.Null()]) });
+export type ModelSettings = Static<typeof ModelSettings>;
+
 export interface PushView {
   readonly id: number;
   readonly runId: string;

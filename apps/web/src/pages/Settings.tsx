@@ -1,5 +1,5 @@
-import { useState } from "react";
-import type { CliStatusView, CliTestResult, CodexWorkstationView, DiscordStatus, EndpointKind, EndpointView, GitHubStatus, MachineLoadView, MachineSettings, TicketSettings } from "@agentswarm/contracts";
+import { useEffect, useState } from "react";
+import type { CliStatusView, CliTestResult, CodexWorkstationView, DiscordStatus, EndpointKind, EndpointView, GitHubStatus, MachineLoadView, MachineSettings, ModelSettings, ModelView, TicketSettings } from "@agentswarm/contracts";
 import { api, ago, until, when } from "../api.ts";
 import { useLive, useResource } from "../live.ts";
 import { Badge, Field, Form, Meter, PageHead } from "../components/ui.tsx";
@@ -61,11 +61,55 @@ export function SettingsPage() {
           </Form>
         </section>
       </div>
+      <Backup endpoints={endpoints.data ?? []} />
       <Board />
       <Discord />
       <CliWorkers />
       <Machine />
     </div>
+  );
+}
+
+/** The model a run switches to when its own refuses the content (a provider's moderation) or keeps failing. */
+function Backup({ endpoints }: { endpoints: EndpointView[] }) {
+  const settings = useResource<ModelSettings>("/models/settings");
+  const [endpointId, setEndpointId] = useState("");
+  const [modelId, setModelId] = useState<string | null>(null);
+  const [models, setModels] = useState<ModelView[]>([]);
+  const saved = settings.data?.backup ?? null;
+  const ep = endpointId || saved?.endpointId || endpoints[0]?.id || "";
+  useEffect(() => {
+    if (ep) api<ModelView[]>("GET", `/endpoints/${ep}/models`).then(setModels).catch(() => setModels([]));
+  }, [ep]);
+  if (!settings.data) return null;
+  const save = async (backup: ModelSettings["backup"]) => {
+    const v = await api<ModelSettings>("PUT", "/models/settings", { backup });
+    settings.set(() => v);
+    setModelId(null);
+  };
+  return (
+    <section className="card stack" aria-labelledby="backup-head">
+      <h2 id="backup-head">Backup model</h2>
+      <p className="faint">
+        {saved ? <>Now: <span className="mono">{saved.modelId}</span>. </> : "None yet: a run whose model refuses fails. "}
+        When a provider refuses the content (its moderation), a run switches to this model at once; when the model keeps failing, after two retries.
+        Pick one from another provider.
+      </p>
+      <Form submit="Save" onSubmit={async () => save({ endpointId: ep, modelId: (modelId ?? saved?.modelId ?? "").trim() })}>
+        <div className="grid">
+          <Field label="Endpoint">
+            <select value={ep} onChange={(e) => setEndpointId(e.target.value)} required>
+              {endpoints.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+            </select>
+          </Field>
+          <Field label="Backup model" hint={models.length ? `${models.length} models on this endpoint` : undefined}>
+            <input list="backup-models" className="mono" value={modelId ?? saved?.modelId ?? ""} onChange={(e) => setModelId(e.target.value)} placeholder="anthropic/claude-haiku-5-5" required />
+            <datalist id="backup-models">{models.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}</datalist>
+          </Field>
+        </div>
+        {saved && <button type="button" className="btn ghost small" onClick={() => void save(null)}>No backup model</button>}
+      </Form>
+    </section>
   );
 }
 

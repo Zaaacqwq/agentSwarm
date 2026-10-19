@@ -1,8 +1,8 @@
 import { readdirSync, readFileSync, rmSync } from "node:fs";
 import { basename, join } from "node:path";
 import { and, asc, desc, eq, gt, inArray, isNotNull, lt } from "drizzle-orm";
-import { Agent, type AgentEvent, type AgentMessage, type AgentTool } from "@earendil-works/pi-agent-core";
-import type { CreateRun, MachineLoadView, RunEventView, RunReport, RunView, TreeView } from "@agentswarm/contracts";
+import { Agent, type AgentEvent, type AgentMessage, type AgentTool, type StreamFn } from "@earendil-works/pi-agent-core";
+import type { BackupModel, CreateRun, MachineLoadView, RunEventView, RunReport, RunView, TreeView } from "@agentswarm/contracts";
 import type { Db } from "../db/client.ts";
 import { schema } from "../db/client.ts";
 import type { RunLimits } from "../db/schema.ts";
@@ -13,7 +13,8 @@ import type { EventBus } from "../events/event-bus.ts";
 import type { WorkstationPool } from "../workstations/pool.ts";
 import type { WorkstationBackend } from "../workstations/backend.ts";
 import type { ProjectService } from "../projects/project-service.ts";
-import type { ModelGateway } from "../models/model-gateway.ts";
+import type { ModelGateway, ResolvedModel } from "../models/model-gateway.ts";
+import { REFUSAL } from "../models/backup.ts";
 import type { Relay } from "../relay/relay.ts";
 import type { AgentService } from "./agent-service.ts";
 import { REVIEW_TOOL_NAMES, workstationTools } from "./tools.ts";
@@ -103,10 +104,19 @@ export interface RunDeps {
   readonly screensDir: string;
   /** R8: the team's lessons and the roles' handbooks, in every prompt. */
   readonly memory?: { readonly lessons: LessonService; readonly handbooks: HandbookService };
+  /** The model to switch to when a run's own refuses the content or keeps failing (none: the run fails). */
+  readonly backupModel?: () => BackupModel | null;
   readonly limits?: RunLimits;
   /** Fetch GitHub into the mirror before a run clones it (off in tests with local remotes). */
   readonly refreshMirror: boolean;
   readonly log: (msg: string, extra?: Record<string, unknown>) => void;
+}
+
+/** The model a native execution is using: its agent's own, or the backup. */
+interface UsedModel {
+  readonly endpointId: string;
+  readonly modelId: string;
+  readonly resolved: ResolvedModel;
 }
 
 /** "shutdown": swarmd is stopping; the run is interrupted like a crash, not cancelled by anyone. */
@@ -136,6 +146,8 @@ const STOP_TEXT: Record<Exclude<StopReason, "cancelled">, string> = {
 export class RunService {
   private readonly deps: RunDeps;
   private readonly active = new Map<string, Active>();
+  /** Runs that switched to the backup model: they stay on it for their later executions (until swarmd restarts). */
+  private readonly onBackup = new Set<string>();
   private scheduling = false;
   private rescheduled = false;
   private hooks: RunHooks | null = null;
@@ -443,7 +455,13 @@ export class RunService {
     if (agentRow.runtime !== "native") return this.executeCli(run, agentRow, project, ws, active, message);
 
     // Resolve the model first: a bad model id should not leave a half-prepared worktree behind.
-    const { model, streamFn } = await gateway.resolve(agentRow.endpointId, agentRow.modelId);
+    const primary = await gateway.resolve(agentRow.endpointId, agentRow.modelId);
+    const own = { endpointId: agentRow.endpointId, modelId: agentRow.modelId };
+    const backup = this.onBackup.has(runId) ? await this.resolveBackup(own) : null;
+    // The stream behind the agent can change mid-run: the backup model may be on another endpoint.
+    let current: UsedModel = backup ?? { ...own, resolved: primary };
+    const model = current.resolved.model;
+    const streamFn: StreamFn = (m, context, options) => current.resolved.streamFn(m, context, options);
     const session = db.select().from(schema.agentSessions).where(eq(schema.agentSessions.runId, runId)).get();
     if (!session) {
       if (this.deps.refreshMirror) {
@@ -537,15 +555,7 @@ export class RunService {
       while (next !== undefined && !active.reason) {
         await (images.length ? agent.prompt(next, images) : agent.prompt(next));
         images = [];
-        lastError = modelError(agent);
-        for (let retry = 1; lastError && !active.reason && retry <= MODEL_RETRIES; retry++) {
-          bus.runEvent(runId, "error", { message: `Model request failed (${lastError}); retry ${retry} of ${MODEL_RETRIES}` });
-          await sleep(RETRY_DELAY_MS * retry, signal);
-          // continue() resumes from the last user or tool message; drop the failed reply first.
-          agent.state.messages = agent.state.messages.slice(0, -1);
-          await agent.continue();
-          lastError = modelError(agent);
-        }
+        lastError = await this.retryModel(runId, agent, active, signal, { get: () => current, set: (next) => (current = next) });
         next = !lastError && active.inbox.length ? active.inbox.splice(0).join("\n\n") : undefined;
         // A message that continues this execution answers any question it asked.
         if (next !== undefined && active.waitFor) {
@@ -570,6 +580,51 @@ export class RunService {
     }
     if (isReview && !verdict) this.deps.tree.recordVerdict(this.get(runId), false, `The reviewer finished without a verdict: ${fallbackReport(agent.state.messages).summary}`);
     return this.finish(runId, "succeeded", report ?? fallbackReport(agent.state.messages), null);
+  }
+
+  /**
+   * After a failed model request: retry the same model (not when the provider refused the content: it would
+   * refuse again), then switch to the backup model once and retry that too. Returns the error left, if any.
+   */
+  private async retryModel(runId: string, agent: Agent, active: Active, signal: AbortSignal, used: { get(): UsedModel; set(m: UsedModel): void }): Promise<string | null> {
+    const retry = async (error: string | null) => {
+      for (let n = 1; error && !REFUSAL.test(error) && !active.reason && n <= MODEL_RETRIES; n++) {
+        this.deps.bus.runEvent(runId, "error", { message: `Model request failed (${error}); retry ${n} of ${MODEL_RETRIES}` });
+        await sleep(RETRY_DELAY_MS * n, signal);
+        error = await this.requestAgain(agent);
+      }
+      return error;
+    };
+    const error = await retry(modelError(agent));
+    if (!error || active.reason) return error;
+    const backup = await this.resolveBackup(used.get());
+    if (!backup) return error;
+    this.deps.bus.runEvent(runId, "error", { message: `Model request failed (${error}); switching to the backup model ${backup.modelId}` });
+    used.set(backup);
+    agent.state.model = backup.resolved.model;
+    const left = await retry(await this.requestAgain(agent));
+    // Later executions start on the backup only once it has answered.
+    if (!left) this.onBackup.add(runId);
+    return left;
+  }
+
+  /** continue() resumes from the last user or tool message: the failed reply is dropped first. */
+  private async requestAgain(agent: Agent): Promise<string | null> {
+    agent.state.messages = agent.state.messages.slice(0, -1);
+    await agent.continue();
+    return modelError(agent);
+  }
+
+  /** The backup model, unless there is none, it is the model that failed (same endpoint and id), or it cannot be loaded. */
+  private async resolveBackup(failed: { endpointId: string; modelId: string }): Promise<UsedModel | null> {
+    const b = this.deps.backupModel?.();
+    if (!b || (b.endpointId === failed.endpointId && b.modelId === failed.modelId)) return null;
+    try {
+      return { ...b, resolved: await this.deps.gateway.resolve(b.endpointId, b.modelId) };
+    } catch (e) {
+      this.deps.log("backup model unavailable", { model: b.modelId, error: (e as Error).message });
+      return null;
+    }
   }
 
   /** Claude Code or Codex does the work in the worktree; swarmd relays its events, commits and pushes. */

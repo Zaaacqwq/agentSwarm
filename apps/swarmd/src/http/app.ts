@@ -4,7 +4,7 @@ import cookie from "@fastify/cookie";
 import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import {
-  CreateAgent, CreateEndpoint, CreateMission, CreateProject, CreateRun, Credentials, MissionBudget, MissionReply, RunMessage, SetCli, SetDiscord, SetGitHubToken, SetProjectProfile, PutProjectFile, CreateLocalProject, MachineSettings, CreateTicket, UpdateTicket, MoveTicket, TicketSettings, PromoteTicket, CreateLesson, UpdateLesson, SetHandbook, DecideProposal, ROLES, type Role, type Me,
+  CreateAgent, CreateEndpoint, CreateMission, CreateProject, CreateRun, Credentials, MissionBudget, MissionReply, RunMessage, SetCli, SetDiscord, SetGitHubToken, SetProjectProfile, PutProjectFile, CreateLocalProject, MachineSettings, ModelSettings, CreateTicket, UpdateTicket, MoveTicket, TicketSettings, PromoteTicket, CreateLesson, UpdateLesson, SetHandbook, DecideProposal, ROLES, type Role, type Me,
 } from "@agentswarm/contracts";
 import type { Services } from "../app/services.ts";
 import { RateLimiter } from "../auth/rate-limit.ts";
@@ -147,6 +147,8 @@ export async function buildApp(o: AppOptions): Promise<FastifyInstance> {
     // Shown as text, never rendered: an agent wrote it.
     return reply.type("text/plain; charset=utf-8").header("x-content-type-options", "nosniff").header("content-security-policy", "default-src 'none'; sandbox").send(text);
   });
+  app.get("/api/models/settings", async () => s.backupModel.get());
+  app.put<{ Body: ModelSettings }>("/api/models/settings", { schema: { body: ModelSettings } }, async (req) => s.backupModel.set(actor(req), req.body));
   app.get("/api/machine", async () => s.machine.get());
   app.get("/api/machine/load", async () => s.runs.load());
   app.put<{ Body: MachineSettings }>("/api/machine", { schema: { body: MachineSettings } }, async (req) => s.machine.set(actor(req), req.body));

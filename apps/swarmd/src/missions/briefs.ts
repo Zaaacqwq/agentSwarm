@@ -69,7 +69,7 @@ export function stageBrief(stage: MissionStage, c: BriefContext, extra = ""): st
     ].join("\n") : [
       "Stage: research.",
       "Find out what is needed to do this well: how others solve it, libraries or approaches worth reusing, pitfalls, and what fits this repository.",
-      "- For independent questions, spawn researcher sub-agents (role \"researcher\"). Each gets one precise question and reports its findings with source URLs; they do not need to change files. They have web_search and web_fetch, and so do you.",
+      "- For independent questions, spawn researcher sub-agents (role \"researcher\"). Each gets one precise question and reports its findings with source URLs; they do not need to change files. They have web_search and web_fetch (each researcher at most 12 searches and 24 page reads, and told to report once most of its time or budget is used), and so do you. Ask questions small enough for that.",
       `- Write ${d}/research.md: the questions, the findings with source links, the options compared, and your recommendation. Under 150 lines.`,
       "- git_commit and git_push, then call stage_done with a summary of at most 6 lines.",
     ].join("\n");

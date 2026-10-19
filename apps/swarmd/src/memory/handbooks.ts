@@ -27,6 +27,7 @@ export const DEFAULT_HANDBOOKS: Record<Role, string> = {
   ].join("\n"),
   researcher: [
     "- Answer the one question you were given. Prefer primary sources: official docs, repositories, changelogs.",
+    "- Searches and page reads are limited: plan them, and stop as soon as you can answer.",
     "- Give every finding its link and, where it matters, its date: things change fast.",
     "- Separate facts from opinions. Say what you could not find.",
     "- Prefer existing, maintained solutions to building from scratch; note licence and activity.",

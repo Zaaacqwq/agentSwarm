@@ -9,6 +9,7 @@ import { schema, type Db } from "../db/client.ts";
 import type { SecretBox } from "../crypto/secret-box.ts";
 import { AuthService } from "../auth/auth-service.ts";
 import { EndpointService } from "../endpoints/endpoint-service.ts";
+import { BackupModelService } from "../models/backup.ts";
 import { PiModelGateway, type ModelGateway } from "../models/model-gateway.ts";
 import type { GitHubClient } from "../github/github-client.ts";
 import { GitHubService } from "../github/github-service.ts";
@@ -81,6 +82,7 @@ export interface Services {
   readonly discord: DiscordBridge;
   readonly cli: CliService;
   readonly machine: MachineService;
+  readonly backupModel: BackupModelService;
   readonly tickets: TicketService;
   readonly lessons: LessonService;
   readonly handbooks: HandbookService;
@@ -100,9 +102,10 @@ export function createServices(d: ServiceDeps): Services {
   const tree = new TreeService({ db: d.db, projects, agents, github, git: d.git, backend: d.backend, limits: d.limits ?? DEFAULT_LIMITS });
   // R8: the team's memory, read by every run and written at retrospectives.
   const memory = { lessons: new LessonService(d.db, (id) => d.db.select({ name: schema.projects.name }).from(schema.projects).where(eq(schema.projects.id, id)).get()?.name ?? null), handbooks: new HandbookService(d.db) };
+  const backupModel = new BackupModelService(d.db, gateway);
   const runs = new RunService({
     memory,
-    db: d.db, bus, pool, backend: d.backend, projects, agents, gateway, relay, tree, cli,
+    db: d.db, bus, pool, backend: d.backend, projects, agents, gateway, relay, tree, cli, backupModel: () => backupModel.backup(),
     maxConcurrent: d.maxConcurrentRuns, refreshMirror: d.refreshMirror ?? true,
     heavySlots: d.heavySlots ?? 2, memoryPressure: d.memoryPressure ?? memoryPressure, screensDir: d.screensDir,
     log: (msg, extra) => d.log("warn", msg, extra),
@@ -128,5 +131,5 @@ export function createServices(d: ServiceDeps): Services {
     db: d.db, bus, missions, projects, agents, runs, tree, github, git: d.git, attachments: new Attachments(d.db, d.attachmentsDir), log: warn,
     notify: (t, what) => discord.notifyTicket(t, what),
   });
-  return { bus, auth: new AuthService(d.db), endpoints, gateway, github, projects, pool, agents, relay, runs, tree, cleanup, missions, watcher, discord, cli, machine: new MachineService(d.db, d.layout.mirrors), tickets, lessons: memory.lessons, handbooks: memory.handbooks };
+  return { bus, auth: new AuthService(d.db), endpoints, gateway, github, projects, pool, agents, relay, runs, tree, cleanup, missions, watcher, discord, cli, machine: new MachineService(d.db, d.layout.mirrors), backupModel, tickets, lessons: memory.lessons, handbooks: memory.handbooks };
 }
