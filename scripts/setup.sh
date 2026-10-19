@@ -211,7 +211,7 @@ uid="\$(/usr/bin/id -u "\$user")"
 home="\$(/usr/bin/dscl . -read "/Users/\$user" NFSHomeDirectory | /usr/bin/awk '{print \$2}')"
 case "\$cmd" in
   open)
-    real="\$(/usr/bin/realpath "\$arg")" || fail "no such app"
+    real="\$(/bin/realpath "\$arg")" || fail "no such app"
     case "\$real" in ${APPS_DIR}/*.app) ;; *) fail "not an app agentSwarm staged" ;; esac
     [ -d "\$real" ] || fail "not an app"
     exe="\$(/usr/bin/plutil -extract CFBundleExecutable raw -o - "\$real/Contents/Info.plist")" || fail "no main program"
