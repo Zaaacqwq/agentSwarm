@@ -1,0 +1,35 @@
+{
+  "name": "agentswarm",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.11"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "node --watch apps/swarmd/src/main.ts",
+    "dev:web": "npm run dev --workspace @agentswarm/web",
+    "build:web": "npm run build --workspace @agentswarm/web",
+    "test": "node --test --test-concurrency=4 \"packages/*/test/**/*.test.ts\" \"apps/swarmd/test/**/*.test.ts\"",
+    "typecheck": "tsc -p tsconfig.json && tsc -p apps/web/tsconfig.json",
+    "e2e": "playwright test",
+    "check": "node scripts/check.ts",
+    "db:generate": "drizzle-kit generate --config apps/swarmd/drizzle.config.ts"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1",
+    "@types/node": "24.19.2",
+    "typescript": "7.0.2"
+  },
+  "allowScripts": {
+    "esbuild@0.18.20": true,
+    "esbuild@0.25.12": true,
+    "esbuild@0.28.2": true,
+    "better-sqlite3": false,
+    "protobufjs": false,
+    "@google/genai": false
+  }
+}
