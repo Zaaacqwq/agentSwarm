@@ -16,7 +16,7 @@ const STEPS: { stage: MissionStage; label: string; gate?: boolean }[] = [
 
 export const STAGE_LABEL: Record<MissionStage, string> = {
   intake: "Intake", research: "Research", discussion: "Discussion", planning: "Planning", awaiting_approval: "Waiting for your approval",
-  building: "Building", verifying: "Verifying", awaiting_merge: "Waiting for you to merge", retro: "Retrospective", done: "Done", cancelled: "Cancelled",
+  building: "Building", verifying: "Verifying", awaiting_merge: "Waiting for you to merge", review: "Waiting for your decision", retro: "Retrospective", done: "Done", cancelled: "Cancelled",
 };
 
 /** Where the mission is: steps behind it are inked, the current one carries the signal colour. */

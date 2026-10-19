@@ -148,6 +148,11 @@ const EVENT_TEXT: Record<TicketEventView["kind"], (d: Record<string, unknown>) =
   ended: (d) => (d.to === "done" ? "done" : "stopped"),
   attachment: (d) => (d.added ? `added a picture (${String(d.added)})` : "removed a picture"),
   promoted: (d) => (d.ticket ? `became a project: ${String(d.repo)} (${String(d.ticket)})` : `repository created: ${String(d.repo)}`),
+  retried: (d) => `started again${d.worker && d.worker !== "native" ? ` with ${String(d.worker)}` : ""}`,
+  sent_back: (d) => `sent back with ${String(d.comments)} comment(s)`,
+  kept: (d) => `kept as ${String(d.repo)}`,
+  dropped: () => "dropped",
+  cleaned: () => "cleaned up after a week",
 };
 
 function History({ events }: { events: TicketEventView[] }) {

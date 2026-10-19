@@ -5,11 +5,14 @@ import { navigate } from "../router.tsx";
 import { STAGE_LABEL } from "./StageRail.tsx";
 
 export const STATUS_LABEL: Record<TicketStatus, string> = {
-  backlog: "Backlog", todo: "Todo", in_progress: "In progress", needs_you: "Needs you", done: "Done", canceled: "Canceled",
+  backlog: "Backlog", todo: "Todo", in_progress: "In progress", needs_you: "Needs you", review: "Review", done: "Done", canceled: "Canceled",
 };
-export const KIND_LABEL: Record<MissionKind, string> = { feature: "Feature", bug: "Bug", research: "Research", experiment: "Experiment", marketing: "Marketing" };
+export const KIND_LABEL: Record<MissionKind, string> = {
+  change: "Change", newproject: "New project", quick: "Quick test",
+  feature: "Feature", bug: "Bug", research: "Research", experiment: "Experiment", marketing: "Marketing",
+};
 export const PRIORITY_LABEL = ["No priority", "Urgent", "High", "Medium", "Low"] as const;
-export const NEED_LABEL: Record<TicketNeed, string> = { answer: "Answer the lead", approve: "Approve the plan", merge: "Merge the PR", failed: "Stopped: needs you" };
+export const NEED_LABEL: Record<TicketNeed, string> = { answer: "Answer the lead", approve: "Approve the plan", merge: "Review the change", decide: "Look at the result", failed: "Stopped: needs you" };
 /** Columns you can drop a ticket into yourself; the others follow its mission. */
 export const YOURS: readonly TicketStatus[] = ["backlog", "todo", "canceled"];
 

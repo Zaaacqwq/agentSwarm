@@ -12,7 +12,7 @@ import { NewTicket } from "../components/NewTicket.tsx";
 import { KIND_LABEL, MoveMenu, PRIORITY_LABEL, STATUS_LABEL, TicketCard, YOURS, moveTicket } from "../components/TicketCard.tsx";
 import { navigate } from "../router.tsx";
 
-const COLUMNS: readonly TicketStatus[] = ["backlog", "todo", "in_progress", "needs_you", "done"];
+const COLUMNS: readonly TicketStatus[] = ["backlog", "todo", "in_progress", "needs_you", "review", "done"];
 
 /** Filters live in the address, so a reload or a shared link keeps them. */
 function useQuery(): [URLSearchParams, (key: string, value: string) => void] {
@@ -162,7 +162,7 @@ function Column({ status, tickets }: { status: TicketStatus; tickets: TicketView
       <SortableContext id={status} items={tickets.map((t) => t.id)} strategy={verticalListSortingStrategy}>
         <ol className="column-list" ref={setNodeRef}>
           {tickets.map((t) => <SortableCard key={t.id} t={t} />)}
-          {tickets.length === 0 && <li className="column-empty faint">{status === "todo" ? "Drop here to start" : status === "needs_you" ? "Nothing waits for you" : "—"}</li>}
+          {tickets.length === 0 && <li className="column-empty faint">{status === "todo" ? "Drop here to start" : status === "needs_you" ? "Nothing waits for you" : status === "review" ? "Nothing to review" : "—"}</li>}
         </ol>
       </SortableContext>
     </section>
