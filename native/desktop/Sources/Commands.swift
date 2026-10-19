@@ -191,7 +191,13 @@ final class Commands {
     /// that lets clicks through to another app is not enough.
     private func onTarget(_ p: CGPoint, _ target: pid_t) throws {
         if let reason = Policy.refusal(pid: Windows.at(p)?.pid, target: target) { throw HelperError.denied(reason) }
-        if let reason = Policy.refusal(pid: Windows.axPid(at: p), target: target) { throw HelperError.denied(reason) }
+        // A view service drawing a control for the app counts as the app (macOS holds the app responsible for it).
+        let ax = Windows.axPid(at: p)
+        let owner = ax.flatMap { $0 == target || Responsibility.drawsFor(target, pid: $0) ? target : $0 }
+        if let reason = Policy.refusal(pid: owner, target: target) {
+            let what = owner.flatMap { Responsibility.path($0).map { ($0 as NSString).lastPathComponent } } ?? "?"
+            throw HelperError.denied("\(reason) (\(what))")
+        }
     }
 
     /// Typing and keys go to whatever has focus: it must be the app under test (unknown focus counts as not).

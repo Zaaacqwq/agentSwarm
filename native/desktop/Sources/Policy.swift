@@ -120,3 +120,36 @@ enum Sandbox {
         return check(pid, nil, 0) == 1
     }
 }
+
+/**
+ * The process macOS holds responsible for another one: AppKit draws some controls (text fields, buttons) in
+ * system view services that run for the app. Accessibility then reports the service at the point, not the app.
+ */
+enum Responsibility {
+    private typealias Get = @convention(c) (pid_t) -> pid_t
+    private static let get: Get? = {
+        guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "responsibility_get_pid_responsible_for_pid") else { return nil }
+        return unsafeBitCast(sym, to: Get.self)
+    }()
+
+    static func of(_ pid: pid_t) -> pid_t? {
+        guard let get else { return nil }
+        let r = get(pid)
+        return r > 0 ? r : nil
+    }
+
+    /// Services that only draw controls inside the app's windows. Not the open and save panel: choosing a file
+    /// there gives a sandboxed app access to it.
+    static let controlServices = ["ThemeWidgetControlViewService.xpc", "CursorUIViewService.xpc", "TextInputUIMacHelper"]
+
+    static func path(_ pid: pid_t) -> String? {
+        var buf = [CChar](repeating: 0, count: 4096)
+        return proc_pidpath(pid, &buf, UInt32(buf.count)) > 0 ? String(cString: buf) : nil
+    }
+
+    /// Whether an element at a point that belongs to `pid` is the app under test's own control.
+    static func drawsFor(_ target: pid_t, pid: pid_t) -> Bool {
+        guard of(pid) == target, let path = path(pid) else { return false }
+        return controlServices.contains { path.contains("/\($0)/") || path.hasSuffix("/\($0)") }
+    }
+}
