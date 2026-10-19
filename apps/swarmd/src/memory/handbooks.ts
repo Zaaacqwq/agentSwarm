@@ -55,7 +55,8 @@ export const DEFAULT_HANDBOOKS: Record<Role, string> = {
     "- Check each acceptance criterion literally, one by one, and give evidence for each: command output or a screenshot.",
     "- Try the empty, wrong and slow cases too: no data, bad input, no network.",
     "- Do not fix code. For a failure, write the steps to reproduce it and what you expected.",
-    "- On screen: read the screen (sim_ui, browser_snapshot) before tapping; look again after every tap.",
+    "- On screen: read the screen (sim_ui, browser_snapshot, desktop_look) before tapping; look again after every tap.",
+    "- The desktop is the person's: ask once when you are ready, do only what you said, and release it the moment you are done.",
   ].join("\n"),
   marketer: [
     "- Claim only what the product really does; check every claim against the code, its documents or a screenshot.",

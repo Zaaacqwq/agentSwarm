@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { CliStatusView, CliTestResult, CodexWorkstationView, DiscordStatus, EndpointKind, EndpointView, GitHubStatus, MachineLoadView, MachineSettings, ModelSettings, ModelView, TicketSettings } from "@agentswarm/contracts";
+import type { CliStatusView, CliTestResult, CodexWorkstationView, DiscordStatus, EndpointKind, EndpointView, GitHubStatus, DesktopView, MachineLoadView, MachineSettings, ModelSettings, ModelView, TicketSettings } from "@agentswarm/contracts";
 import { api, ago, until, when } from "../api.ts";
 import { useLive, useResource } from "../live.ts";
 import { Badge, Field, Form, Meter, PageHead } from "../components/ui.tsx";
@@ -145,6 +145,7 @@ function Machine() {
     <section className="card stack" aria-labelledby="mc">
       <h2 id="mc">This Mac</h2>
       <MachineLoad />
+      <DesktopHelper />
       <Form submit="Save" onSubmit={async () => {
         const list = value.split(/[\s,]+/).filter(Boolean).map(Number);
         const v = await api<MachineSettings>("PUT", "/machine", { denyPorts: list });
@@ -156,6 +157,27 @@ function Machine() {
         </Field>
       </Form>
     </section>
+  );
+}
+
+/** R9: the helper that lets an agent test a Mac app on this desktop, in sessions you approve. */
+function DesktopHelper() {
+  const d = useResource<DesktopView>("/desktop");
+  useLive((m) => void (m.kind === "desktop" && d.set(() => m.desktop)));
+  const h = d.data?.helper;
+  if (!h) return null;
+  const missing = [!h.screenRecording && "Screen & System Audio Recording", !h.accessibility && "Accessibility"].filter(Boolean);
+  const state = !h.running ? "not installed" : missing.length ? `needs ${missing.join(" and ")}` : h.stoppedByUser ? "stopped from the menu bar: your next approval starts it again" : h.watching ? "ready" : "ready, but cannot tell when you use the Mac (restart it)";
+  return (
+    <div className="stack tight">
+      <p><b>Desktop</b> <Badge status={h.running && !missing.length ? "ok" : "cancelled"}>{state}</Badge></p>
+      {(!h.running || missing.length > 0) && (
+        <p className="faint">
+          {!h.running ? <>Run <code>zsh scripts/setup-desktop.sh</code> in the agentSwarm folder (no sudo). </> : null}
+          {missing.length ? <>Then grant agentSwarm Desktop {missing.join(" and ")} in System Settings → Privacy &amp; Security, and run the script again.</> : null}
+        </p>
+      )}
+    </div>
   );
 }
 

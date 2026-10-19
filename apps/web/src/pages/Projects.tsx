@@ -126,6 +126,16 @@ function ProjectSetup({ p, onChange }: { p: ProjectView; onChange: () => void })
           <Field label="Simulator model" hint="Default: iPhone 17.">
             <input className="mono" value={profile.ios?.deviceType ?? ""} onChange={ios("deviceType")} placeholder="com.apple.CoreSimulator.SimDeviceType.iPhone-17" />
           </Field>
+          <Field label="macOS scheme" hint="For the desktop: what QA builds and opens (each session approved by you).">
+            <input className="mono" value={profile.mac?.scheme ?? ""} onChange={(e) => setProfile((x) => ({ ...x, mac: prune({ ...x.mac, scheme: e.target.value.trim() || undefined }) }))} placeholder="Notes" />
+          </Field>
+          <Field label="macOS project or workspace">
+            <input className="mono" value={profile.mac?.workspace ?? profile.mac?.project ?? ""} placeholder="Notes.xcodeproj"
+              onChange={(e) => {
+                const v = e.target.value.trim();
+                setProfile((x) => ({ ...x, mac: prune({ ...x.mac, project: v.endsWith(".xcodeproj") ? v : undefined, workspace: v.endsWith(".xcworkspace") ? v : undefined }) }));
+              }} />
+          </Field>
           <Field label="Test sites" hint="Besides localhost, where the browser may click and type. One origin per line.">
             <textarea className="mono" value={sites} onChange={(e) => {
               setSites(e.target.value);
@@ -134,6 +144,7 @@ function ProjectSetup({ p, onChange }: { p: ProjectView; onChange: () => void })
             }} placeholder="https://staging.example.com" style={{ minHeight: 40 }} />
           </Field>
         </div>
+        <label className="row"><input type="checkbox" checked={profile.mac?.network ?? false} onChange={(e) => setProfile((x) => ({ ...x, mac: prune({ ...x.mac, network: e.target.checked || undefined }) }))} /> The Mac app under test may use the network (it never sees your files either way)</label>
         <label className="row"><input type="checkbox" checked={profile.product ?? false} onChange={(e) => setProfile((x) => ({ ...x, product: e.target.checked || undefined }))} /> This is a product: feature tickets also update the changelog and the store or landing copy</label>
         <label className="row"><input type="checkbox" checked={profile.autoApproveBugs ?? false} onChange={(e) => setProfile((x) => ({ ...x, autoApproveBugs: e.target.checked }))} /> Bug fixes go ahead without asking me to approve the plan (I still merge the pull request)</label>
       </Form>

@@ -353,3 +353,12 @@ code.copy { cursor: copy; background: var(--paper-sunk); padding: 1px var(--spac
 }
 .stack > .segmented { align-self: flex-start; }
 .pin.suggested { background: var(--warn); }
+
+/* R9: the desktop, on every page while an agent asks for it or uses it. */
+.stack.tight { gap: var(--space-1); }
+.btn.danger { background: var(--bad); border-color: var(--bad); color: var(--signal-ink); }
+.desktop-bar { display: grid; gap: var(--space-3); margin-bottom: var(--space-6); padding: var(--space-4); border: 1px solid var(--rule); border-radius: var(--radius); background: var(--paper-raised); box-shadow: inset 4px 0 0 var(--run), var(--shadow); }
+.desktop-bar.pending { border-color: var(--signal); box-shadow: inset 4px 0 0 var(--signal), var(--shadow); }
+.desktop-bar h2 { font-size: var(--text-lg); margin: 0; }
+.desktop-purpose { font-family: var(--font-display); font-size: var(--text-base); color: var(--ink-soft); overflow-wrap: anywhere; }
+@media (min-width: 720px) { .desktop-bar { grid-template-columns: 1fr auto; align-items: center; } .desktop-bar .error { grid-column: 1 / -1; } }
