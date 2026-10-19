@@ -185,7 +185,7 @@ main                          ← 只放可发布的代码；只有你能合并
 - 每个角色可以单独换模型，例如 lead 和 architect 换更强的模型。
 - 支持 OpenAI 兼容的端点（以后接本地的 Ollama / LM Studio），加 Anthropic、OpenAI 的 API。
 - 按模型实时记录费用；预算按项目和 Agent 两级控制。
-- Mac Studio 到位后：用同一套评测任务对比本地模型和 OpenRouter，再决定把哪些角色挪到本地（R7）。
+- Mac Studio 到位后：用同一套评测任务对比本地模型和 OpenRouter，再决定把哪些角色挪到本地（R10）。
 
 ---
 
@@ -270,9 +270,12 @@ main                          ← 只放可发布的代码；只有你能合并
 | **R2 子 Agent 与分支树**（M） | 派生、排队、并发槽、预算、层数上限、结果约定、评审后合回父分支、取消整棵子树 | lead 把一个功能拆成 3 个工作包；其中一个 dev 再派一个孙 Agent；全部评审通过后合回集成分支，开出到 `main` 的 PR |
 | **R3 流水线与 Discord**（M） | 阶段状态机、两道关口、调研和方案文档、Discord 频道、线程和按钮、面板的 Agent 树和流水线视图 | 你在 Discord 发一句想法（例如一个小网页工具），经过调研、讨论、你批准方案、并行开发、验证，最后出现一个到 `main` 的 PR，附调研、方案和验收文档 |
 | **R4 CLI worker**（S–M） | Claude Code、Codex 作为运行时；事件流显示到面板；费用和额度记录 | 同一个工作包分别交给原生循环、Claude Code、Codex 完成，结果都能评审合并 |
-| **R5 眼睛和手**（M–L） | 浏览器、识图和局部放大、模拟器（构建、运行、点击、截图）、桌面会话改进 | 一个小 SwiftUI App 从想法走到 PR：QA 在模拟器里点完主要流程，验收报告带截图；一个网页项目同样用浏览器完成验证 |
-| **R6 营销与记忆**（S） | 营销阶段、团队经验库、角色手册、复盘 | 一个项目结束后同时产出落地页文案；下一个项目能用上上次的经验 |
-| **R7 本地模型**（S，等 Mac Studio） | 接本地端点、跑评测对比、调整各角色的模型 | 评测报告：每个角色用本地模型和云端模型的成功率、速度、费用 |
+| **R5 Linear 与多项目**（M–L，2026-10-17 插入） | Linear Agent 应用作为发任务和对话的入口；ticket 按类型走固定流程；同时处理多张 ticket；项目档案与本地配置文件；沙盒实验与立项；记录回溯；webhook 经 Tailscale Funnel 进来 | 同时交出 3 张 ticket（两个真实项目加一个沙盒），用手机回答和批准，三件事并行完成，ticket 里留下完整记录。见 `docs/R5_IMPLEMENTATION_PLAN.md` |
+| **R6 眼睛和手**（M–L） | 沙箱里编译 Swift（宏）、模拟器（构建、运行、点击、截图）、无头浏览器、识图和局部放大、QA 截图留痕、重任务槽 | Fridgy 的一张 UI ticket：QA 在模拟器里点完验收标准，验收报告带截图；betterUWWorks 的一张网页 ticket 同样用浏览器验证。见 `docs/R6_IMPLEMENTATION_PLAN.md` |
+| **R7 内置看板**（M，2026-10-18 插入，替换 Linear） | 面板里的 ticket 看板：backlog、看板和列表视图、优先级、标签、评论和批准、手机上好用的界面、Discord 提醒；Agent 按 ticket 排队和汇报；做完后删掉 Linear 集成，关掉 Tailscale Funnel 的公网入口。参考 agent-swarm-ng 的 tickets | 用手机在面板上建 3 张 ticket，回答、批准、看进度和截图，全程不用 Linear；Linear 代码和 Funnel 入口已移除 |
+| **R8 营销与记忆**（S） | 营销阶段、团队经验库、角色手册、复盘 | 一个项目结束后同时产出落地页文案；下一个项目能用上上次的经验 |
+| **R9 桌面会话**（M，2026-10-17 从 R6 移出） | 操作 Mac 原生 App：你批准会话、有时间限制、禁区、随时停止；切换到非禁区应用；"先看后动"的额度 | 一个 Mac App 的改动由 QA 在桌面会话里点完主要流程，验收报告带截图 |
+| **R10 本地模型**（S，等 Mac Studio） | 接本地端点、跑评测对比、调整各角色的模型 | 评测报告：每个角色用本地模型和云端模型的成功率、速度、费用 |
 
 每个阶段沿用现在的流程：先写方案文档并由你确认 → 在新分支上实现 → 测试、E2E、真实模型验收、代码审查 → 写验收文档 → 推送并开 PR。
 
@@ -298,3 +301,17 @@ main                          ← 只放可发布的代码；只有你能合并
 | 便宜模型做方案和评审的质量不够 | 返工多 | 每个角色可以单独换模型；R3 验收后看数据再调整 |
 | 16 GB 内存同时跑构建、模拟器和浏览器 | 卡顿、被系统杀掉 | 重任务槽限制为 2 个，加内存压力监控，超标时暂停新任务 |
 | Discord 被别人发指令 | 安全 | 账号白名单；其他人的消息当作不可信数据 |
+
+---
+
+## 17. 暂缓事项（2026-10-17 记录，主线完成后再做）
+
+| 事项 | 内容 | 来源 |
+|---|---|---|
+| PR 先装到手机上测 | 在 App Store Connect 里给 Fridgy 加一条 Xcode Cloud 工作流 "PR TestFlight"：<br>· 触发：Pull Request Changes，源分支任意，目标 `main`，打开 Auto-cancel，可只在 App 代码变化时触发；<br>· 动作：Archive（iOS，scheme Fridgy），部署准备选 TestFlight (Internal Testing Only)，可加 Test；<br>· 后续动作：TestFlight Internal Testing，选只有你自己的内测组；<br>· 不设 `FRIDGY_RELEASE_CHANNEL`，`ci_post_clone.sh` 默认用 TestFlight 配置。<br>可选：在 `ci_post_clone.sh` 里用 `CI_PULL_REQUEST_NUMBER` 写 `TestFlight/WhatToTest.en-US.txt`，标明这个包对应哪个 PR。<br>注意每月 25 小时的编译额度 | R5 验收：PR 合并前没法在模拟器和手机上试 |
+| PR 消息附上拉到本机的命令 | Linear 和 Discord 里"PR 已开好"的消息附上 `cd <仓库> && gh pr checkout <编号>`；项目接了 Xcode Cloud 时，提示 TestFlight 包大约多久后出现 | 同上 |
+| 模型拒答时换模型 | 提供方的内容审核拒绝（例如 Alibaba `data_inspection_failed`）时，自动换备用模型重试，不让 lead 直接失败 | R5 验收：ZAA-6 的 lead 因此失败 |
+| researcher 上限 | 给 researcher 加搜索次数、抓取次数和费用的上限，到 30 分钟时限前就收尾交结果 | R5 验收：ZAA-6 的 researcher 跑满 30 分钟，花了 $0.73 |
+| ZAA-6（每日自动 fetch） | 暂时搁置。它的会话仍算一个进行中的名额，需要时在面板或 Linear 里停掉 | 你的决定 |
+
+不暂缓、归入 R6 的：沙箱里的 `xcodebuild` 加载不了 Swift 宏插件（SwiftUIMacros），Agent 目前编译不了 SwiftUI 项目。这是 R6 模拟器验收的前提，在 R6 里先解决。

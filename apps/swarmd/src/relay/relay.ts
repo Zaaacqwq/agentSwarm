@@ -69,9 +69,12 @@ export class Relay {
       // New work is measured against what this branch was cut from (its parent's branch in a tree).
       const base = run.baseBranch && (await git(["rev-parse", "--verify", "--quiet", `refs/heads/${run.baseBranch}`], { cwd: mirror })).code === 0
         ? run.baseBranch : project.defaultBranch;
-      const problem = await this.checkContent(mirror, `refs/heads/${base}`, incoming);
+      const problem = await this.checkContent(mirror, `refs/heads/${base}`, incoming, projects.protectedPaths(project.id), secretValues(await projects.files(project.id)));
       if (problem) return this.reject(run, head, problem);
-      await gitOk(git, ["push", "--quiet", project.remoteUrl, `${incoming}:refs/heads/${run.branch}`], { cwd: mirror, timeoutMs: 300_000, ...withToken(await projects.tokenFor(project)) });
+      // Local projects (sandbox, ideas) end here: the mirror is the only copy.
+      if (project.kind !== "local") {
+        await gitOk(git, ["push", "--quiet", project.remoteUrl, `${incoming}:refs/heads/${run.branch}`], { cwd: mirror, timeoutMs: 300_000, ...withToken(await projects.tokenFor(project)) });
+      }
       await gitOk(git, ["update-ref", `refs/heads/${run.branch}`, head], { cwd: mirror });
     } catch (error) {
       return this.record(run, head, "failed", (error as Error).message.slice(0, 400));
@@ -84,7 +87,7 @@ export class Relay {
     return this.deps.db.select().from(schema.gitPushes).where(eq(schema.gitPushes.projectId, projectId)).orderBy(desc(schema.gitPushes.id)).limit(limit).all().map(view);
   }
 
-  private async checkContent(mirror: string, base: string, incoming: string): Promise<string | null> {
+  private async checkContent(mirror: string, base: string, incoming: string, protectedPaths: readonly string[] = [], secrets: readonly string[] = []): Promise<string | null> {
     const { git } = this.deps;
     const commits = Number((await gitOk(git, ["rev-list", "--count", `${base}..${incoming}`], { cwd: mirror })).trim());
     if (commits === 0) return "Nothing new to push compared with the default branch; commit first";
@@ -98,13 +101,25 @@ export class Relay {
     if (lines > RELAY_LIMITS.maxChangedLines) return `Change too large (${lines} lines > ${RELAY_LIMITS.maxChangedLines})`;
     const forbidden = rows.map((r) => r.split("\t")[2] ?? "").filter((path) => FORBIDDEN_PATHS.test(path));
     if (forbidden.length) return `Changes under .github/ are not allowed (${forbidden.slice(0, 3).join(", ")})`;
+    // The project's local files (secrets, local config) never leave this Mac, in any commit.
+    if (protectedPaths.length) {
+      const touched = (await gitOk(git, ["log", "--format=", "--name-only", `${base}..${incoming}`], { cwd: mirror })).split("\n").filter(Boolean);
+      // APFS is case-insensitive: .ENV is .env.
+      const lower = new Set(protectedPaths.map((p) => p.toLowerCase()));
+      const hit = [...new Set(touched.filter((p) => lower.has(p.toLowerCase())))];
+      if (hit.length) return `The project's local files must not be committed (${hit.slice(0, 3).join(", ")}); remove them from every commit (rewrite the branch) before pushing`;
+    }
     // Binary files count as 0 lines above; cap what the push would actually upload.
     const bytes = Number((await gitOk(git, ["rev-list", "--objects", "--disk-usage", `${base}..${incoming}`], { cwd: mirror })).trim());
     if (bytes > RELAY_LIMITS.maxNewBytes) return `Push too large (${Math.round(bytes / 1024 / 1024)} MB of new objects > ${RELAY_LIMITS.maxNewBytes / 1024 / 1024} MB)`;
     // Every commit is published, so scan each one (a secret added then deleted is still in history), messages included.
     const history = await gitOk(git, ["log", "-p", "--no-merges", "--unified=0", "--format=%x00%B", `${base}..${incoming}`], { cwd: mirror });
-    const secrets = scanAddedLines(history, { includeUnprefixed: true });
-    if (secrets.length > 0) return `Possible secrets in the commits (${secrets.join(", ")}); remove them from every commit (rewrite the branch) before pushing`;
+    const found = scanAddedLines(history, { includeUnprefixed: true });
+    if (found.length > 0) return `Possible secrets in the commits (${found.join(", ")}); remove them from every commit (rewrite the branch) before pushing`;
+    // A value from the project's local files, copied into some other file.
+    if (secrets.length && history.split("\n").some((line) => (line.startsWith("+") || !line.startsWith("-")) && secrets.some((v) => line.includes(v)))) {
+      return "The commits contain a value from the project's local files (secrets); remove it from every commit (rewrite the branch) before pushing";
+    }
     return null;
   }
 
@@ -117,6 +132,20 @@ export class Relay {
     this.deps.bus.runEvent(run.id, "push", { ...view(row) }, now);
     return { ok: status === "pushed", message: status === "pushed" ? "pushed" : `Push ${status}: ${reason}` };
   }
+}
+
+/** The distinctive values in the project's local files: whole lines, and the value side of key = value. */
+export function secretValues(files: readonly { content: string }[]): string[] {
+  const out = new Set<string>();
+  for (const f of files) {
+    for (const raw of f.content.split("\n")) {
+      const line = raw.trim();
+      const value = line.replace(/^["']?[A-Za-z_][A-Za-z0-9_.-]*["']?\s*[=:]\s*/, "").replace(/^["']|["'],?$/g, "").trim();
+      // Short values (true, 1, localhost) would match everywhere.
+      if (value.length >= 12 && !/^(https?:\/\/)?(localhost|127\.0\.0\.1)/.test(value)) out.add(value);
+    }
+  }
+  return [...out];
 }
 
 function withToken(token: string | undefined): { token?: string } {

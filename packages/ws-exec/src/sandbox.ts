@@ -1,5 +1,20 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { ExecEnv } from "./layout.ts";
 import { space } from "./space.ts";
+
+/** Where swarmd lists the local ports agents must not reach (production services on this Mac; R5). */
+export const denyPortsFile = (env: ExecEnv) => join(env.layout.mirrors, ".agentswarm", "deny-ports.json");
+
+/** Read on every profile: a change in the dashboard applies to the next command. A broken file denies nothing extra. */
+export function deniedPorts(env: ExecEnv): number[] {
+  try {
+    const raw = JSON.parse(readFileSync(denyPortsFile(env), "utf8")) as unknown;
+    return Array.isArray(raw) ? [...new Set(raw.filter((p): p is number => Number.isInteger(p) && p >= 1 && p <= 65535))].slice(0, 200) : [];
+  } catch {
+    return [];
+  }
+}
 
 /**
  * Seatbelt profile for every command an agent runs. In SBPL the last matching rule wins:
@@ -16,7 +31,11 @@ export function sandboxProfile(env: ExecEnv, scope: string, extraWritable: reado
   // Only this scope's own space: not the workstation's other worktrees, homes or temp dirs.
   const s = space(env, scope);
   // Extra paths are given only by ws-exec itself (a CLI worker's sign-in), never by a request.
-  const writable = [s.dir, s.home, s.tmp, s.cache, inbox, ...extraWritable];
+  // Foundation saves a file on a non-boot volume through <volume>/.TemporaryItems/folders.<uid> (xcodebuild,
+  // simctl, plists): without it every atomic save fails with EPERM. The folder is this user's own (0700).
+  const uid = process.getuid?.();
+  const tempItems = uid === undefined ? [] : [`${layout.volume}/.TemporaryItems/folders.${uid}`];
+  const writable = [s.dir, s.home, s.tmp, s.cache, inbox, ...tempItems, ...extraWritable];
   return [
     "(version 1)",
     "(allow default)",
@@ -33,6 +52,13 @@ export function sandboxProfile(env: ExecEnv, scope: string, extraWritable: reado
     `(deny mach-lookup (global-name "com.apple.pasteboard.1") (global-name-regex #"^com\\.apple\\.windowserver"))`,
     // The dashboard API is not for agents (logins, rate limits, run data).
     `(deny network-outbound (remote ip ${q(`localhost:${layout.swarmdPort}`)}))`,
+    // Nor are the person's own services: on any address (a service bound to 0.0.0.0 answers on the LAN and
+    // Tailscale addresses too), and local databases' Unix sockets in the shared temp and run directories.
+    ...deniedPorts(env).map((port) => `(deny network-outbound (remote ip ${q(`*:${port}`)}))`),
+    // (Not all of /var/run: name lookups go through /var/run/mDNSResponder.)
+    `(deny network-outbound (remote unix-socket (path-regex #"^/(private/)?tmp/")))`,
+    `(deny network-outbound (remote unix-socket (path-regex #"^/(private/)?var/run/docker\\.sock$")))`,
+    `(deny network-outbound (remote unix-socket (path-regex #"^/Users/")))`,
   ].join("\n");
 }
 

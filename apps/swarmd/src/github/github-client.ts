@@ -24,6 +24,10 @@ export interface GitHubClient {
   pullRequestState(token: string, fullName: string, number: number): Promise<PullRequestState>;
   /** Deletes a swarm/… branch; false if it was already gone. */
   deleteBranch(token: string, fullName: string, branch: string): Promise<boolean>;
+  /** The account's repositories, most recently updated first (for picking projects; access is checked on adding). */
+  listRepos(token: string): Promise<{ fullName: string; private: boolean; description: string; updatedAt: string }[]>;
+  /** A new, empty, private repository under the token's user (R5: an idea becomes a project). */
+  createRepo(token: string, name: string, description: string): Promise<{ fullName: string }>;
 }
 
 export type PullRequestState = "open" | "merged" | "closed";
@@ -98,6 +102,16 @@ export class GitHubRest implements GitHubClient {
       if (open[0]) return open[0].html_url;
       throw error;
     }
+  }
+
+  async listRepos(token: string) {
+    const rows = (await (await this.call(token, "GET", "/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member")).json()) as { full_name: string; private: boolean; description: string | null; updated_at: string }[];
+    return rows.map((r) => ({ fullName: r.full_name, private: r.private, description: r.description ?? "", updatedAt: r.updated_at }));
+  }
+
+  async createRepo(token: string, name: string, description: string): Promise<{ fullName: string }> {
+    const created = (await (await this.call(token, "POST", "/user/repos", { name, description: description.slice(0, 300), private: true, auto_init: false })).json()) as { full_name: string };
+    return { fullName: created.full_name };
   }
 
   async pullRequestState(token: string, fullName: string, number: number): Promise<PullRequestState> {

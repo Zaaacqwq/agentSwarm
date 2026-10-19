@@ -29,6 +29,17 @@ export const REPORT_SCHEMA = {
   required: ["summary", "tests", "unfinished"],
 } as const;
 
+/** What a CLI reviewer hands back instead (R5). */
+export const REVIEW_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    approved: { type: "boolean", description: "true only if the branch can be merged as it is" },
+    comments: { type: "string", description: "Specific, actionable comments; what you checked and what you found" },
+  },
+  required: ["approved", "comments"],
+} as const;
+
 /** The only tools Claude Code gets: files and the shell, no web, no sub-agents, no scheduling. */
 const CLAUDE_TOOLS = "Bash,Read,Edit,Write,Glob,Grep";
 /** Codex items that count as one action (it has no turn limit of its own). */
@@ -87,7 +98,8 @@ function returnCodexAuth(env: ExecEnv, runHome: string, original: string): void 
   renameSync(`${target}.tmp`, target);
 }
 
-export async function run(env: ExecEnv, r: { scope: string; runtime: CliRuntime; prompt: string; resume?: string; model?: string; maxTurns: number; timeoutMs: number; credential?: string }, emit: Emit): Promise<CliRunResult> {
+export async function run(env: ExecEnv, r: { scope: string; runtime: CliRuntime; prompt: string; resume?: string; model?: string; maxTurns: number; timeoutMs: number; credential?: string; output?: "report" | "review" }, emit: Emit): Promise<CliRunResult> {
+  const schema = r.output === "review" ? REVIEW_SCHEMA : REPORT_SCHEMA;
   if (!CLI_RUNTIMES.includes(r.runtime)) throw new OpError("bad_request", `Unknown runtime ${String(r.runtime)}`);
   if (typeof r.prompt !== "string" || !r.prompt.trim() || r.prompt.length > MAX_PROMPT) throw new OpError("bad_request", "The prompt must be 1 to 100000 characters");
   if (r.resume !== undefined && !SESSION.test(r.resume)) throw new OpError("bad_request", "Invalid session id");
@@ -108,7 +120,7 @@ export async function run(env: ExecEnv, r: { scope: string; runtime: CliRuntime;
   if (isCodex) {
     lent = lendCodexAuth(env, runCodexHome);
     const schemaFile = join(space.tmp, "report-schema.json");
-    writeFileSync(schemaFile, JSON.stringify(REPORT_SCHEMA), { mode: 0o600 });
+    writeFileSync(schemaFile, JSON.stringify(schema), { mode: 0o600 });
     const flags = [
       "--json", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check", "--strict-config",
       // Nothing from config files or exec-policy rules, wherever they came from.
@@ -124,7 +136,7 @@ export async function run(env: ExecEnv, r: { scope: string; runtime: CliRuntime;
       "--tools", CLAUDE_TOOLS, "--allowedTools", CLAUDE_TOOLS, "--permission-mode", "bypassPermissions",
       // No settings, hooks or MCP servers from anywhere, the repository included.
       "--setting-sources", "", "--strict-mcp-config",
-      "--max-turns", String(r.maxTurns), "--json-schema", JSON.stringify(REPORT_SCHEMA),
+      "--max-turns", String(r.maxTurns), "--json-schema", JSON.stringify(schema),
       ...(r.model ? ["--model", r.model] : []), ...(r.resume ? ["--resume", r.resume] : []),
     ];
     // The token goes through file descriptor 3, so the shell commands Claude runs never see it in their environment.

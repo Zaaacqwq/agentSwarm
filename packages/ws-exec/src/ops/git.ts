@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { closeSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, writeSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import type { ExecEnv } from "../layout.ts";
 import { OpError } from "../protocol.ts";
-import { resolveScope } from "../paths.ts";
+import { resolveInScope, resolveScope } from "../paths.ts";
 import { prepareSpace, space } from "../space.ts";
 import { runProcess } from "../process.ts";
 import { sandboxed } from "../sandbox.ts";
@@ -28,7 +28,76 @@ function inboxPath(env: ExecEnv): string {
   return `${env.layout.inbox}/${env.user}.git`;
 }
 
-export async function clone(env: ExecEnv, scope: string, mirror: string, branch: string, base: string, author = AUTHOR) {
+const MAX_FILES = 20;
+const SEGMENT = /^[A-Za-z0-9._@+ -]{1,100}$/;
+
+/**
+ * A project file path: relative, segments of safe characters, no "." / ".." / empty segments, and no
+ * ".git" segment in any case (APFS is case-insensitive). Mirrors projectFilePath in swarmd.
+ */
+export function projectFilePath(path: unknown): string | null {
+  if (typeof path !== "string" || path.length < 1 || path.length > 200) return null;
+  const parts = path.split("/");
+  if (parts.some((p) => !SEGMENT.test(p) || p === "." || p === ".." || p.toLowerCase() === ".git" || p.trim() !== p)) return null;
+  return parts.join("/");
+}
+
+/** Refuses a path whose existing parts include a symlink: nothing may redirect where a file lands. */
+function noLinks(root: string, rel: string): void {
+  let cur = root;
+  for (const part of rel.split("/")) {
+    cur = join(cur, part);
+    if (!existsSync(cur)) return;
+    if (lstatSync(cur).isSymbolicLink()) throw new OpError("out_of_scope", `${rel} goes through a symbolic link`);
+  }
+}
+
+/** Appends to a file without following a symlink at any step (the agent controls its own .git). */
+function appendNoFollow(root: string, rel: string, text: string): void {
+  noLinks(root, rel);
+  const fd = openSync(join(root, rel), fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_NOFOLLOW, 0o600);
+  try {
+    writeSync(fd, text);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * The project's local files (Local.xcconfig, .env): written into the worktree and listed in
+ * .git/info/exclude so `git add -A` never picks them up. The Relay refuses them in a push too.
+ */
+function placeFiles(dir: string, files: readonly { path: string; content: string }[] | undefined): number {
+  if (!files?.length) return 0;
+  if (files.length > MAX_FILES) throw new OpError("bad_request", `At most ${MAX_FILES} files`);
+  noLinks(dir, ".git/info");
+  mkdirSync(join(dir, ".git", "info"), { recursive: true });
+  noLinks(dir, ".git/info/exclude");
+  const excludeFile = join(dir, ".git", "info", "exclude");
+  const excluded = new Set((existsSync(excludeFile) ? readFileSync(excludeFile, "utf8") : "").split("\n"));
+  for (const f of files) {
+    const path = projectFilePath(f.path);
+    if (!path || typeof f.content !== "string") throw new OpError("bad_request", `Invalid file ${String(f.path)}`);
+    noLinks(dir, path);
+    const target = resolveInScope(dir, path);
+    mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
+    noLinks(dir, path);
+    const fd = openSync(target, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW, 0o600);
+    try {
+      writeSync(fd, f.content);
+    } finally {
+      closeSync(fd);
+    }
+    const line = `/${path}`;
+    if (!excluded.has(line)) {
+      appendNoFollow(dir, ".git/info/exclude", `${line}\n`);
+      excluded.add(line);
+    }
+  }
+  return files.length;
+}
+
+export async function clone(env: ExecEnv, scope: string, mirror: string, branch: string, base: string, author = AUTHOR, files?: readonly { path: string; content: string }[]) {
   if (!WORKTREE_SCOPE.test(scope)) throw new OpError("bad_request", "Worktrees live at worktrees/<repo>/<name>");
   if (!BRANCH_PATTERN.test(branch)) throw new OpError("bad_request", `Branch must look like swarm/<project>/<part>: ${branch}`);
   if (!BASE_PATTERN.test(base) || base.includes("..")) throw new OpError("bad_request", "Invalid base branch");
@@ -41,7 +110,7 @@ export async function clone(env: ExecEnv, scope: string, mirror: string, branch:
     const current = await git(env, dir, ["rev-parse", "--abbrev-ref", "HEAD"], undefined, 30_000, scope);
     if (existsSync(join(dir, ".git")) && current.exitCode === 0 && current.output.trim() === branch) {
       const head = ok(await git(env, dir, ["rev-parse", "HEAD"], undefined, 30_000, scope), "rev-parse").output.trim();
-      return { scope, branch, head, resumed: true };
+      return { scope, branch, head, resumed: true, files: placeFiles(dir, files) };
     }
     throw new OpError("conflict", `Worktree ${scope} already exists on another branch`);
   }
@@ -58,7 +127,7 @@ export async function clone(env: ExecEnv, scope: string, mirror: string, branch:
     ok(await git(env, dir, ["checkout", "--quiet", "-b", branch], undefined, 120_000, scope), "checkout");
   }
   const head = ok(await git(env, dir, ["rev-parse", "HEAD"], undefined, 120_000, scope), "rev-parse").output.trim();
-  return { scope, branch, head, resumed: remoteBranch.exitCode === 0 };
+  return { scope, branch, head, resumed: remoteBranch.exitCode === 0, files: placeFiles(dir, files) };
 }
 
 export async function status(env: ExecEnv, scope: string) {

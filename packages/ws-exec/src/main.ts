@@ -7,19 +7,9 @@ import { currentUser } from "./passwd.ts";
 import { dispatch } from "./dispatch.ts";
 import { killAllOnSignal } from "./process.ts";
 import type { Request, Response } from "./protocol.ts";
+import { readRequest } from "./input.ts";
 
 const MAX_REQUEST_BYTES = 4 * 1024 * 1024;
-
-async function readStdin(): Promise<string> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of process.stdin) {
-    size += (chunk as Buffer).byteLength;
-    if (size > MAX_REQUEST_BYTES) throw new Error("Request too large");
-    chunks.push(chunk as Buffer);
-  }
-  return Buffer.concat(chunks).toString("utf8");
-}
 
 async function main(): Promise<Response> {
   process.umask(0o077);
@@ -40,13 +30,16 @@ async function main(): Promise<Response> {
   }
   if (!st.isDirectory() || st.uid !== me.uid) return fail(`Workstation root ${root} must be a directory owned by ${me.username}`);
   let request: Request;
+  let rest: AsyncIterable<string>;
   try {
-    request = JSON.parse(await readStdin()) as Request;
+    const read = await readRequest(process.stdin, MAX_REQUEST_BYTES);
+    request = JSON.parse(read.request) as Request;
+    rest = read.rest;
   } catch (error) {
     return fail(`Bad request: ${(error as Error).message}`);
   }
   const env: ExecEnv = { user: me.username, home: me.home, root, layout: PRODUCTION_LAYOUT, sandbox: true, reapAll: true };
-  return dispatch(env, request, writeEvent);
+  return dispatch(env, request, writeEvent, rest);
 }
 
 function writeEvent(event: unknown): void {
@@ -57,4 +50,5 @@ function fail(error: string): Response {
   return { ok: false, code: "bad_request", error };
 }
 
-process.stdout.write(`${JSON.stringify(await main())}\n`);
+// Exit once the response is out: a session's stdin may still be open.
+process.stdout.write(`${JSON.stringify(await main())}\n`, () => process.exit(0));

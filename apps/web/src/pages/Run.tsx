@@ -4,6 +4,7 @@ import { api, money, when } from "../api.ts";
 import { useLive, useReconnect, useResource } from "../live.ts";
 import { Badge, Field, Form, PageHead, RuntimeTag } from "../components/ui.tsx";
 import { Tree } from "../components/Tree.tsx";
+import { EventLine, ToolCard, pairTools } from "../components/Activity.tsx";
 
 export function RunPage({ id }: { id: string }) {
   const run = useResource<RunView>(`/runs/${id}`);
@@ -44,7 +45,7 @@ export function RunPage({ id }: { id: string }) {
         </section>
       )}
       <section aria-label="Timeline" className="timeline">
-        {pairTools(events.data ?? []).map((item) => (item.kind === "tool" ? <ToolCall key={item.start.id} start={item.start} end={item.end} /> : <Event key={item.event.id} e={item.event} />))}
+        {pairTools(events.data ?? []).map((item) => (item.kind === "tool" ? <ToolCard key={item.start.id} start={item.start} end={item.end} /> : <EventLine key={item.event.id} e={item.event} />))}
       </section>
       <section className="card">
         <Form submit={live ? "Send to the agent" : "Continue this run"} onSubmit={async () => {
@@ -58,62 +59,4 @@ export function RunPage({ id }: { id: string }) {
   );
 }
 
-type Item = { kind: "tool"; start: RunEventView; end: RunEventView | undefined } | { kind: "event"; event: RunEventView };
 
-/** One card per tool call: its start, and its result once it arrives. */
-function pairTools(events: RunEventView[]): Item[] {
-  const ends = new Map(events.filter((e) => e.type === "tool_end").map((e) => [String(e.data.id), e]));
-  return events.filter((e) => e.type !== "tool_end").map((e) => (e.type === "tool_start" ? { kind: "tool", start: e, end: ends.get(String(e.data.id)) } : { kind: "event", event: e }));
-}
-
-function ToolCall({ start, end }: { start: RunEventView; end: RunEventView | undefined }) {
-  const s = start.data as Record<string, any>;
-  const d = end?.data as Record<string, any> | undefined;
-  const mark = !d ? "…" : d.isError ? "✕" : "✓";
-  return (
-    <div className={`event tool${d?.isError ? " err" : ""}`}>
-      <div className="who">{mark} {s.name}{d?.ms ? ` · ${(d.ms / 1000).toFixed(1)} s` : ""}</div>
-      <pre>{summarize(s.args)}</pre>
-      {d && (
-        <details open={d.isError}>
-          <summary className="faint">{d.isError ? "Error" : "Result"}</summary>
-          <pre>{d.output}</pre>
-        </details>
-      )}
-    </div>
-  );
-}
-
-function Event({ e }: { e: RunEventView }) {
-  const d = e.data as Record<string, any>;
-  switch (e.type) {
-    case "user":
-      return <div className="event user"><div className="who">You</div><pre>{d.text}</pre></div>;
-    case "assistant":
-      return <div className={`event assistant${d.error ? " error" : ""}`}><div className="who">Agent</div><pre>{d.text || d.error}</pre></div>;
-    case "push":
-      return <div className={`event push${d.status === "pushed" ? "" : " error"}`}><div className="who">Relay · <Badge status={d.status} /></div><pre>{d.branch}{d.headSha ? ` @ ${String(d.headSha).slice(0, 10)}` : ""}{d.reason ? `\n${d.reason}` : ""}</pre></div>;
-    case "results":
-      return <div className="event results"><div className="who">Sub-agents reported</div><pre>{d.text}</pre></div>;
-    case "error":
-      return <div className="event error"><div className="who">Problem</div><pre>{d.message}</pre></div>;
-    default:
-      return <div className="status-line faint">{statusText(d)}</div>;
-  }
-}
-
-function statusText(d: Record<string, any>): string {
-  if (d.status === "running") return `Started on ${d.workstation}`;
-  if (d.status === "worktree") return `Worktree ready: ${d.branch} from ${d.base}`;
-  if (d.status === "spawned") return `Spawned ${d.name} on ${d.branch}`;
-  if (d.status === "waiting") return `Waiting for ${d.for?.length ?? 0} sub-agent${d.for?.length === 1 ? "" : "s"}; workstation released`;
-  if (d.status === "pull_request") return `Opened pull request ${d.url}`;
-  if (d.status === "cli") return `${d.runtime === "codex" ? "Codex" : "Claude Code"} session ${String(d.session ?? "").slice(0, 8)}${d.model ? ` · ${d.model}` : ""}`;
-  if (d.status === "committed") return "agentSwarm committed what the CLI left uncommitted";
-  return `Run ${d.status}${d.error ? `: ${d.error}` : ""}`;
-}
-
-function summarize(args: Record<string, unknown> | undefined): string {
-  if (!args) return "";
-  return Object.entries(args).map(([k, v]) => `${k}: ${typeof v === "string" ? (v.length > 400 ? `${v.slice(0, 400)}…` : v) : JSON.stringify(v)}`).join("\n");
-}

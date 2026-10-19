@@ -70,7 +70,7 @@ describe("CLI event streams", () => {
     assert.deepEqual(claude.parse({ type: "something_new", x: 1 }), []);
     assert.deepEqual(claude.parse("not an object"), []);
     const [, maxTurns] = claude.parse({ type: "result", subtype: "error_max_turns", is_error: true, num_turns: 80, usage: {} });
-    assert.deepEqual(maxTurns, { kind: "result", report: null, text: "", isError: true, error: "Claude Code reached its turn limit" });
+    assert.deepEqual(maxTurns, { kind: "result", report: null, text: "", isError: true, error: "Claude Code reached its turn limit", verdict: null });
     const codex = new CodexParser();
     codex.parse({ type: "item.completed", item: { id: "item_1", type: "agent_message", text: "working on it" } });
     const [failed] = codex.parse({ type: "turn.failed", error: { message: "stream disconnected" } });

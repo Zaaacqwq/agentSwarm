@@ -4,8 +4,8 @@ import type { CliRunResult, ExecResult } from "@agentswarm/ws-exec";
 import type { WorkstationBackend } from "../workstations/backend.ts";
 import type { Relay } from "../relay/relay.ts";
 import type { RunRow } from "../agents/run-service.ts";
-import { cliFollowUp, cliPrompt } from "./cli-prompts.ts";
-import { parserFor, type CliEvent } from "./cli-events.ts";
+import { cliFollowUp, cliPrompt, cliReviewPrompt } from "./cli-prompts.ts";
+import { parserFor, type CliEvent, type Verdict } from "./cli-events.ts";
 import type { CliService } from "./cli-service.ts";
 
 const BASE_REF = /^[A-Za-z0-9._/-]{1,200}$/;
@@ -25,6 +25,8 @@ export interface CliExecution {
   readonly role: string;
   readonly repo: string;
   readonly defaultBranch: string;
+  /** The project's profile as prompt lines (R5). */
+  readonly project?: readonly string[];
   /** The model the agent asked for, if it named one for this CLI. */
   readonly model: string | null;
   readonly workstation: string;
@@ -40,6 +42,8 @@ export interface CliOutcome {
   readonly report: RunReport;
   /** Set when the run should end failed (the CLI failed, or stopped at a limit). */
   readonly error: string | null;
+  /** A review run's verdict (null: it gave none). */
+  readonly verdict?: Verdict | null;
 }
 
 export interface CliRunnerDeps {
@@ -60,8 +64,9 @@ export class CliRunner {
   async execute(x: CliExecution): Promise<CliOutcome> {
     const credential = x.runtime === "claude_code" ? (await this.deps.cli.claudeToken()) ?? undefined : undefined;
     if (x.runtime === "claude_code" && !credential) throw new Error("Claude Code has no token (dashboard settings)");
+    if (x.run.kind === "review") return this.review(x, credential);
     const resume = x.run.cliSession ?? undefined;
-    const first = (message: string) => cliPrompt({ name: x.name, role: x.role, repo: x.repo, branch: x.run.branch, base: x.run.baseBranch ?? x.defaultBranch, message });
+    const first = (message: string) => cliPrompt({ name: x.name, role: x.role, repo: x.repo, branch: x.run.branch, base: x.run.baseBranch ?? x.defaultBranch, message, ...(x.project ? { project: x.project } : {}) });
     // No session to continue: the CLI hears the task itself, not only the latest message ("Continue.",
     // an answer) — unless that message is the brief (the first execution).
     const prompt = resume ? cliFollowUp(x.message)
@@ -86,12 +91,25 @@ export class CliRunner {
     return { report, error };
   }
 
+  /** A reviewer: one pass, nothing pushed, the verdict from its structured answer. */
+  private async review(x: CliExecution, credential: string | undefined): Promise<CliOutcome> {
+    const prompt = cliReviewPrompt({ name: x.name, repo: x.repo, branch: x.run.branch, message: x.message, ...(x.project ? { project: x.project } : {}) });
+    const { res, result } = await this.once(x, prompt, undefined, credential, "review");
+    const verdict = result?.verdict ?? null;
+    let error: string | null = null;
+    if (res.stoppedFor === "turns") error = "Stopped: the run reached its turn limit";
+    else if (res.timedOut) error = "Stopped: the run reached its time limit";
+    else if (!verdict) error = `${x.runtime} gave no verdict${result?.error ? `: ${result.error}` : ""}`;
+    const summary = verdict ? `${verdict.approved ? "Approved" : "Changes requested"}: ${verdict.comments}` : (result?.text || "(no verdict)").slice(0, 8000);
+    return { report: { summary, tests: "", unfinished: [] }, error, verdict };
+  }
+
   /** After a stop (time limit): keep what the CLI did, so the parent can see and continue it. Returns a problem, or null. */
   async salvage(x: Pick<CliExecution, "run" | "workstation" | "runtime" | "event" | "defaultBranch">): Promise<string | null> {
     return this.commitAndPush(x).catch((error: Error) => `Could not keep the CLI's work: ${error.message}`);
   }
 
-  private async once(x: CliExecution, prompt: string, resume: string | undefined, credential: string | undefined) {
+  private async once(x: CliExecution, prompt: string, resume: string | undefined, credential: string | undefined, output: "report" | "review" = "report") {
     const parser = parserFor(x.runtime);
     // CLI tool ids restart in every execution (and this process restarts): keep them apart in the run's events.
     const n = randomBytes(3).toString("hex");
@@ -145,7 +163,7 @@ export class CliRunner {
       }
     };
     const res = await this.deps.backend.call<CliRunResult>(x.workstation, {
-      op: "cli.run", scope: x.run.worktreeScope, runtime: x.runtime, prompt, maxTurns: x.run.limits.maxTurns,
+      op: "cli.run", scope: x.run.worktreeScope, runtime: x.runtime, prompt, maxTurns: x.run.limits.maxTurns, output,
       // A backstop only: RunService stops the run at its own deadline.
       timeoutMs: x.run.limits.maxDurationMs + 60_000,
       ...(resume ? { resume } : {}), ...(x.model ? { model: x.model } : {}), ...(credential ? { credential } : {}),

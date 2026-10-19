@@ -3,6 +3,8 @@
 #   sudo zsh scripts/setup.sh                 install (8 workstations) or repair
 #   sudo zsh scripts/setup.sh --update-exec   reinstall ws-exec, its Node runtime and the CLI workers only
 #   sudo zsh scripts/setup.sh --update-cli    (re)install the pinned Claude Code and Codex CLI workers only
+#   sudo zsh scripts/setup.sh --update-tools  (re)install the simulator, browser and build tools only (R6)
+#   sudo zsh scripts/setup.sh --firewall      (re)load the pf rules that keep workstations off the LAN and tailnet (R6)
 #   sudo zsh scripts/setup.sh --uninstall     remove users, group, sudoers and /usr/local/libexec/agentswarm
 #
 # Creates: the SwarmWS APFS volume (ownership on) next to /Volumes/Data, the swarm-ws group, hidden users
@@ -33,6 +35,14 @@ CODEX_RG_SHA256="27d09e29c478fddbfc750a2cb5fd06965bad0ea223e776f8667160a0de63c6e
 CODEX_HOST_SHA256="79f123a85dbc61e8f5d0f0c050dfc3f4b81a8305d33a32b41e008b7f6e035698"   # codex-code-mode-host, next to codex
 CODEX_TEAM="2DC432GLL2"    # OpenAI OpCo, LLC
 CODEX_VENDOR="/opt/homebrew/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin"
+# Eyes and hands (R6): downloaded from their publishers, checked against these hashes before anything is installed.
+AXE_VERSION="1.8.0"
+AXE_SHA256="7b76340b72e90d0f211bc7c4636f15009076eff07acef2f2b632b175debd8834"   # AXe-macOS-v1.8.0-universal.tar.gz
+AXE_TEAM="BR6WD3M6ZD"
+CHROMIUM_VERSION="156.0.8078.4"   # Chrome for Testing headless shell, the build Playwright 1.64.1 drives
+CHROMIUM_SHA256="94e4337b70cbc5638f0935fbc46b9f242bc7416f657e3fbe924baf348404b53d"
+PLAYWRIGHT_VERSION="1.64.1"
+PLAYWRIGHT_SHA256="3af03703c967c95037454f2283f709d53ce804a4776d4219d319f5bbcc2a0185"   # playwright-core-1.64.1.tgz
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 OWNER="${SUDO_USER:-}"
 mode="install"
@@ -41,6 +51,8 @@ for arg in "$@"; do
   case "$arg" in
     --update-exec) mode="update-exec" ;;
     --update-cli) mode="update-cli" ;;
+    --update-tools) mode="update-tools" ;;
+    --firewall) mode="firewall" ;;
     --uninstall) mode="uninstall" ;;
     *) print -u2 "Unknown argument: $arg"; exit 64 ;;
   esac
@@ -221,6 +233,121 @@ install_cli() {
   chown -R root:wheel "$dest" && find "$dest" -type d -exec chmod 0755 {} + && find "$dest" -type f -exec chmod 0755 {} +
 }
 
+# ---- eyes and hands (R6) --------------------------------------------------------------------------
+# ${LIBEXEC}/tools: bin/ (xcodebuild, swift and swiftc wrappers, first on agents' PATH), axe/, chromium/,
+# playwright-core/. A tool already at its pinned version is kept; anything new is downloaded and checked first.
+fetch_pinned() {  # url, file, sha256
+  curl -fsSL --retry 2 "$1" -o "$2" || { warn "Download failed: $1"; return 1; }
+  [[ "$(shasum -a 256 "$2" | awk '{print $1}')" == "$3" ]] || { warn "$1 does not match the pinned SHA-256"; return 1; }
+}
+
+install_tools() {
+  local dest="${LIBEXEC}/tools" stage tmp t
+  stage="$(mktemp -d)"
+  tmp="$(mktemp -d)"
+  mkdir -p "${stage}/bin"
+  cp "${ROOT}/packages/ws-exec/shims/xcodebuild" "${ROOT}/packages/ws-exec/shims/swift" "${ROOT}/packages/ws-exec/shims/swiftc" "${ROOT}/packages/ws-exec/shims/axe" "${stage}/bin/"
+  # The browser driver runs inside the sandbox from here, never from a directory agents can write.
+  cp "${ROOT}/packages/ws-exec/src/ops/browser-driver.ts" "${stage}/browser-driver.ts"
+
+  if [[ "$(cat "${dest}/axe/.version" 2>/dev/null)" != "$AXE_VERSION" ]] \
+    && fetch_pinned "https://github.com/cameroncooke/AXe/releases/download/v${AXE_VERSION}/AXe-macOS-v${AXE_VERSION}-universal.tar.gz" "${tmp}/axe.tgz" "$AXE_SHA256"; then
+    mkdir -p "${tmp}/axe" && tar -xzf "${tmp}/axe.tgz" -C "${tmp}/axe"
+    if codesign --verify --strict -R="anchor apple generic and certificate leaf[subject.OU] = \"${AXE_TEAM}\"" "${tmp}/axe/axe" 2>/dev/null; then
+      print -r -- "$AXE_VERSION" > "${tmp}/axe/.version" && mv "${tmp}/axe" "${stage}/axe"
+    else
+      warn "AXe is not signed by team ${AXE_TEAM}; not installed"
+    fi
+  fi
+
+  if [[ "$(cat "${dest}/chromium/.version" 2>/dev/null)" != "$CHROMIUM_VERSION" ]] \
+    && fetch_pinned "https://cdn.playwright.dev/builds/cft/${CHROMIUM_VERSION}/mac-arm64/chrome-headless-shell-mac-arm64.zip" "${tmp}/chromium.zip" "$CHROMIUM_SHA256"; then
+    mkdir -p "${tmp}/chromium" && unzip -q "${tmp}/chromium.zip" -d "${tmp}/chromium" \
+      && print -r -- "$CHROMIUM_VERSION" > "${tmp}/chromium/.version" && mv "${tmp}/chromium" "${stage}/chromium"
+  fi
+
+  if [[ "$(cat "${dest}/playwright-core/.version" 2>/dev/null)" != "$PLAYWRIGHT_VERSION" ]] \
+    && fetch_pinned "https://registry.npmjs.org/playwright-core/-/playwright-core-${PLAYWRIGHT_VERSION}.tgz" "${tmp}/pw.tgz" "$PLAYWRIGHT_SHA256"; then
+    tar -xzf "${tmp}/pw.tgz" -C "$tmp" && print -r -- "$PLAYWRIGHT_VERSION" > "${tmp}/package/.version" && mv "${tmp}/package" "${stage}/playwright-core"
+  fi
+
+  # Whatever was not (re)installed keeps the copy already there: a failed download never removes a working tool.
+  for t in axe chromium playwright-core; do
+    [[ ! -d "${stage}/${t}" && -d "${dest}/${t}" ]] && cp -R "${dest}/${t}" "${stage}/${t}"
+  done
+  rm -rf "$tmp"
+  # Nothing from an archive keeps setuid bits, and no link may point outside its tool.
+  local link target
+  find "$stage" -type l | while read -r link; do
+    target="$(cd "$(dirname "$link")" && realpath "$(readlink "$link")" 2>/dev/null || true)"
+    [[ "$target" == "${stage}/"* ]] || { warn "Removing a link that leaves the tools: ${link#${stage}/}"; rm -f "$link"; }
+  done
+  chown -R root:wheel "$stage" && chmod -R u-s,g-s,go-w,a+rX "$stage" && chmod 0755 "$stage" "${stage}/bin/"*
+  # Swapped in by renames, so agents never see a half-installed directory.
+  rm -rf "${dest}.old"
+  [[ -d "$dest" ]] && mv "$dest" "${dest}.old"
+  mv "$stage" "$dest"
+  rm -rf "${dest}.old"
+  for t in axe chromium playwright-core; do
+    [[ -d "${dest}/${t}" ]] && say "Tools: ${t} $(cat "${dest}/${t}/.version")" || warn "${t} is not installed; agents cannot use it"
+  done
+}
+
+# ---- firewall (R6) ---------------------------------------------------------------------------------
+# Seatbelt filters by port only: it cannot keep agents off the LAN, the tailnet (your services behind
+# tailscale serve), or a name that resolves there. pf can, per user: these rules match only the workstation
+# users' sockets (by uid), refuse at once (TCP reset, ICMP unreachable), and leave everyone else alone.
+PF_ANCHOR="com.apple/agentswarm"
+PF_RULES="/etc/pf.anchors/agentswarm"
+PF_DAEMON="/Library/LaunchDaemons/com.agentswarm.pf.plist"
+
+install_firewall() {
+  local uids user
+  uids="$(for user in $(workstation_users); do id -u "$user"; done | paste -sd, -)"
+  [[ -n "$uids" ]] || { warn "No workstation users; firewall rules not installed"; return; }
+  local tmp
+  tmp="$(mktemp)"
+  cat > "$tmp" <<RULES
+# Managed by agentswarm scripts/setup.sh: workstation users (uids ${uids}) may not reach the LAN, the tailnet,
+# link-local or multicast addresses. Loopback (their own dev servers) and the internet stay open.
+table <agentswarm_private> const { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16, 224.0.0.0/4, 0.0.0.0/8, fc00::/7, fe80::/10, fec0::/10, ff00::/8 }
+block return out quick proto { tcp, udp } from any to <agentswarm_private> user { ${uids} }
+RULES
+  pfctl -nf "$tmp" -a "$PF_ANCHOR" >/dev/null 2>&1 || { rm -f "$tmp"; die "The firewall rules do not parse; nothing changed."; }
+  install -o root -g wheel -m 0644 "$tmp" "$PF_RULES"
+  rm -f "$tmp"
+  # Loaded again at every boot: the main ruleset with Apple's anchor point loads by itself, ours does not.
+  cat > "$PF_DAEMON" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.agentswarm.pf</string>
+  <key>ProgramArguments</key><array><string>/bin/sh</string><string>-c</string><string>/sbin/pfctl -E; /sbin/pfctl -a ${PF_ANCHOR} -f ${PF_RULES}</string></array>
+  <key>RunAtLoad</key><true/>
+</dict></plist>
+PLIST
+  chown root:wheel "$PF_DAEMON" && chmod 0644 "$PF_DAEMON"
+  launchctl bootout system "$PF_DAEMON" >/dev/null 2>&1 || true
+  launchctl bootstrap system "$PF_DAEMON" || warn "Could not register ${PF_DAEMON}"
+  pfctl -E >/dev/null 2>&1 || true
+  pfctl -a "$PF_ANCHOR" -f "$PF_RULES" 2>/dev/null || die "Loading the firewall rules failed"
+  say "Firewall: workstation users (uids ${uids}) cannot reach the LAN or the tailnet"
+}
+
+# A workstation must be refused by the tailnet (Tailscale's own 100.100.100.100) and still reach the internet.
+verify_firewall() {
+  local user="$1" out
+  out="$(print -r -- '{"op":"exec","scope":"cache","command":"curl -s -o /dev/null -m 5 http://100.100.100.100/; echo tailnet=$?; curl -s -o /dev/null -m 10 https://api.github.com/; echo internet=$?","timeoutMs":30000}' | sudo -u "$OWNER" sudo -n "$LAUNCH" "$user" 2>&1 || true)"
+  if [[ "$out" == *"tailnet=7"* && "$out" == *"internet=0"* ]]; then say "Verified: ${user} is refused by the tailnet and reaches the internet"
+  else warn "Firewall check for ${user} did not pass: ${out}"; fi
+}
+
+remove_firewall() {
+  launchctl bootout system "$PF_DAEMON" >/dev/null 2>&1 || true
+  pfctl -a "$PF_ANCHOR" -F all >/dev/null 2>&1 || true
+  rm -f "$PF_DAEMON" "$PF_RULES"
+}
+
 write_sudoers() {
   local tmp user
   tmp="$(mktemp)"
@@ -253,6 +380,7 @@ case "$mode" in
       dscl . -read "/Users/${user}" >/dev/null 2>&1 && dscl . -delete "/Users/${user}"
       [[ -d "/Users/${user}" ]] && rm -rf "/Users/${user}"
     done
+    remove_firewall
     dscl . -read "/Groups/${GROUP}" >/dev/null 2>&1 && dseditgroup -o delete "$GROUP"
     rm -f "$SUDOERS" && rm -rf "$LIBEXEC"
     visudo -c >/dev/null || warn "sudoers does not validate; inspect /etc/sudoers.d"
@@ -262,11 +390,21 @@ case "$mode" in
     install_node
     install_exec
     install_cli
+    install_tools
     write_sudoers
+    install_firewall
     for user in $(workstation_users); do verify "$user"; done
+    verify_firewall "$(workstation_users | head -1)"
     ;;
   update-cli)
     install_cli
+    ;;
+  update-tools)
+    install_tools
+    ;;
+  firewall)
+    install_firewall
+    verify_firewall "$(workstation_users | head -1)"
     ;;
   install)
     preflight
@@ -276,8 +414,11 @@ case "$mode" in
     install_node
     install_exec
     install_cli
+    install_tools
     write_sudoers
+    install_firewall
     for n in $(seq 1 "$COUNT"); do verify "ws-${n}"; done
+    verify_firewall "ws-1"
     say "Done. Next: npm run check (as yourself), then start swarmd."
     ;;
 esac

@@ -71,7 +71,63 @@ export interface ProjectView {
   readonly protectedAt: number | null;
   readonly lastFetchedAt: number | null;
   readonly createdAt: number;
+  /** R5: "local" projects live only on this Mac (sandbox experiments, ideas). */
+  readonly kind: "github" | "local";
+  readonly profile: ProjectProfile;
+  readonly linearProjectId: string | null;
+  /** Paths of the local files (not their contents) written into every worktree. */
+  readonly files: readonly { readonly path: string; readonly updatedAt: number }[];
 }
+
+// ---- project profile and files (R5) -------------------------------------------------------
+export const ProjectProfile = Type.Object({
+  platform: Type.Optional(Type.String({ maxLength: 80 })),
+  setup: Type.Optional(Type.String({ maxLength: 1000 })),
+  build: Type.Optional(Type.String({ maxLength: 1000 })),
+  test: Type.Optional(Type.String({ maxLength: 1000 })),
+  knownFailures: Type.Optional(Type.String({ maxLength: 2000 })),
+  rules: Type.Optional(Type.String({ maxLength: 4000 })),
+  reviewRuntime: Type.Optional(Type.Union([Type.Literal("native"), Type.Literal("claude_code"), Type.Literal("codex")])),
+  autoApproveBugs: Type.Optional(Type.Boolean()),
+  /** iOS apps (R6): what to build for the simulator. Agents find the rest with `xcodebuild -list`. */
+  ios: Type.Optional(Type.Object({
+    project: Type.Optional(Type.String({ maxLength: 200, pattern: "\\.xcodeproj$" })),
+    workspace: Type.Optional(Type.String({ maxLength: 200, pattern: "\\.xcworkspace$" })),
+    scheme: Type.Optional(Type.String({ maxLength: 100 })),
+    /** e.g. com.apple.CoreSimulator.SimDeviceType.iPhone-17 */
+    deviceType: Type.Optional(Type.String({ maxLength: 150, pattern: "^[A-Za-z0-9.-]+$" })),
+  })),
+  /** Sites besides the local dev server where the browser may click and type (R6): origins, e.g. https://staging.example.com. */
+  testSites: Type.Optional(Type.Array(Type.String({ maxLength: 200, pattern: "^https?://[^/\\s]+$" }), { maxItems: 20 })),
+});
+export type ProjectProfile = Static<typeof ProjectProfile>;
+
+export const SetProjectProfile = Type.Object({
+  profile: ProjectProfile,
+  linearProjectId: Type.Optional(Type.Union([Type.String({ minLength: 1, maxLength: 64 }), Type.Null()])),
+});
+export type SetProjectProfile = Static<typeof SetProjectProfile>;
+
+/** A file path inside the worktree; the segments are checked further by the server (no ".", "..", empty or .git segments). */
+export const PROJECT_FILE_PATH = "^[A-Za-z0-9._@+ /-]{1,200}$";
+export const PutProjectFile = Type.Object({
+  path: Type.String({ pattern: PROJECT_FILE_PATH }),
+  content: Type.String({ maxLength: 256 * 1024 }),
+});
+export type PutProjectFile = Static<typeof PutProjectFile>;
+
+export interface RepoChoice {
+  readonly fullName: string;
+  readonly private: boolean;
+  readonly description: string;
+  readonly updatedAt: string;
+}
+
+export const CreateLocalProject = Type.Object({ name: Type.String({ minLength: 1, maxLength: 60, pattern: "^[A-Za-z0-9][A-Za-z0-9 ._-]*$" }) });
+export type CreateLocalProject = Static<typeof CreateLocalProject>;
+
+export const MachineSettings = Type.Object({ denyPorts: Type.Array(Type.Integer({ minimum: 1, maximum: 65535 }), { maxItems: 200 }) });
+export type MachineSettings = Static<typeof MachineSettings>;
 
 export interface PushView {
   readonly id: number;
@@ -183,7 +239,21 @@ export interface RunView {
   readonly runtime: AgentRuntime;
   /** CLI runs: the cost at API prices as the CLI reports it (paid by the subscription, not the budget). */
   readonly estimatedUsd: number;
+  /** Eyes and hands it was given (R6). */
+  readonly needs: readonly RunNeed[];
 }
+
+/** R6: how busy this Mac is with simulators and browsers. memoryPressure: 1 normal, 2 warning, 4 critical. */
+export interface MachineLoadView {
+  readonly heavySlots: number;
+  readonly heavyRunning: number;
+  readonly heavyQueued: number;
+  readonly memoryPressure: number;
+}
+
+/** What a run may use beyond its worktree (R6). Each holds a heavy slot while the run works. */
+export type RunNeed = "simulator" | "browser";
+export const RUN_NEEDS: readonly RunNeed[] = ["simulator", "browser"];
 
 /** Every run of one tree, and what the whole tree has spent. */
 export interface TreeView {
@@ -223,8 +293,11 @@ export const CreateMission = Type.Object({
   budgetUsd: Type.Optional(Type.Number({ minimum: 0.1, maximum: 50 })),
   /** The lead; default: the project's agent named Lead, else its newest agent. */
   agentId: Type.Optional(Type.String()),
+  /** R5: which flow (default feature). */
+  kind: Type.Optional(Type.Union([Type.Literal("feature"), Type.Literal("bug"), Type.Literal("research"), Type.Literal("experiment")])),
 });
 export type CreateMission = Static<typeof CreateMission>;
+export type MissionKind = "feature" | "bug" | "research" | "experiment";
 
 export const MissionReply = Type.Object({ text: Type.String({ minLength: 1, maxLength: 8000 }) });
 export type MissionReply = Static<typeof MissionReply>;
@@ -262,6 +335,10 @@ export interface MissionView {
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly endedAt: number | null;
+  readonly kind: MissionKind;
+  readonly origin: "dashboard" | "discord" | "linear";
+  /** The Linear ticket it came from. */
+  readonly linear: { readonly key: string; readonly url: string } | null;
 }
 
 export interface MissionMessageView {
@@ -270,7 +347,7 @@ export interface MissionMessageView {
   readonly author: "user" | "lead" | "system";
   readonly kind: "text" | "question" | "stage" | "approval" | "error";
   readonly text: string;
-  readonly source: "dashboard" | "discord" | "agentswarm";
+  readonly source: "dashboard" | "discord" | "agentswarm" | "linear";
   readonly createdAt: number;
 }
 
@@ -365,6 +442,45 @@ export interface CliTestResult {
   readonly ok: boolean;
   readonly detail: string;
   readonly workstationId: string | null;
+}
+
+// ---- Linear (R5) --------------------------------------------------------------------------
+export const SetLinear = Type.Object({
+  /** From the Linear application you created; omit secrets to keep the stored ones. */
+  clientId: Type.Optional(Type.String({ minLength: 8, maxLength: 200 })),
+  clientSecret: Type.Optional(Type.String({ minLength: 8, maxLength: 500 })),
+  webhookSecret: Type.Optional(Type.String({ minLength: 8, maxLength: 500 })),
+  /** The only Linear user whose tickets agentSwarm takes. */
+  ownerUserId: Type.Optional(Type.Union([Type.String({ minLength: 1, maxLength: 64 }), Type.Null()])),
+  /** Linear projects that are not a repository: throwaway experiments, and ideas without a repository yet. */
+  sandboxProjectId: Type.Optional(Type.Union([Type.String({ minLength: 1, maxLength: 64 }), Type.Null()])),
+  ideasProjectId: Type.Optional(Type.Union([Type.String({ minLength: 1, maxLength: 64 }), Type.Null()])),
+  /** Tickets worked on at once; the rest wait, by priority. */
+  maxActive: Type.Optional(Type.Integer({ minimum: 1, maximum: 8 })),
+});
+export type SetLinear = Static<typeof SetLinear>;
+
+export interface LinearStatusView {
+  readonly configured: boolean;
+  readonly connected: boolean;
+  readonly organization: string | null;
+  readonly appUser: string | null;
+  readonly clientId: string | null;
+  readonly hasWebhookSecret: boolean;
+  readonly ownerUserId: string | null;
+  readonly sandboxProjectId: string | null;
+  readonly ideasProjectId: string | null;
+  readonly maxActive: number;
+  /** Where Linear must send webhooks (set in the Linear application). */
+  readonly webhookPath: string;
+  readonly lastEventAt: number | null;
+  readonly error: string | null;
+  readonly queue: readonly { readonly key: string; readonly title: string; readonly status: string; readonly url: string; readonly missionId: string | null }[];
+}
+
+export interface LinearOptionsView {
+  readonly users: readonly { readonly id: string; readonly name: string; readonly email: string }[];
+  readonly projects: readonly { readonly id: string; readonly name: string }[];
 }
 
 // ---- system check ------------------------------------------------------------------------

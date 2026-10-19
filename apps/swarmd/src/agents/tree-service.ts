@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { BRANCH_PATTERN } from "@agentswarm/ws-exec";
 import { and, eq, inArray, desc } from "drizzle-orm";
-import type { AgentRuntime, RunReport } from "@agentswarm/contracts";
+import type { AgentRuntime, RunNeed, RunReport } from "@agentswarm/contracts";
 import type { Db } from "../db/client.ts";
 import { schema } from "../db/client.ts";
 import { CLI_DEFAULT_MODEL } from "../cli/cli-prompts.ts";
@@ -47,6 +47,8 @@ export interface SpawnInput {
   readonly modelId?: string;
   /** R4: who does the work. CLI workers use your subscription, so they get no dollar budget. */
   readonly runtime?: AgentRuntime;
+  /** R6: a simulator or a browser for this sub-agent (a heavy slot while it works). */
+  readonly needs?: readonly RunNeed[];
 }
 
 const slug = (text: string, max: number) => text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, max).replace(/-+$/, "");
@@ -140,7 +142,7 @@ export class TreeService {
       const modelId = runtime === "native" ? input.modelId : input.modelId ?? CLI_DEFAULT_MODEL;
       const agent = agents.createEphemeral(parentAgent, { name, role: input.role.trim().slice(0, 40) || "developer", runtime, ...(modelId ? { modelId } : {}) }, now);
       const node = this.uniqueNode(fresh, slug(name, 20) || "part");
-      const row = this.childRow(fresh, project, agent.id, name, input.brief, node, base, budget, now, runtime);
+      const row = { ...this.childRow(fresh, project, agent.id, name, input.brief, node, base, budget, now, runtime), needs: input.needs?.length ? [...new Set<RunNeed>(input.needs)] : null };
       db.insert(schema.runs).values(row).run();
       return row;
     }, { behavior: "immediate" });
@@ -160,12 +162,12 @@ export class TreeService {
       report: null, error: null, turns: 0, tokensIn: 0, tokensOut: 0, costUsd: 0, limits: this.deps.limits,
       createdAt: now, startedAt: null, endedAt: null, treeId: parent.treeId, parentRunId: parent.id, depth: parent.depth + 1,
       baseBranch: base, budgetUsd: budget, kind: "task", reviewOf: null, review: null, mergedAt: null, prUrl: null, waitingFor: null, reviewSha: null,
-      missionId: parent.missionId, prState: null, cleanedAt: null, cliSession: null, estimatedUsd: 0,
+      missionId: parent.missionId, prState: null, cleanedAt: null, cliSession: null, estimatedUsd: 0, needs: null,
     };
   }
 
   /** A reviewer for a finished child: it checks out the child's branch read-only and gets the diff. */
-  async startReview(parent: RunRow, childId: string, now = Date.now()): Promise<RunRow> {
+  async startReview(parent: RunRow, childId: string, now = Date.now(), runtime: AgentRuntime = "native"): Promise<RunRow> {
     const { db, agents, projects } = this.deps;
     const child = this.child(parent, childId);
     if (child.kind !== "task") throw new TreeError("Only task agents can be reviewed");
@@ -177,7 +179,9 @@ export class TreeService {
     // The review is for exactly this commit; a later push needs a new review.
     const sha = (await gitOk(this.deps.git, ["rev-parse", `refs/heads/${child.branch}`], { cwd: project.mirrorPath })).trim();
     const diff = await this.diff(project, `refs/heads/${base}`, sha);
-    const reviewer = agents.createEphemeral(agents.get(parent.agentId), { name: `${child.title}-review`.slice(0, 30), role: "reviewer" }, now);
+    const reviewer = agents.createEphemeral(agents.get(parent.agentId), {
+      name: `${child.title}-review`.slice(0, 30), role: "reviewer", runtime, ...(runtime === "native" ? {} : { modelId: CLI_DEFAULT_MODEL }),
+    }, now);
     const n = this.children(parent.id).filter((r) => r.kind === "review" && r.reviewOf === child.id).length + 1;
     const childNode = child.branch.split("/").pop()!;
     const row: RunRow = {
@@ -186,9 +190,9 @@ export class TreeService {
       workstationId: null, status: "queued", pendingMessage: reviewBrief(child, base, diff),
       report: null, error: null, turns: 0, tokensIn: 0, tokensOut: 0, costUsd: 0, limits: this.deps.limits,
       createdAt: now, startedAt: null, endedAt: null, treeId: parent.treeId, parentRunId: parent.id, depth: parent.depth + 1,
-      baseBranch: base, budgetUsd: this.carve(parent, TREE_LIMITS.reviewBudgetUsd, true), kind: "review", reviewOf: child.id,
+      baseBranch: base, budgetUsd: runtime === "native" ? this.carve(parent, TREE_LIMITS.reviewBudgetUsd, true) : 0, kind: "review", reviewOf: child.id,
       review: null, mergedAt: null, prUrl: null, waitingFor: null, reviewSha: sha,
-      missionId: parent.missionId, prState: null, cleanedAt: null, cliSession: null, estimatedUsd: 0,
+      missionId: parent.missionId, prState: null, cleanedAt: null, cliSession: null, estimatedUsd: 0, needs: null,
     };
     db.insert(schema.runs).values(row).run();
     return row;
@@ -225,6 +229,7 @@ export class TreeService {
     const live = this.descendants(root.id).filter((r) => !TERMINAL.has(r.status));
     if (live.length) throw new TreeError(`Sub-agents are still working (${live.map((r) => r.title).join(", ")}); wait for them first`);
     const project = this.deps.projects.get(root.projectId);
+    if (project.kind === "local") throw new TreeError("This project lives only on this Mac: there is no pull request to open");
     const unmerged = this.children(root.id).filter((c) => c.kind === "task" && c.status === "succeeded" && !c.mergedAt);
     const note = unmerged.length ? `\n\nNot merged: ${unmerged.map((c) => c.branch).join(", ")}` : "";
     const url = await this.deps.github.client.createPullRequest(await this.deps.github.token(), project.githubRepo, {

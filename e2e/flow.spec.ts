@@ -19,7 +19,7 @@ test("set up agentSwarm, add a project and an agent, and watch a run fix a bug",
   await expect(page.getByText("tester")).toBeVisible();
 
   await page.getByRole("link", { name: "Projects" }).click();
-  await page.getByLabel("GitHub repository").fill("tester/demo");
+  await page.getByLabel("Or type it").fill("tester/demo");
   await page.getByRole("button", { name: "Add project" }).click();
   await expect(page.getByText("main protected")).toBeVisible();
 
@@ -36,7 +36,7 @@ test("set up agentSwarm, add a project and an agent, and watch a run fix a bug",
   await expect(page.getByRole("heading", { name: "Report" })).toBeVisible({ timeout: 30_000 });
   await expect(page.getByRole("region", { name: "Report" }).getByText("square now multiplies; the test passes.")).toBeVisible();
   const timeline = page.getByRole("region", { name: "Timeline" });
-  await expect(timeline.getByText("✓ ws_bash", { exact: false })).toBeVisible();
+  await expect(timeline.locator(".tool-card.ok", { hasText: "ws_bash" }).first()).toBeVisible();
   await expect(timeline.getByText("pushed", { exact: true })).toBeVisible();
   await expect(timeline.getByText("Sub-agents reported").first()).toBeVisible();
   await expect(page.getByText(/^Pull request: https:\/\/github\.com\/tester\/demo\/pull\/1$/)).toBeVisible();
@@ -52,6 +52,9 @@ test("set up agentSwarm, add a project and an agent, and watch a run fix a bug",
   await tree.getByRole("link", { name: "Helper", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Helper" })).toBeVisible();
   await expect(page.getByRole("region", { name: "Report" }).getByText("Fixed square.")).toBeVisible();
+  const shot = page.getByRole("region", { name: "Timeline" }).getByRole("img", { name: "Screenshot from sim_screenshot" });
+  await expect(shot).toBeVisible();
+  await expect.poll(() => shot.evaluate((img) => (img as unknown as { naturalWidth: number }).naturalWidth)).toBeGreaterThan(0);
   await page.screenshot({ path: `${SHOTS}/child-1440.png`, fullPage: true });
   await page.getByRole("link", { name: "Projects" }).click();
   await expect(page.getByText("pushed", { exact: true }).first()).toBeVisible();
@@ -96,6 +99,13 @@ test("start a mission on the dashboard, answer the lead, approve its plan, and g
   await expect(tree.getByRole("link", { name: "Builder", exact: true })).toBeVisible();
   await expect(tree.getByText("merged", { exact: true })).toBeVisible();
   await expect(chat.getByText("Yes, 8, and a new file is fine.")).toBeVisible();
+  // One live feed for the whole tree: the builder's tool calls, as cards that open.
+  const activity = page.getByRole("log", { name: "Agent activity" });
+  await expect(activity.locator(".agent-chip", { hasText: "Builder" }).first()).toBeVisible();
+  const card = activity.locator(".tool-card", { hasText: "cube.js" }).first();
+  await expect(card).toBeVisible();
+  await card.locator("summary").click();
+  await expect(card.getByText("export const cube")).toBeVisible();
   await page.screenshot({ path: `${SHOTS}/mission-1440.png`, fullPage: true });
   await page.setViewportSize({ width: 375, height: 812 });
   await page.screenshot({ path: `${SHOTS}/mission-375.png`, fullPage: true });
@@ -145,4 +155,50 @@ test("connect Claude Code and Codex, then watch a Claude Code sub-agent do the w
   await page.screenshot({ path: `${SHOTS}/cli-settings-1440.png`, fullPage: true });
   await page.setViewportSize({ width: 375, height: 812 });
   await page.screenshot({ path: `${SHOTS}/cli-settings-375.png`, fullPage: true });
+});
+
+test("set up Linear, a project's profile and local files, and the ports agents may not reach", async ({ page }) => {
+  await page.goto("/settings");
+  await page.getByLabel("Password").fill("correct horse battery staple");
+  await page.getByRole("button", { name: "Sign in" }).click();
+  const linear = page.getByRole("region", { name: "Linear" });
+  await expect(linear.getByText("not installed")).toBeVisible();
+  await expect(linear.getByText("/api/linear/callback")).toBeVisible();
+  await linear.getByLabel("Client ID").fill("client-id-e2e");
+  await linear.getByLabel("Client secret").fill("client-secret-e2e");
+  await linear.getByLabel("Webhook signing secret").fill("webhook-secret-e2e");
+  await linear.getByRole("button", { name: "Save" }).click();
+  await expect(linear.getByRole("button", { name: "Install in Linear" })).toBeEnabled();
+  await expect(linear.getByText("Stored; leave empty to keep it.").first()).toBeVisible();
+
+  const mac = page.getByRole("region", { name: "This Mac" });
+  await expect(mac.getByText("simulators and browsers in use", { exact: false })).toBeVisible();
+  await mac.getByLabel("Local ports agents may not connect to").fill("3000, 5432");
+  await mac.getByRole("button", { name: "Save" }).click();
+  await page.reload();
+  await expect(page.getByRole("region", { name: "This Mac" }).getByLabel("Local ports agents may not connect to")).toHaveValue("3000, 5432");
+  await page.screenshot({ path: `${SHOTS}/linear-settings-1440.png`, fullPage: true });
+
+  await page.getByRole("link", { name: "Projects" }).click();
+  await page.getByRole("button", { name: "Profile and files" }).first().click();
+  await page.getByLabel("Test", { exact: true }).fill("node --test");
+  await page.getByLabel("Rules").fill("Never deploy; only open pull requests.");
+  await page.getByLabel("iOS scheme").fill("Demo");
+  await page.getByLabel("Xcode project or workspace").fill("Demo.xcodeproj");
+  await page.getByLabel("Test sites").fill("https://staging.example.com");
+  await page.getByRole("button", { name: "Save profile" }).click();
+  await page.reload();
+  await page.getByRole("button", { name: "Profile and files" }).first().click();
+  await expect(page.getByLabel("iOS scheme")).toHaveValue("Demo");
+  await expect(page.getByLabel("Test sites")).toHaveValue("https://staging.example.com");
+  await page.getByLabel("Path in the repository").fill("Local.xcconfig");
+  await page.getByLabel("Content").fill("API_KEY = dev-only\n");
+  await page.getByRole("button", { name: "Save file" }).click();
+  await expect(page.getByRole("cell", { name: "Local.xcconfig" })).toBeVisible();
+  await expect(page.getByText("dev-only")).toHaveCount(0);
+  await page.screenshot({ path: `${SHOTS}/project-profile-1440.png`, fullPage: true });
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.screenshot({ path: `${SHOTS}/project-profile-375.png`, fullPage: true });
+  await page.goto("/settings");
+  await page.screenshot({ path: `${SHOTS}/linear-settings-375.png`, fullPage: true });
 });

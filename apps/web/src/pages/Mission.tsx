@@ -5,6 +5,7 @@ import { useLive, useReconnect, useResource } from "../live.ts";
 import { Badge, Field, Form, PageHead } from "../components/ui.tsx";
 import { STAGE_LABEL, StageRail } from "../components/StageRail.tsx";
 import { Tree } from "../components/Tree.tsx";
+import { TreeActivity } from "../components/Activity.tsx";
 import { Link } from "../router.tsx";
 
 export function MissionPage({ id }: { id: string }) {
@@ -24,7 +25,7 @@ export function MissionPage({ id }: { id: string }) {
   const approval = [...(messages.data ?? [])].reverse().find((x) => x.kind === "approval");
   return (
     <div className="stack">
-      <PageHead title={m.title} sub={<><span className={m.waitingForYou ? "needs-you" : "muted"}>{m.waitingForYou ? "Needs you · " : ""}{STAGE_LABEL[m.stage]}</span> · {m.githubRepo} · <span className="mono">{m.branch}</span></>}
+      <PageHead title={m.title} sub={<><span className={m.waitingForYou ? "needs-you" : "muted"}>{m.waitingForYou ? "Needs you · " : ""}{STAGE_LABEL[m.stage]}</span> · {m.githubRepo} · <span className="mono">{m.branch}</span>{m.linear && <> · <a href={m.linear.url} target="_blank" rel="noreferrer">{m.linear.key} ↗</a></>}</>}
         action={ended ? undefined : <button className="btn ghost" onClick={() => confirm("Stop this mission? Running agents are cancelled.") && api("POST", `/missions/${id}/cancel`, {}).catch((e: Error) => alert(e.message))}>Stop mission</button>} />
       <StageRail stage={m.stage} fast={m.fast} />
       {m.stage === "awaiting_approval" && <ApprovalGate mission={m} summary={approval?.text ?? m.stageSummary ?? ""} />}
@@ -68,6 +69,7 @@ export function MissionPage({ id }: { id: string }) {
         </aside>
       </div>
       <Tree treeId={m.treeId} current={m.rootRunId} />
+      <TreeActivity treeId={m.treeId} />
     </div>
   );
 }
@@ -113,7 +115,7 @@ function Conversation({ mission, messages, ended }: { mission: MissionView; mess
     <section className="card stack chat-card" aria-labelledby="chat-head">
       <div className="row" style={{ justifyContent: "space-between" }}>
         <h2 id="chat-head">Conversation</h2>
-        <span className="faint">{mission.discordThreadId ? "Also in its Discord thread" : "Dashboard only"}</span>
+        <span className="faint">{mission.linear ? "Also in its Linear ticket" : mission.discordThreadId ? "Also in its Discord thread" : "Dashboard only"}</span>
       </div>
       <ol className="chat" ref={list}>
         {messages.map((x) => <Message key={x.id} m={x} />)}

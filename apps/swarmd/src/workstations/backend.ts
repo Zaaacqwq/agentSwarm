@@ -24,9 +24,18 @@ export interface CallOptions {
   readonly onEvent?: (event: unknown) => void;
 }
 
+/** A request whose stdin stays open (browser.session, R6): commands go in as lines, replies come back as events. */
+export interface WorkstationSession<T> {
+  send(command: object): void;
+  /** Ends stdin: ws-exec winds the session down and responds. */
+  close(): void;
+  readonly done: Promise<T>;
+}
+
 /** Runs one ws-exec request as a workstation user. */
 export interface WorkstationBackend {
   call<T>(osUser: string, request: Request, opts?: CallOptions): Promise<T>;
+  open<T>(osUser: string, request: Request, opts?: CallOptions): WorkstationSession<T>;
   /** The workstation users that exist on this machine. */
   listUsers(): Promise<string[]>;
 }
@@ -41,7 +50,12 @@ export class SudoBackend implements WorkstationBackend {
 
   call<T>(osUser: string, request: Request, opts: CallOptions = {}): Promise<T> {
     if (!WS_USER_PATTERN.test(osUser)) return Promise.reject(new WorkstationError("bad_request", `Not a workstation user: ${osUser}`));
-    return runJson<T>(["/usr/bin/sudo", "-n", this.launchPath, osUser], { PATH: "/usr/bin:/bin" }, request, opts);
+    return runJson<T>(["/usr/bin/sudo", "-n", this.launchPath, osUser], { PATH: "/usr/bin:/bin" }, request, opts).done;
+  }
+
+  open<T>(osUser: string, request: Request, opts: CallOptions = {}): WorkstationSession<T> {
+    if (!WS_USER_PATTERN.test(osUser)) return closedSession(new WorkstationError("bad_request", `Not a workstation user: ${osUser}`));
+    return runJson<T>(["/usr/bin/sudo", "-n", this.launchPath, osUser], { PATH: "/usr/bin:/bin" }, request, opts, true);
   }
 
   async listUsers(): Promise<string[]> {
@@ -69,7 +83,13 @@ export class LocalBackend implements WorkstationBackend {
   call<T>(osUser: string, request: Request, opts: CallOptions = {}): Promise<T> {
     const env = this.envs.get(osUser);
     if (!env) return Promise.reject(new WorkstationError("bad_request", `Not a workstation user: ${osUser}`));
-    return runJson<T>([process.execPath, this.entry], { PATH: "/usr/bin:/bin", WS_EXEC_TEST_ENV: JSON.stringify(env) }, request, opts);
+    return runJson<T>([process.execPath, this.entry], { PATH: "/usr/bin:/bin", WS_EXEC_TEST_ENV: JSON.stringify(env) }, request, opts).done;
+  }
+
+  open<T>(osUser: string, request: Request, opts: CallOptions = {}): WorkstationSession<T> {
+    const env = this.envs.get(osUser);
+    if (!env) return closedSession(new WorkstationError("bad_request", `Not a workstation user: ${osUser}`));
+    return runJson<T>([process.execPath, this.entry], { PATH: "/usr/bin:/bin", WS_EXEC_TEST_ENV: JSON.stringify(env) }, request, opts, true);
   }
 
   async listUsers(): Promise<string[]> {
@@ -77,11 +97,20 @@ export class LocalBackend implements WorkstationBackend {
   }
 }
 
-function runJson<T>(argv: string[], env: Record<string, string>, request: Request, opts: CallOptions): Promise<T> {
+function closedSession<T>(error: Error): WorkstationSession<T> {
+  const done = Promise.reject(error);
+  done.catch(() => undefined);
+  return { send: () => undefined, close: () => undefined, done };
+}
+
+/** One ws-exec process. With `keepOpen`, stdin stays open after the request for a session's commands. */
+function runJson<T>(argv: string[], env: Record<string, string>, request: Request, opts: CallOptions, keepOpen = false): WorkstationSession<T> {
   const [cmd, ...args] = argv as [string, ...string[]];
-  return new Promise((resolve, reject) => {
+  let input: NodeJS.WritableStream | null = null;
+  const done = new Promise<T>((resolve, reject) => {
     if (opts.signal?.aborted) return reject(new WorkstationError("cancelled", "Cancelled"));
     const child = spawn(cmd, args, { cwd: "/", env, stdio: ["pipe", "pipe", "pipe"] });
+    child.stdin.on("error", () => undefined);
     // Lines are read as they come: `{"event": …}` lines go to onEvent, the last line is the response.
     let pending = "";
     let last = "";
@@ -149,6 +178,17 @@ function runJson<T>(argv: string[], env: Record<string, string>, request: Reques
       if (res.ok) resolve(res.result as T);
       else reject(new WorkstationError(res.code, res.error));
     }));
-    child.stdin.end(JSON.stringify(request));
+    if (keepOpen) {
+      child.stdin.write(`${JSON.stringify(request)}\n`);
+      input = child.stdin;
+    } else child.stdin.end(`${JSON.stringify(request)}\n`);
   });
+  return {
+    send: (command) => void input?.write(`${JSON.stringify(command)}\n`),
+    close: () => {
+      input?.end();
+      input = null;
+    },
+    done,
+  };
 }
