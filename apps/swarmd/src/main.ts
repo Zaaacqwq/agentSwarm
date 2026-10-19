@@ -1,4 +1,5 @@
 import { chmodSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { PRODUCTION_LAYOUT } from "@agentswarm/ws-exec";
 import { loadConfig } from "./config.ts";
@@ -10,6 +11,7 @@ import { SudoBackend } from "./workstations/backend.ts";
 import { GitHubRest } from "./github/github-client.ts";
 import { createGitRunner } from "./github/git.ts";
 import { DiscordJsTransport } from "./discord/discord-js.ts";
+import { SocketHelper } from "./desktop/helper.ts";
 
 const log: Logger = (level, msg, extra) => {
   process.stderr.write(`${JSON.stringify({ time: new Date().toISOString(), level, msg, ...extra })}\n`);
@@ -40,6 +42,11 @@ async function main(): Promise<void> {
     attachmentsDir: join(config.dataDir, "attachments"),
     log,
     transport: new DiscordJsTransport(),
+    // R9: agentSwarm Desktop (scripts/setup-desktop.sh) listens in your own Library.
+    desktop: {
+      helper: new SocketHelper(join(homedir(), "Library", "Application Support", "agentSwarm", "desktop.sock")),
+      appsDir: join(homedir(), "Library", "Application Support", "agentSwarm", "apps"),
+    },
     dashboardUrl: config.dashboardUrl ?? `http://${config.host === "::1" ? "[::1]" : config.host}:${config.port}`,
   });
 
@@ -53,6 +60,7 @@ async function main(): Promise<void> {
   // Installed CLI versions and Codex sign-ins (R4); failures only show in the dashboard.
   void services.cli.refresh().catch(() => undefined);
   services.runs.recover();
+  await services.desktop.start();
   services.tickets.recover();
   services.auth.pruneExpired();
   // Screenshots shown in the dashboard (R6) are kept for a month after their run ended.
@@ -79,6 +87,7 @@ async function main(): Promise<void> {
     log("info", "shutting down", { signal });
     services.watcher.stop();
     await services.discord.stop();
+    services.desktop.stopAll();
     await services.runs.stopAll();
     await app.close();
     database.close();

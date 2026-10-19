@@ -83,6 +83,8 @@ export interface ProjectProfile {
   readonly autoApproveBugs?: boolean;
   /** R6: what to build for the simulator. */
   readonly ios?: { readonly project?: string; readonly workspace?: string; readonly scheme?: string; readonly deviceType?: string };
+  /** R9: what to build for the desktop, and whether the app under test may use the network. */
+  readonly mac?: { readonly project?: string; readonly workspace?: string; readonly scheme?: string; readonly network?: boolean };
   /** R6: origins besides localhost where the browser may click and type. */
   readonly testSites?: string[];
   /** R8: a product: its feature tickets also update the changelog and store copy (a marketer works alongside). */
@@ -133,7 +135,7 @@ export interface RunLimits {
 }
 
 /** What a run may use beyond its worktree (R6). */
-export type RunNeed = "simulator" | "browser";
+export type RunNeed = "simulator" | "browser" | "desktop";
 
 export const runs = sqliteTable("runs", {
   id: text("id").primaryKey(),
@@ -421,3 +423,25 @@ export const handbookProposals = sqliteTable("handbook_proposals", {
   createdAt: integer("created_at").notNull(),
   decidedAt: integer("decided_at"),
 }, (t) => [index("handbook_proposals_status_idx").on(t.status, t.createdAt)]);
+
+// ---- R9: desktop sessions ----------------------------------------------------------------------
+export const DESKTOP_STATUSES = ["queued", "pending", "active", "ended", "denied"] as const;
+
+/**
+ * An agent's turn at this Mac's desktop, to test one app. queued: another session has the desktop;
+ * pending: waiting for your approval; active: approved, until `until`; ended or denied.
+ */
+export const desktopSessions = sqliteTable("desktop_sessions", {
+  id: text("id").primaryKey(),
+  runId: text("run_id").notNull().references(() => runs.id, { onDelete: "cascade" }),
+  projectId: text("project_id").notNull(),
+  agent: text("agent").notNull(),
+  purpose: text("purpose").notNull(),
+  minutes: integer("minutes").notNull(),
+  status: text("status", { enum: DESKTOP_STATUSES }).notNull(),
+  until: integer("until"),
+  endReason: text("end_reason"),
+  createdAt: integer("created_at").notNull(),
+  decidedAt: integer("decided_at"),
+  endedAt: integer("ended_at"),
+}, (t) => [index("desktop_sessions_status_idx").on(t.status, t.createdAt)]);

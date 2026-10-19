@@ -1,5 +1,5 @@
 import { and, asc, eq, gt, isNull } from "drizzle-orm";
-import type { CliQuotaView, DiscordStatus, LiveMessage, MissionMessageView, SetDiscord } from "@agentswarm/contracts";
+import type { CliQuotaView, DesktopSessionView, DiscordStatus, LiveMessage, MissionMessageView, SetDiscord } from "@agentswarm/contracts";
 import type { Db } from "../db/client.ts";
 import { schema } from "../db/client.ts";
 import type { SecretBox } from "../crypto/secret-box.ts";
@@ -8,6 +8,7 @@ import { badRequest } from "../errors.ts";
 import type { EventBus } from "../events/event-bus.ts";
 import type { ProjectService } from "../projects/project-service.ts";
 import type { MissionService } from "../missions/mission-service.ts";
+import type { DesktopService } from "../desktop/desktop-service.ts";
 import { ENDED, STAGE_LABEL } from "../missions/stages.ts";
 import { splitMessage, type ButtonEvent, type ChatTransport, type CommandEvent, type CommandSpec, type IncomingMessage, type ModalEvent } from "./transport.ts";
 
@@ -40,6 +41,8 @@ export interface BridgeDeps {
   readonly bus: EventBus;
   readonly missions: MissionService;
   readonly projects: ProjectService;
+  /** R9: desktop sessions, approved or stopped with buttons. */
+  readonly desktop?: Pick<DesktopService, "approve" | "deny" | "stop">;
   readonly transport: ChatTransport;
   readonly dashboardUrl: string;
   readonly log: (msg: string, extra?: Record<string, unknown>) => void;
@@ -311,6 +314,7 @@ export class DiscordBridge {
     if (!this.owner(e.userId)) return e.reply("Only the owner can do that.");
     const [action, id, plan] = e.customId.split(":");
     if (!id) return;
+    if (action?.startsWith("desktop-")) return this.onDesktopButton(e, action, id);
     if ((action === "approve" || action === "changes") && Number(plan) !== this.deps.missions.latestApproval(id)) {
       return e.reply("That is an older version of the plan. Use the buttons on the latest one in this thread.");
     }
@@ -323,6 +327,41 @@ export class DiscordBridge {
       this.deps.missions.cancel(ACTOR, id);
       return e.settle("**Stopped.**");
     }
+  }
+
+  private async onDesktopButton(e: ButtonEvent, action: string, id: string): Promise<void> {
+    const desktop = this.deps.desktop;
+    if (!desktop) return e.reply("Desktop sessions are not available.");
+    if (action === "desktop-approve") {
+      const s = await desktop.approve(ACTOR, id);
+      return e.settle(`**Approved:** the desktop is ${s.agent}'s for ${s.minutes} minutes. Stop it any time from the menu bar on the Mac, the dashboard, or here.`);
+    }
+    if (action === "desktop-deny") {
+      desktop.deny(ACTOR, id);
+      return e.settle("**Declined.**");
+    }
+    if (action === "desktop-stop") {
+      await desktop.stop(ACTOR);
+      return e.settle("**Stopped.** The app under test was closed.");
+    }
+  }
+
+  /** A desktop session (R9): a request waits for you with Approve and Deny; an active one can be stopped. */
+  notifyDesktop(session: DesktopSessionView, what: string, decide: boolean): void {
+    const s = this.stored();
+    if (!s || !this.connected) return;
+    const link = `${this.deps.dashboardUrl.replace(/\/$/, "")}${session.ticketKey ? `/tickets/${session.ticketKey}` : `/runs/${session.runId}`}`;
+    // The purpose is the agent's words: shown as code, so it cannot carry links or formatting.
+    const purpose = session.purpose.replace(/[`\r\n]+/g, " ").slice(0, 200);
+    const where = session.ticketKey ? `**${session.ticketKey}** ` : "";
+    const content = decide
+      ? `${where}**${session.agent}** asks to use this Mac's desktop for ${session.minutes} minutes, to test \`${purpose}\`. Only the app it builds can be seen and used; it runs in the App Sandbox. ${link}`
+      : `${where}Desktop session (${session.agent}) ${what}. ${link}`;
+    const buttons = decide
+      ? [{ id: `desktop-approve:${session.id}`, label: "Approve", style: "success" as const }, { id: `desktop-deny:${session.id}`, label: "Deny", style: "danger" as const }]
+      : session.status === "active" ? [{ id: `desktop-stop:${session.id}`, label: "Stop", style: "danger" as const }] : undefined;
+    this.deps.transport.send(s.channelId, { content, ...(buttons ? { buttons } : {}) })
+      .catch((err: Error) => this.deps.log("discord desktop note failed", { session: session.id, error: err.message }));
   }
 
   private async onModal(e: ModalEvent): Promise<void> {
