@@ -4,6 +4,7 @@ import { api, upload } from "../api.ts";
 import { useResource } from "../live.ts";
 import { Field, Form } from "./ui.tsx";
 import { PRIORITY_LABEL } from "./TicketCard.tsx";
+import { FILE_ACCEPT, MAX_FILES, WaitsFor, size } from "./Files.tsx";
 
 const MAX_PICTURES = 6;
 
@@ -28,6 +29,8 @@ export function NewTicket({ onCreated }: { onCreated: (t: TicketView) => void })
   const [start, setStart] = useState(false);
   const [commit, setCommit] = useState(true);
   const [pictures, setPictures] = useState<File[]>([]);
+  const [files, setFiles] = useState<File[]>([]);
+  const [waits, setWaits] = useState<string[]>([]);
   const list = projects.data ?? [];
   const github = list.filter((p) => p.kind === "github");
   useEffect(() => {
@@ -38,14 +41,17 @@ export function NewTicket({ onCreated }: { onCreated: (t: TicketView) => void })
       <Form submit={start ? "Create and start" : "Add to the backlog"} onSubmit={async () => {
         const space = kind === "change" ? "project" : "sandbox";
         const options = kind === "change" ? { planFirst, marketing } : kind === "quick" ? { researchOnly } : {};
-        const t = await api<TicketView>("POST", "/tickets", { space, ...(space === "project" ? { projectId: where } : {}), title, description, kind, priority, commitAttachments: commit, options });
-        // Pictures first, then it may start: the lead sees them in its first message.
+        const t = await api<TicketView>("POST", "/tickets", { space, ...(space === "project" ? { projectId: where } : {}), title, description, kind, priority, commitAttachments: commit, options, blockedBy: waits });
+        // Pictures and files first, then it may start: the lead sees them in its first message and under inputs/.
         const failed: string[] = [];
         for (const file of pictures) {
           await upload(`/tickets/${t.key}/attachments`, file, file.name).catch((e: Error) => void failed.push(`${file.name}: ${e.message}`));
         }
-        // The ticket exists either way: never make you create it twice. With a picture missing, it waits for you.
-        if (failed.length) alert(`${t.key} was created, but these pictures were not added:\n${failed.join("\n")}\n\nAdd them on the ticket${start ? ", then move it to Todo" : ""}.`);
+        for (const file of files) {
+          await upload(`/tickets/${t.key}/files`, file, file.name, true).catch((e: Error) => void failed.push(`${file.name}: ${e.message}`));
+        }
+        // The ticket exists either way: never make you create it twice. With something missing, it waits for you.
+        if (failed.length) alert(`${t.key} was created, but these were not added:\n${failed.join("\n")}\n\nAdd them on the ticket${start ? ", then move it to Todo" : ""}.`);
         else if (start) await api("POST", `/tickets/${t.key}/move`, { status: "todo" }).catch((e: Error) => alert(`${t.key} was created but did not start: ${e.message}`));
         onCreated(t);
       }}>
@@ -79,6 +85,13 @@ export function NewTicket({ onCreated }: { onCreated: (t: TicketView) => void })
             {pictures.map((f) => <li key={f.name + f.size}><img src={URL.createObjectURL(f)} alt={f.name} /></li>)}
           </ul>
         )}
+        <Field label="Files" hint={`Up to ${MAX_FILES}: an assignment, data, documents (PDF, zip, Office, text; 25 MB each). The lead gets them under inputs/. Files already on the Mac: use "From the inbox" on the ticket.`}>
+          <input type="file" accept={FILE_ACCEPT} multiple onChange={(e) => setFiles([...(e.target.files ?? [])].slice(0, MAX_FILES))} />
+        </Field>
+        {files.length > 0 && <ul className="file-list" aria-label="Chosen files">{files.map((f) => <li key={f.name + f.size}><span className="mono">{f.name}</span> <span className="faint">{size(f.size)}</span></li>)}</ul>}
+        <Field label="Waits for (optional)" hint="It starts only once these tickets are done.">
+          <WaitsFor value={waits} onChange={setWaits} />
+        </Field>
         {kind === "change" && <label className="row"><input type="checkbox" checked={planFirst} onChange={(e) => setPlanFirst(e.target.checked)} /> Show me a plan first (otherwise the lead decides: only risky changes get one)</label>}
         {kind === "change" && <label className="row"><input type="checkbox" checked={marketing} onChange={(e) => setMarketing(e.target.checked)} /> Update the marketing copy too</label>}
         {kind === "quick" && <label className="row"><input type="checkbox" checked={researchOnly} onChange={(e) => setResearchOnly(e.target.checked)} /> Only find out (a report with sources, no code)</label>}

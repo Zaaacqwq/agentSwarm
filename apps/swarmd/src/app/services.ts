@@ -12,6 +12,7 @@ import { EndpointService } from "../endpoints/endpoint-service.ts";
 import { BackupModelService } from "../models/backup.ts";
 import { DesktopService } from "../desktop/desktop-service.ts";
 import { keyOf } from "../tickets/ticket-service.ts";
+import { Inbox, TicketFiles } from "../tickets/files.ts";
 import type { DesktopHelper } from "../desktop/helper.ts";
 import type { StageTools } from "../desktop/stage.ts";
 import { PiModelGateway, type ModelGateway } from "../models/model-gateway.ts";
@@ -50,8 +51,10 @@ export interface ServiceDeps {
   readonly heavySlots?: number;
   /** R6: where runs' screenshots are kept for the dashboard. */
   readonly screensDir: string;
-  /** R7: where tickets' pictures are kept. */
+  /** R7: where tickets' pictures are kept (R10: and their files). */
   readonly attachmentsDir: string;
+  /** R10: the inbox on this Mac that files can be attached from (~/agentSwarm-inbox). */
+  readonly inboxDir?: string;
   /** R6: tests pretend memory is tight. */
   readonly memoryPressure?: () => number;
   readonly log: Logger;
@@ -150,6 +153,7 @@ export function createServices(d: ServiceDeps): Services {
   const discord = new DiscordBridge({ db: d.db, secrets: d.secrets, bus, missions, projects, desktop, transport: d.transport, dashboardUrl: d.dashboardUrl, log: warn, quota: () => cli.quota() });
   const tickets = new TicketService({
     db: d.db, bus, missions, projects, agents, runs, tree, github, git: d.git, attachments: new Attachments(d.db, d.attachmentsDir), log: warn,
+    files: new TicketFiles(d.db, d.attachmentsDir), ...(d.inboxDir ? { inbox: new Inbox(d.inboxDir) } : {}),
     notify: (t, what) => discord.notifyTicket(t, what),
   });
   return { bus, auth: new AuthService(d.db), endpoints, gateway, github, projects, pool, agents, relay, runs, tree, cleanup, missions, watcher, discord, cli, machine: new MachineService(d.db, d.layout.mirrors), backupModel, desktop, tickets, lessons: memory.lessons, handbooks: memory.handbooks };

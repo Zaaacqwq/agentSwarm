@@ -22,8 +22,9 @@ export async function api<T>(method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"
 }
 
 /** A picture as itself (R7): the server checks its bytes, converts it and answers JSON. */
-export async function upload<T>(path: string, file: Blob, name: string): Promise<T> {
-  const type = /^image\/(jpeg|png|heic|heif)$/.test(file.type) ? file.type : "application/octet-stream";
+export async function upload<T>(path: string, file: Blob, name: string, raw = false): Promise<T> {
+  // A picture says what it is; anything else (R10 files) goes as bytes and is checked by swarmd.
+  const type = !raw && /^image\/(jpeg|png|heic|heif)$/.test(file.type) ? file.type : "application/octet-stream";
   const res = await fetch(`/api${path}?name=${encodeURIComponent(name)}`, { method: "POST", credentials: "same-origin", headers: { "content-type": type }, body: file });
   const text = await res.text();
   const data = text ? JSON.parse(text) : null;

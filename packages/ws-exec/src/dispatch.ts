@@ -52,7 +52,7 @@ function run(env: ExecEnv, r: Request, emit: cli.Emit, input: AsyncIterable<stri
     case "info": return { user: env.user, root: env.root, sandbox: env.sandbox };
     case "fs.list": return fs.list(env, r.scope, r.path, r.depth);
     case "fs.read": return fs.read(env, r.scope, r.path, r.offset, r.limit);
-    case "fs.write": return fs.write(env, r.scope, r.path, r.content, r.encoding);
+    case "fs.write": return fs.write(env, r.scope, r.path, r.content, r.encoding, r.append);
     case "fs.edit": return fs.edit(env, r.scope, r.path, r.oldText, r.newText, r.replaceAll);
     case "fs.grep": return fs.grep(env, r.scope, r.pattern, r.path, r.glob, r.maxResults);
     case "exec": return exec(env, r.scope, r.command, r.timeoutMs);

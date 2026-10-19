@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "57b2f9a4-7ff8-45cc-bd26-28022af07e31",
+  "id": "27f0be18-05cc-4f26-91a1-f31f0d1b6045",
   "prevId": "d5490e4f-ba95-4600-bc10-637459888e59",
   "tables": {
     "agent_sessions": {
@@ -2148,6 +2148,80 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
+    "ticket_files": {
+      "name": "ticket_files",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "ticket_id": {
+          "name": "ticket_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "file": {
+          "name": "file",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "bytes": {
+          "name": "bytes",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "ticket_files_ticket_idx": {
+          "name": "ticket_files_ticket_idx",
+          "columns": [
+            "ticket_id"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "ticket_files_ticket_id_tickets_id_fk": {
+          "name": "ticket_files_ticket_id_tickets_id_fk",
+          "tableFrom": "ticket_files",
+          "tableTo": "tickets",
+          "columnsFrom": [
+            "ticket_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
     "tickets": {
       "name": "tickets",
       "columns": {
@@ -2265,6 +2339,14 @@
           "notNull": true,
           "autoincrement": false,
           "default": "'{}'"
+        },
+        "blocked_by": {
+          "name": "blocked_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'[]'"
         },
         "external": {
           "name": "external",

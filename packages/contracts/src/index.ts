@@ -517,6 +517,11 @@ export interface TicketView {
   readonly commitAttachments: boolean;
   readonly external: { readonly key: string; readonly url: string } | null;
   readonly attachments: readonly TicketAttachmentView[];
+  /** R10: files it brings (written to inputs/). */
+  readonly files: readonly TicketFileView[];
+  /** R10: the keys of tickets that must be done first, and whether one of them is not done yet. */
+  readonly blockedBy: readonly string[];
+  readonly blocked: boolean;
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly startedAt: number | null;
@@ -561,6 +566,8 @@ export const CreateTicket = Type.Object({
   status: Type.Optional(Type.Union([Type.Literal("backlog"), Type.Literal("todo")])),
   commitAttachments: Type.Optional(Type.Boolean()),
   options: Type.Optional(TicketOptions),
+  /** R10: the keys of tickets that must be done first. */
+  blockedBy: Type.Optional(Type.Array(Type.String({ pattern: "^[A-Z][A-Z0-9]{0,5}-[0-9]+$", maxLength: 20 }), { maxItems: 10 })),
 });
 export type CreateTicket = Static<typeof CreateTicket>;
 
@@ -573,6 +580,7 @@ export const UpdateTicket = Type.Object({
   space: Type.Optional(TicketSpaceT),
   projectId: Type.Optional(Type.Union([Type.String({ maxLength: 64 }), Type.Null()])),
   commitAttachments: Type.Optional(Type.Boolean()),
+  blockedBy: Type.Optional(Type.Array(Type.String({ pattern: "^[A-Z][A-Z0-9]{0,5}-[0-9]+$", maxLength: 20 }), { maxItems: 10 })),
 });
 export type UpdateTicket = Static<typeof UpdateTicket>;
 
@@ -770,3 +778,28 @@ export interface DiffFileView {
   /** The unified diff's hunks (from the first @@), empty for binary files. */
   readonly patch: string;
 }
+
+/** R10: a file attached to a ticket (an assignment, data, a document). */
+export interface TicketFileView {
+  readonly id: string;
+  readonly name: string;
+  readonly bytes: number;
+  readonly url: string;
+}
+
+/** R10: a file in the inbox on this Mac (~/agentSwarm-inbox). */
+export interface InboxFileView {
+  readonly name: string;
+  readonly bytes: number;
+  readonly modifiedAt: number;
+}
+
+/** R10: a file the work produced (outputs/ and its result documents), to download. */
+export interface OutputFileView {
+  readonly path: string;
+  readonly bytes: number;
+}
+
+/** R10: a file to take from the inbox on this Mac. */
+export const FromInbox = Type.Object({ name: Type.String({ minLength: 1, maxLength: 255 }) });
+export type FromInbox = Static<typeof FromInbox>;

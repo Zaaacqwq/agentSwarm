@@ -3,7 +3,7 @@ export type Request =
   | { op: "info" }
   | { op: "fs.list"; scope: string; path: string; depth?: number }
   | { op: "fs.read"; scope: string; path: string; offset?: number; limit?: number }
-  | { op: "fs.write"; scope: string; path: string; content: string; encoding?: "utf8" | "base64" }
+  | { op: "fs.write"; scope: string; path: string; content: string; encoding?: "utf8" | "base64"; append?: boolean }
   | { op: "fs.edit"; scope: string; path: string; oldText: string; newText: string; replaceAll?: boolean }
   | { op: "fs.grep"; scope: string; pattern: string; path?: string; glob?: string; maxResults?: number }
   | { op: "exec"; scope: string; command: string; timeoutMs?: number }

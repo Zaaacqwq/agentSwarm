@@ -2,7 +2,8 @@
 // scripted models) for Playwright. Each run replays the same tree: the root agent hands the fix to
 // a helper, has it reviewed, merges it, pushes and opens the pull request. Then a fast-track mission
 // started on the dashboard: the lead asks, you answer, it plans, you approve, it builds and opens a PR.
-// Last, CLI workers (R4): a Claude Code token and a Codex sign-in, then a root that hands its fix to Claude Code.
+// Then CLI workers (R4): a Claude Code token and a Codex sign-in, then a root that hands its fix to Claude Code.
+// Last (R10): a quick test with a file that hands back outputs/, and a change reviewed, sent back and merged.
 import { fileURLToPath } from "node:url";
 import { fauxAssistantMessage, fauxToolCall, type FauxResponseFactory, type TranscriptContext } from "@earendil-works/pi-ai";
 import { harness } from "./harness.ts";
@@ -55,6 +56,25 @@ h.scriptAgents({
     call("spawn_agent", { name: "Tester", role: "qa", brief: "Open the Notes app on the desktop and check that New Note adds a note.", needs: ["desktop"] }),
     call("wait_agents", {}),
     call("report", { summary: "Tester was stopped before it finished.", tests: "-", unfinished: [] }),
+    // R10: a change in review: you comment on a line and send it back, then merge it here.
+    call("ws_write", { path: "math.js", content: "export const square = (x) => x * x;\n" }),
+    call("git_commit", { message: "Fix square" }),
+    call("git_push", {}),
+    call("open_pull_request", { title: "Fix square", body: "square multiplies." }),
+    call("stage_done", { summary: "square multiplies now." }),
+    call("ws_write", { path: "math.js", content: "/** Squares a number. */\nexport const square = (x) => x * x;\n" }),
+    call("git_commit", { message: "Comment square" }),
+    call("git_push", {}),
+    call("stage_done", { summary: "Commented, as you asked." }),
+  ],
+  // R10: a quick test with your file: it reads inputs/, hands back outputs/.
+  Lead: [
+    call("ws_read", { path: "inputs/notes.txt" }),
+    call("ws_write", { path: "outputs/answer.md", content: "# Answer\n\n2 + 3 = 5\n" }),
+    writeDoc("results.md", "# Results\n\nThe answer is in outputs/answer.md.\n"),
+    call("git_commit", { message: "Answer" }),
+    call("git_push", {}),
+    call("stage_done", { summary: "2 + 3 = 5; the answer is in outputs/answer.md." }),
   ],
   Tester: [
     call("desktop_request", { purpose: "Check that New Note adds a note", minutes: 10 }),

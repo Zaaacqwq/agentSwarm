@@ -335,6 +335,8 @@ export const tickets = sqliteTable("tickets", {
   commitAttachments: integer("commit_attachments", { mode: "boolean" }).notNull().default(true),
   /** R10: planFirst, marketing, researchOnly. */
   options: text("options", { mode: "json" }).$type<{ planFirst?: boolean; marketing?: boolean; researchOnly?: boolean }>().notNull().default({}),
+  /** R10: tickets that must be done before this one starts (ids). */
+  blockedBy: text("blocked_by", { mode: "json" }).$type<string[]>().notNull().default([]),
   /** Imported from elsewhere (Linear): its old id and link. */
   external: json<{ key: string; url: string }>("external"),
   createdAt: integer("created_at").notNull(),
@@ -369,6 +371,16 @@ export const ticketAttachments = sqliteTable("ticket_attachments", {
   height: integer("height").notNull(),
   createdAt: integer("created_at").notNull(),
 }, (t) => [index("ticket_attachments_ticket_idx").on(t.ticketId)]);
+
+/** R10: files a ticket brings (an assignment, data): kept as they are, written to the worktree's inputs/. */
+export const ticketFiles = sqliteTable("ticket_files", {
+  id: text("id").primaryKey(),
+  ticketId: text("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  file: text("file").notNull(),
+  bytes: integer("bytes").notNull(),
+  createdAt: integer("created_at").notNull(),
+}, (t) => [index("ticket_files_ticket_idx").on(t.ticketId)]);
 
 // ---- R8: the team's memory -------------------------------------------------------------------
 /** What agents are: their handbook and the lessons meant for them. */

@@ -159,6 +159,7 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
     maxConcurrentRuns: opts.maxConcurrentRuns ?? 2,
     screensDir: join(base, "screens"),
     attachmentsDir: join(base, "attachments"),
+    inboxDir: join(base, "inbox"),
     ...(opts.heavySlots ? { heavySlots: opts.heavySlots } : {}),
     // Normal unless a test says otherwise: the host's own memory must not decide whether a test passes.
     memoryPressure: opts.memoryPressure ?? (() => 1),

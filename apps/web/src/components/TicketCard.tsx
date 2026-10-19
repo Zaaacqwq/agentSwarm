@@ -55,12 +55,14 @@ export function TicketCard({ t, dragging = false }: { t: TicketView; dragging?: 
         <span className="mono ticket-key">{t.key}</span>
         <span className={`kind-tag k-${t.kind}`}>{KIND_LABEL[t.kind]}</span>
         {t.attachments.length > 0 && <span className="faint" title={`${t.attachments.length} picture(s)`} aria-label={`${t.attachments.length} pictures`}>▣ {t.attachments.length}</span>}
+        {t.files.length > 0 && <span className="faint" title={`${t.files.length} file(s)`} aria-label={`${t.files.length} files`}>⎘ {t.files.length}</span>}
       </header>
       <a className="ticket-title" href={`/tickets/${t.key}`} onClick={(e) => openTicket(e, t.key)}>{t.title}</a>
       {t.need && <p className="ticket-need">{NEED_LABEL[t.need]}</p>}
       <footer className="ticket-foot">
         <span className="faint">{t.projectName ?? (t.space === "sandbox" ? "Sandbox" : t.space === "ideas" ? "Ideas" : "—")}</span>
-        {t.status === "todo" && t.queuePosition !== null && <span className="faint">{t.queuePosition === 0 ? "next to start" : `${t.queuePosition} ahead`}</span>}
+        {t.blocked && !started && <span className="blocked-tag" title={`Starts once ${t.blockedBy.join(", ")} ${t.blockedBy.length === 1 ? "is" : "are"} done`}>Waits for {t.blockedBy.join(", ")}</span>}
+        {t.status === "todo" && !t.blocked && t.queuePosition !== null && <span className="faint">{t.queuePosition === 0 ? "next to start" : `${t.queuePosition} ahead`}</span>}
         {started && t.stage && t.status !== "done" && t.status !== "canceled" && <span className="faint">{STAGE_LABEL[t.stage]}</span>}
         {t.working > 0 && <span className="working" aria-label={`${t.working} agents working`}>{t.working} working</span>}
         {started && t.costUsd > 0 && <span className="faint">{money(t.costUsd)}</span>}

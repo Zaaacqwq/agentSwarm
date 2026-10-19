@@ -109,7 +109,8 @@ function r10Brief(stage: MissionStage, c: BriefContext): string | null {
   ].join("\n") : [
     "Stage: building. A quick test: do it, and say what you found.",
     "- Do it yourself; sub-agents only if parts are big and independent. Commit what is worth keeping.",
-    `- Write ${d}/results.md: what you tried, what happened (numbers, output, errors) and what you conclude. git_commit, git_push.`,
+    "- Files the person gave you are under inputs/ (never commit them). Anything you hand back (a document, a report, code to submit) goes under outputs/; they download it from there.",
+    `- Write ${d}/results.md: what you tried, what happened (numbers, output, errors), what you conclude and what is in outputs/. git_commit, git_push.`,
     "- Then call stage_done with the findings (at most 12 lines). The person reads them; they may keep it as a new project.",
   ].join("\n");
   return null;

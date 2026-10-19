@@ -4,13 +4,14 @@ import cookie from "@fastify/cookie";
 import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import {
-  CreateAgent, CreateEndpoint, CreateMission, CreateProject, CreateRun, Credentials, MissionBudget, MissionReply, RunMessage, SetCli, SetDiscord, SetGitHubToken, SetProjectProfile, PutProjectFile, CreateLocalProject, MachineSettings, ModelSettings, CreateTicket, UpdateTicket, MoveTicket, TicketSettings, PromoteTicket, SendBack, RetryTicket, CreateLesson, UpdateLesson, SetHandbook, DecideProposal, ROLES, type Role, type Me,
+  CreateAgent, CreateEndpoint, CreateMission, CreateProject, CreateRun, Credentials, MissionBudget, MissionReply, RunMessage, SetCli, SetDiscord, SetGitHubToken, SetProjectProfile, PutProjectFile, CreateLocalProject, MachineSettings, ModelSettings, CreateTicket, UpdateTicket, MoveTicket, TicketSettings, PromoteTicket, SendBack, RetryTicket, FromInbox, CreateLesson, UpdateLesson, SetHandbook, DecideProposal, ROLES, type Role, type Me,
 } from "@agentswarm/contracts";
 import type { Services } from "../app/services.ts";
 import { RateLimiter } from "../auth/rate-limit.ts";
 import { SESSION_TTL_MS } from "../auth/auth-service.ts";
 import { HttpError, badRequest, forbidden, unauthorized } from "../errors.ts";
 import { MAX_UPLOAD_BYTES } from "../tickets/attachments.ts";
+import { MAX_FILE_BYTES } from "../tickets/files.ts";
 import { systemCheck, type CheckOptions } from "../system/system-check.ts";
 
 export const SESSION_COOKIE = "swarm_session";
@@ -67,7 +68,9 @@ export async function buildApp(o: AppOptions): Promise<FastifyInstance> {
     if (req.method !== "GET" && req.method !== "HEAD") {
       const type = String(req.headers["content-type"] ?? "");
       // A ticket's picture is sent as itself: a type no form can send, and that a cross-site fetch would have to preflight.
-      const picture = /^\/api\/tickets\/[^/]+\/attachments(\?|$)/.test(req.url) && /^(image\/(jpeg|png|heic|heif)|application\/octet-stream)$/.test(type);
+      const picture = /^\/api\/tickets\/[^/]+\/attachments(\?|$)/.test(req.url) && /^(image\/(jpeg|png|heic|heif)|application\/octet-stream)$/.test(type)
+        // R10: a file is sent as itself too, typed so that a cross-site fetch must preflight.
+        || /^\/api\/tickets\/[^/]+\/files(\?|$)/.test(req.url) && type === "application/octet-stream";
       if (req.headers["content-length"] !== "0" && req.headers["content-length"] !== undefined && !type.startsWith("application/json") && !picture) {
         throw new HttpError(415, "Send JSON");
       }
@@ -239,6 +242,24 @@ export async function buildApp(o: AppOptions): Promise<FastifyInstance> {
     return reply.type("image/jpeg").header("x-content-type-options", "nosniff").header("cache-control", "private, max-age=86400").send(s.tickets.picture(t.id, req.params.id));
   });
   app.delete<{ Params: { key: string; id: string } }>("/api/tickets/:key/attachments/:id", async (req) => s.tickets.detach(actor(req), req.params.key, req.params.id));
+  // R10: files in (uploaded, or from the inbox on this Mac), results out.
+  app.post<{ Params: { key: string }; Querystring: { name?: string }; Body: Buffer }>("/api/tickets/:key/files", { bodyLimit: MAX_FILE_BYTES + 1024 }, async (req) => {
+    if (!Buffer.isBuffer(req.body)) throw badRequest("Send the file itself as the body");
+    return s.tickets.addFile(actor(req), req.params.key, String(req.query.name ?? "file"), req.body);
+  });
+  app.post<{ Params: { key: string }; Body: { name: string } }>("/api/tickets/:key/files/from-inbox", { schema: { body: FromInbox } }, async (req) => s.tickets.addFromInbox(actor(req), req.params.key, req.body.name));
+  app.get<{ Params: { key: string; id: string } }>("/api/tickets/:key/files/:id", async (req, reply) => {
+    const f = s.tickets.readFile(req.params.key, req.params.id);
+    return download(reply, f.name, f.data);
+  });
+  app.delete<{ Params: { key: string; id: string } }>("/api/tickets/:key/files/:id", async (req) => s.tickets.removeFile(actor(req), req.params.key, req.params.id));
+  app.get("/api/inbox", async () => s.tickets.inboxList());
+  app.get<{ Params: { key: string } }>("/api/tickets/:key/outputs", async (req) => s.tickets.outputs(req.params.key));
+  app.get<{ Params: { key: string }; Querystring: { path?: string } }>("/api/tickets/:key/outputs/file", async (req, reply) => {
+    const path = String(req.query.path ?? "");
+    return download(reply, path.split("/").pop() ?? "file", await s.tickets.output(req.params.key, path));
+  });
+  app.get<{ Params: { key: string } }>("/api/tickets/:key/outputs.zip", async (req, reply) => download(reply, `${req.params.key}-results.zip`, await s.tickets.outputsZip(req.params.key)));
   app.get("/api/missions", async () => s.missions.list());
   app.post<{ Body: CreateMission }>("/api/missions", { schema: { body: CreateMission } }, async (req) => s.missions.create(actor(req), req.body, "dashboard"));
   app.get<{ Params: { id: string } }>("/api/missions/:id", async (req) => s.missions.view(req.params.id));
@@ -289,4 +310,12 @@ export async function buildApp(o: AppOptions): Promise<FastifyInstance> {
     });
   }
   return app;
+}
+
+/** A file to save, never shown inline (an agent's output could be HTML). */
+function download(reply: FastifyReply, name: string, data: Buffer) {
+  const safe = name.replace(/[^\p{L}\p{N} ._-]/gu, "_").slice(0, 120) || "file";
+  return reply.type("application/octet-stream").header("x-content-type-options", "nosniff")
+    .header("content-disposition", `attachment; filename="${safe.replace(/[^\x20-\x7e]/g, "_")}"; filename*=UTF-8''${encodeURIComponent(safe)}`)
+    .header("content-security-policy", "default-src 'none'; sandbox").send(data);
 }

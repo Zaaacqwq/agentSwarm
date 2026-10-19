@@ -6,6 +6,7 @@ import { Field, Form, PageHead } from "../components/ui.tsx";
 import { KIND_LABEL, MoveMenu, NEED_LABEL, PRIORITY_LABEL, PriorityMark, STATUS_LABEL } from "../components/TicketCard.tsx";
 import { MissionDetails, StopMission } from "./Mission.tsx";
 import { ReviewPanel } from "../components/Review.tsx";
+import { Outputs, TicketFiles, WaitsFor } from "../components/Files.tsx";
 import { Link, navigate } from "../router.tsx";
 
 /** One ticket: your words and pictures, then (once it starts) its mission: conversation, gates, agents, activity. */
@@ -47,6 +48,7 @@ export function TicketPage({ ticketKey }: { ticketKey: string }) {
           <h2 id="ask-head">What you asked</h2>
           {t.missionId ? <p className="pre quote">{t.description || "(no details)"}</p> : <EditTicket t={t} />}
           <Pictures t={t} />
+          <TicketFiles t={t} />
         </section>
         <aside className="card stack" aria-label="Ticket facts">
           <dl className="facts">
@@ -63,6 +65,7 @@ export function TicketPage({ ticketKey }: { ticketKey: string }) {
           <History events={events.data ?? []} />
         </aside>
       </div>
+      {t.missionId && <Outputs t={t} />}
       {t.missionId && <ReviewPanel t={t} />}
       {t.missionId && <MissionDetails id={t.missionId} hideIntent />}
     </div>
@@ -74,9 +77,10 @@ function EditTicket({ t }: { t: TicketView }) {
   const [title, setTitle] = useState(t.title);
   const [description, setDescription] = useState(t.description);
   const [priority, setPriority] = useState(t.priority);
-  const changed = title !== t.title || description !== t.description || priority !== t.priority;
+  const [waits, setWaits] = useState<string[]>([...t.blockedBy]);
+  const changed = title !== t.title || description !== t.description || priority !== t.priority || waits.join() !== t.blockedBy.join();
   return (
-    <Form submit="Save" onSubmit={async () => void (await api("PATCH", `/tickets/${t.key}`, { title, description, priority }))}>
+    <Form submit="Save" onSubmit={async () => void (await api("PATCH", `/tickets/${t.key}`, { title, description, priority, blockedBy: waits }))}>
       <Field label="Title"><input value={title} onChange={(e) => setTitle(e.target.value)} required maxLength={200} /></Field>
       <Field label="Details"><textarea value={description} onChange={(e) => setDescription(e.target.value)} maxLength={8000} style={{ minHeight: 120 }} /></Field>
       <Field label="Priority">
@@ -84,7 +88,10 @@ function EditTicket({ t }: { t: TicketView }) {
           {[1, 2, 3, 4, 0].map((p) => <option key={p} value={p}>{PRIORITY_LABEL[p]}</option>)}
         </select>
       </Field>
-      {!changed && <p className="faint">It waits in {STATUS_LABEL[t.status].toLowerCase()} until {t.status === "backlog" ? "you move it to Todo" : "a slot is free"}.</p>}
+      <Field label="Waits for" hint="It starts only once these tickets are done.">
+        <WaitsFor self={t.key} value={waits} onChange={setWaits} />
+      </Field>
+      {!changed && <p className="faint">It waits in {STATUS_LABEL[t.status].toLowerCase()} until {t.status === "backlog" ? "you move it to Todo" : t.blocked ? `${t.blockedBy.join(", ")} ${t.blockedBy.length === 1 ? "is" : "are"} done` : "a slot is free"}.</p>}
       <p className="row">
         <button type="button" className="btn ghost small" onClick={() => confirm(`Delete ${t.key}?`) && api("DELETE", `/tickets/${t.key}`).then(() => navigate("/tickets")).catch((e: Error) => alert(e.message))}>Delete</button>
       </p>
@@ -148,7 +155,7 @@ const EVENT_TEXT: Record<TicketEventView["kind"], (d: Record<string, unknown>) =
   status: (d) => `${STATUS_LABEL[d.from as TicketView["status"]] ?? d.from} → ${STATUS_LABEL[d.to as TicketView["status"]] ?? d.to}${d.reason ? `: ${String(d.reason)}` : ""}`,
   started: () => "started",
   ended: (d) => (d.to === "done" ? "done" : "stopped"),
-  attachment: (d) => (d.added ? `added a picture (${String(d.added)})` : "removed a picture"),
+  attachment: (d) => (d.file ? `added a file (${String(d.file)})` : d.removedFile ? `removed a file (${String(d.removedFile)})` : d.added ? `added a picture (${String(d.added)})` : "removed a picture"),
   promoted: (d) => (d.ticket ? `became a project: ${String(d.repo)} (${String(d.ticket)})` : `repository created: ${String(d.repo)}`),
   retried: (d) => `started again${d.worker && d.worker !== "native" ? ` with ${String(d.worker)}` : ""}`,
   sent_back: (d) => `sent back with ${String(d.comments)} comment(s)`,

@@ -1,7 +1,9 @@
+import { execFile } from "node:child_process";
 import { and, asc, desc, eq, inArray, isNotNull, isNull, max } from "drizzle-orm";
 import { randomBytes } from "node:crypto";
-import type { CreateTicket, DiffFileView, LiveMessage, MissionView, MoveTicket, ProjectView, RetryTicket, ReviewComment, TicketAttemptView, TicketDiffView, TicketEventView, TicketNeed, TicketSettings, TicketStatus, TicketView, UpdateTicket } from "@agentswarm/contracts";
+import type { CreateTicket, DiffFileView, OutputFileView, LiveMessage, MissionView, MoveTicket, ProjectView, RetryTicket, ReviewComment, TicketAttemptView, TicketDiffView, TicketEventView, TicketNeed, TicketSettings, TicketStatus, TicketView, UpdateTicket } from "@agentswarm/contracts";
 import { parsePullRequestUrl } from "../github/github-client.ts";
+import type { Inbox, TicketFiles } from "./files.ts";
 import { audit } from "../audit.ts";
 import type { Db } from "../db/client.ts";
 import { schema } from "../db/client.ts";
@@ -57,6 +59,9 @@ export interface TicketDeps {
   readonly log: (msg: string, extra?: Record<string, unknown>) => void;
   /** Tells you a ticket needs you, finished or failed (Discord), with a link to it. */
   readonly notify?: (ticket: TicketView, what: string) => void;
+  /** R10: files a ticket brings, and the inbox on this Mac to take them from. */
+  readonly files?: TicketFiles;
+  readonly inbox?: Inbox;
 }
 
 const newId = () => `tkt_${randomBytes(16).toString("hex")}`;
@@ -79,10 +84,14 @@ export class TicketService {
   constructor(deps: TicketDeps) {
     this.deps = deps;
     deps.bus.subscribe((m) => this.onLive(m));
-    // The lead of a ticket's mission gets the ticket's pictures when it first starts.
+    // The lead of a ticket's mission gets the ticket's pictures when it first starts, and (R10) its files under inputs/.
     deps.missions.onOpening(async (m) => {
       const t = this.byMission(m.id);
-      return t ? this.deps.attachments.opening(t, m.docsPath, this.deps.agents.get(m.leadAgentId).runtime !== "native") : null;
+      if (!t) return null;
+      const pictures = await this.deps.attachments.opening(t, m.docsPath, this.deps.agents.get(m.leadAgentId).runtime !== "native");
+      const files = this.deps.files?.forWorktree(t.id) ?? [];
+      if (!files.length) return pictures;
+      return { files: [...(pictures?.files ?? []), ...files], images: pictures?.images ?? [], exclude: ["inputs/"] };
     });
     deps.missions.onFileTicket((m, agent, input) => {
       const t = this.fileFromAgent(m.id, agent, input);
@@ -145,7 +154,7 @@ export class TicketService {
         id: newId(), prefix, number, space: input.space, projectId, title: input.title.trim(), description: input.description.trim(), kind: input.kind,
         priority: input.priority ?? 0, status, position: this.topOf(status), missionId: null, createdBy: from?.by ?? "you", fromTicketId: from?.ticketId ?? null,
         commitAttachments: input.commitAttachments ?? true, external, createdAt: now, updatedAt: now, startedAt: null, endedAt: null,
-        options: input.options ?? {},
+        options: input.options ?? {}, blockedBy: this.blockers(input.blockedBy ?? [], null),
       };
       this.deps.db.insert(schema.tickets).values(row).run();
       return row;
@@ -207,6 +216,7 @@ export class TicketService {
       ...(input.description !== undefined ? { description: input.description.trim() } : {}),
       ...(input.priority !== undefined ? { priority: input.priority } : {}),
       ...(input.commitAttachments !== undefined ? { commitAttachments: input.commitAttachments } : {}),
+      ...(input.blockedBy !== undefined ? { blockedBy: this.blockers(input.blockedBy, t.id) } : {}),
       kind, space, projectId: placed.projectId, prefix: placed.prefix, number, updatedAt: now,
     };
     this.deps.db.update(schema.tickets).set(changes).where(eq(schema.tickets.id, t.id)).run();
@@ -234,6 +244,7 @@ export class TicketService {
     const position = this.placeBetween(t.id, input.status, input.after ?? null, input.before ?? null);
     const status = input.status;
     this.deps.db.update(schema.tickets).set({ status, position, updatedAt: now, endedAt: status === "canceled" ? t.endedAt ?? now : null }).where(eq(schema.tickets.id, t.id)).run();
+    if (status === "canceled" && t.status !== "canceled") this.blockerStopped(t);
     if (status !== t.status) this.event(t.id, actor, "status", { from: t.status, to: status }, now);
     audit(this.deps.db, actor, "ticket.move", t.id, { from: t.status, to: status }, now);
     this.emit(t.id);
@@ -420,7 +431,8 @@ export class TicketService {
   /** Todo tickets in the order they start: by priority (urgent first, none last), then your order. */
   private queueOrder(rows: readonly TicketRow[]): Map<string, number> {
     const rank = (p: number) => (p === 0 ? 5 : p);
-    const todo = rows.filter((r) => r.status === "todo" && !r.missionId).sort((a, b) => rank(a.priority) - rank(b.priority) || a.position - b.position || a.createdAt - b.createdAt);
+    // A ticket waits while a ticket it depends on is not done (R10).
+    const todo = rows.filter((r) => r.status === "todo" && !r.missionId && !this.isBlocked(r)).sort((a, b) => rank(a.priority) - rank(b.priority) || a.position - b.position || a.createdAt - b.createdAt);
     return new Map(todo.map((r, i) => [r.id, i]));
   }
 
@@ -462,7 +474,11 @@ export class TicketService {
       const attached = pictures
         ? `(${pictures} picture${pictures === 1 ? "" : "s"} attached: you see ${pictures === 1 ? "it" : "them"} in this message${t.commitAttachments ? "; they are also in the mission documents folder under request/, commit them with your documents" : ""}.)`
         : "";
-      const intent = [t.title, this.describe(t), attached, `(Ticket ${keyOf(t)}${t.external ? `, from ${t.external.key}` : ""})`].filter(Boolean).join("\n\n");
+      const files = this.deps.files?.list(t.id).map((f) => f.name) ?? [];
+      const given = files.length
+        ? `(The person's files are in the worktree under inputs/: ${files.join(", ")}. They are kept out of commits. Unzip archives with ws_bash; read PDFs and documents with the tools you have. Put what you hand back under outputs/ and commit it.)`
+        : "";
+      const intent = [t.title, this.describe(t), attached, given, `(Ticket ${keyOf(t)}${t.external ? `, from ${t.external.key}` : ""})`].filter(Boolean).join("\n\n");
       const m = missions.create(SYSTEM, { projectId, idea: extra ? `${intent}\n\n${extra}` : intent, kind: t.kind }, "dashboard", now, { origin: "ticket", title: `${keyOf(t)} ${t.title}`, options: t.options });
       db.update(schema.tickets).set({ missionId: m.id }).where(eq(schema.tickets.id, t.id)).run();
       this.starting.delete(t.id);
@@ -543,6 +559,7 @@ export class TicketService {
       this.deps.db.update(schema.tickets).set({ status, updatedAt: now, ...(status === "done" || status === "canceled" ? { endedAt: m.endedAt ?? now, position: this.topOf(status) } : {}) })
         .where(eq(schema.tickets.id, t.id)).run();
       this.event(t.id, SYSTEM, status === "done" || status === "canceled" ? "ended" : "status", { from: t.status, to: status, ...(need ? { need } : {}) }, now);
+      if (status === "canceled") this.blockerStopped(t);
     }
     this.emit(t.id);
     const mark = `${status}:${need ?? ""}`;
@@ -564,6 +581,114 @@ export class TicketService {
       : need === "decide" ? "has a result for you to look at"
       : need === "failed" ? "stopped and needs you" : null;
     if (what) this.deps.notify?.(t, what);
+  }
+
+  // ---- R10: dependencies ------------------------------------------------------------------
+
+  /** Ticket keys to ids: each must exist, not be this one, and not lead back to it (no cycles). */
+  private blockers(keys: readonly string[], self: string | null): string[] {
+    const ids = [...new Set(keys.map((k) => this.row(k).id))];
+    if (self && ids.includes(self)) throw badRequest("A ticket cannot wait for itself");
+    if (self) {
+      // Walking what each blocker waits for must never reach this ticket.
+      const seen = new Set<string>();
+      const stack = [...ids];
+      while (stack.length) {
+        const id = stack.pop()!;
+        if (id === self) throw badRequest("That would make tickets wait for each other in a circle");
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const row = this.deps.db.select({ blockedBy: schema.tickets.blockedBy }).from(schema.tickets).where(eq(schema.tickets.id, id)).get();
+        stack.push(...(row?.blockedBy ?? []));
+      }
+    }
+    return ids;
+  }
+
+  private isBlocked(t: Pick<TicketRow, "blockedBy">): boolean {
+    if (!t.blockedBy?.length) return false;
+    return this.deps.db.select({ status: schema.tickets.status }).from(schema.tickets).where(inArray(schema.tickets.id, t.blockedBy)).all().some((r) => r.status !== "done");
+  }
+
+  private keysOf(ids: readonly string[]): string[] {
+    if (!ids.length) return [];
+    return this.deps.db.select().from(schema.tickets).where(inArray(schema.tickets.id, [...ids])).all().map((r) => keyOf(r));
+  }
+
+  /** A ticket others wait for was stopped: they stay waiting, and you are told (once). */
+  private blockerStopped(t: TicketRow): void {
+    const waiting = this.deps.db.select().from(schema.tickets).where(inArray(schema.tickets.status, ["backlog", "todo"])).all().filter((r) => r.blockedBy?.includes(t.id));
+    for (const w of waiting) this.deps.notify?.(this.view(w.id), `waits for ${keyOf(t)}, which was stopped: remove it from "blocked by", or start it again`);
+  }
+
+  // ---- R10: files in, results out --------------------------------------------------------------
+
+  private filesOf(): TicketFiles {
+    if (!this.deps.files) throw conflict("Files are not set up");
+    return this.deps.files;
+  }
+
+  addFile(actor: Actor, idOrKey: string, name: string, data: Buffer, now = Date.now()) {
+    const t = this.row(idOrKey);
+    this.notStarted(t, "files go to its lead before it starts");
+    const f = this.filesOf().add(t.id, name, data, now);
+    this.event(t.id, actor, "attachment", { file: f.name }, now);
+    this.emit(t.id);
+    return f;
+  }
+
+  addFromInbox(actor: Actor, idOrKey: string, name: string) {
+    if (!this.deps.inbox) throw conflict("The inbox is not set up");
+    return this.addFile(actor, idOrKey, name, this.deps.inbox.read(name));
+  }
+
+  inboxList() {
+    return this.deps.inbox?.list() ?? [];
+  }
+
+  removeFile(actor: Actor, idOrKey: string, id: string): void {
+    const t = this.row(idOrKey);
+    this.notStarted(t, "its lead already has its files");
+    const name = this.filesOf().list(t.id).find((f) => f.id === id)?.name;
+    this.filesOf().remove(t.id, id);
+    this.event(t.id, actor, "attachment", { removedFile: name ?? id }, Date.now());
+    this.emit(t.id);
+  }
+
+  readFile(idOrKey: string, id: string): { name: string; data: Buffer } {
+    return this.filesOf().read(this.row(idOrKey).id, id);
+  }
+
+  /** What the work produced: outputs/ and the results document, on its branch (in the mirror). */
+  async outputs(idOrKey: string): Promise<OutputFileView[]> {
+    const { m } = this.live(idOrKey);
+    const project = this.deps.projects.get(m.projectId);
+    const root = this.deps.tree.run(m.rootRunId);
+    const out = await gitOk(this.deps.git, ["ls-tree", "-r", "-l", "-z", `refs/heads/${root.branch}`, "--", "outputs", `${m.docsPath}/results.md`], { cwd: project.mirrorPath, timeoutMs: 60_000 }).catch(() => "");
+    return out.split("\0").filter(Boolean).flatMap((entry) => {
+      const m2 = /^\d+ blob [0-9a-f]+\s+(\d+)\t(.+)$/.exec(entry);
+      return m2 ? [{ path: m2[2]!, bytes: Number(m2[1]) }] : [];
+    }).slice(0, 500);
+  }
+
+  /** One produced file, as it is on the branch; only paths the listing shows. */
+  async output(idOrKey: string, path: string): Promise<Buffer> {
+    const files = await this.outputs(idOrKey);
+    if (!files.some((f) => f.path === path)) throw notFound("No such output");
+    const { m } = this.live(idOrKey);
+    const project = this.deps.projects.get(m.projectId);
+    const root = this.deps.tree.run(m.rootRunId);
+    return execFileBuffer("/usr/bin/git", ["show", `refs/heads/${root.branch}:${path}`], project.mirrorPath);
+  }
+
+  /** Everything it produced, as one zip. */
+  async outputsZip(idOrKey: string): Promise<Buffer> {
+    const files = await this.outputs(idOrKey);
+    if (!files.length) throw notFound("It has produced no files");
+    const { m } = this.live(idOrKey);
+    const project = this.deps.projects.get(m.projectId);
+    const root = this.deps.tree.run(m.rootRunId);
+    return execFileBuffer("/usr/bin/git", ["--literal-pathspecs", "archive", "--format=zip", `refs/heads/${root.branch}`, "--", ...files.map((f) => f.path)], project.mirrorPath);
   }
 
   // ---- R10: review, send back, merge, retry, keep ------------------------------------------
@@ -745,6 +870,8 @@ export class TicketService {
       stage: mission?.stage ?? null, need: mission && LIVE.has(t.status) ? needOf(mission) : null, costUsd: mission?.costUsd ?? 0, prUrl: mission?.prUrl ?? null,
       options: t.options ?? {}, attempts: this.attempts(t.id),
       working, queuePosition: order.get(t.id) ?? null,
+      files: this.deps.files?.list(t.id) ?? [],
+      blockedBy: this.keysOf(t.blockedBy ?? []), blocked: this.isBlocked(t),
     };
   }
 
@@ -803,4 +930,11 @@ export function parseDiff(numstat: string, patch: string): { files: DiffFileView
     return { ...c, status: chunk?.status ?? (c.oldPath ? "renamed" : "modified"), patch: chunk?.patch ?? "" };
   });
   return { files, truncated };
+}
+
+/** A command's output as bytes (git show and git archive of binary files). */
+function execFileBuffer(cmd: string, args: string[], cwd: string): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    execFile(cmd, args, { cwd, encoding: "buffer", maxBuffer: 200 * 1024 * 1024, timeout: 120_000 }, (error, stdout) => (error ? reject(error) : resolve(stdout as Buffer)));
+  });
 }

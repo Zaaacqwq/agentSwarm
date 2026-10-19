@@ -217,7 +217,7 @@ test("the board: a ticket with a picture, dragged into Todo, answered on the pho
   const form = page.getByRole("region", { name: "New ticket" });
   await form.getByLabel("Title").fill("Make the button orange");
   await form.getByLabel("Details").fill("The main button is grey; it should stand out.");
-  await form.getByLabel("Kind").selectOption("feature");
+  await form.getByRole("button", { name: "Change a project" }).click();
   await form.getByLabel("Priority").selectOption("2");
   await form.getByLabel("Pictures").setInputFiles({ name: "button.png", mimeType: "image/png", buffer: PNG });
   await expect(form.getByRole("img", { name: "button.png" })).toBeVisible();
@@ -354,6 +354,72 @@ test("the desktop: an agent asks to use this Mac, you approve it, it pauses whil
   await bar.getByRole("button", { name: "Stop" }).click();
   await expect(page.getByRole("region", { name: "Desktop" })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Report" })).toBeVisible({ timeout: 30_000 });
+});
+
+test("R10: a quick test with your file hands back its result; a ticket waits for another; a change is commented on, sent back and merged", async ({ page }) => {
+  await page.goto("/");
+  await page.getByLabel("Password").fill("correct horse battery staple");
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page.getByRole("heading", { name: "Tickets" })).toBeVisible();
+
+  // A quick test with a file: the lead reads it under inputs/ and hands back outputs/.
+  await page.getByRole("button", { name: "New ticket" }).click();
+  const form = page.getByRole("region", { name: "New ticket" });
+  await form.getByRole("button", { name: "Quick test" }).click();
+  await form.getByLabel("Title").fill("Do the assignment");
+  await form.getByLabel("Details").fill("Answer the question in notes.txt.");
+  await form.getByLabel("Files").setInputFiles({ name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("Add 2 and 3.\n") });
+  await expect(form.getByRole("list", { name: "Chosen files" }).getByText("notes.txt")).toBeVisible();
+  await form.getByRole("checkbox", { name: /Start it/ }).check();
+  await form.getByRole("button", { name: "Create and start" }).click();
+  await expect(page.getByRole("heading", { name: "Do the assignment" })).toBeVisible();
+  const handed = page.getByRole("region", { name: "What it handed back" });
+  await expect(handed.getByRole("link", { name: "outputs/answer.md" })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("link", { name: "notes.txt" })).toBeVisible();
+  const zip = await page.request.get(await handed.getByRole("link", { name: "Download all (zip)" }).getAttribute("href") ?? "");
+  expect([zip.status(), (await zip.body()).subarray(0, 2).toString("latin1")]).toEqual([200, "PK"]);
+  const answer = await page.request.get(await handed.getByRole("link", { name: "outputs/answer.md" }).getAttribute("href") ?? "");
+  expect(await answer.text()).toContain("2 + 3 = 5");
+  await page.screenshot({ path: `${SHOTS}/quick-result-1440.png`, fullPage: true });
+  const quickKey = new URL(page.url()).pathname.split("/").pop()!;
+
+  // Another ticket waits for it.
+  await page.evaluate(`fetch("/api/tickets", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ space: "sandbox", kind: "quick", title: "Write it up", description: "" }) }).then((r) => r.json()).then((t) => { location.href = "/tickets/" + t.key; })`);
+  await expect(page.getByRole("heading", { name: "Write it up" })).toBeVisible();
+  await page.getByLabel("Wait for a ticket").selectOption({ label: `${quickKey} Do the assignment` });
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByRole("button", { name: `Stop waiting for ${quickKey}` })).toBeVisible();
+  await expect.poll(async () => (await (await page.request.get(`/api/tickets/${new URL(page.url()).pathname.split("/").pop()}`)).json()).blockedBy).toEqual([quickKey]);
+  await page.goto("/?view=board");
+  await expect(page.getByRole("article", { name: /Write it up/ }).getByText(`Waits for ${quickKey}`)).toBeVisible();
+
+  // You finish the quick test.
+  await page.goto(`/tickets/${quickKey}`);
+  await page.getByRole("button", { name: "Done", exact: true }).click();
+  await expect(page.getByText("Done", { exact: true }).first()).toBeVisible({ timeout: 30_000 });
+
+  // A change in review: a comment on a line, sent back, then merged here.
+  await page.evaluate(`fetch("/api/projects").then((r) => r.json()).then((ps) => fetch("/api/tickets", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ space: "project", projectId: ps.find((p) => p.githubRepo === "tester/demo").id, kind: "change", title: "square adds", description: "square(3) must be 9.", status: "todo" }) })).then((r) => r.json()).then((t) => { location.href = "/tickets/" + t.key; })`);
+  await expect(page.getByRole("heading", { name: "square adds" })).toBeVisible();
+  const review = page.getByRole("region", { name: "The change" });
+  await expect(review.getByRole("button", { name: "Merge" })).toBeVisible({ timeout: 30_000 });
+  await expect(review.getByText("math.js", { exact: true })).toBeVisible();
+  await review.locator("tr.d-add.commentable").first().click();
+  await review.getByLabel("Comment on math.js line 1").fill("Add a doc comment.");
+  await review.getByRole("heading", { name: "The change" }).click();
+  await expect(review.getByText("💬 Add a doc comment.")).toBeVisible();
+  await page.setViewportSize({ width: 375, height: 812 });
+  await review.screenshot({ path: `${SHOTS}/review-375.png` });
+  const overflow = await page.evaluate("document.documentElement.scrollWidth - document.documentElement.clientWidth") as number;
+  expect(overflow).toBeLessThanOrEqual(0);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await review.getByRole("button", { name: "Send back with 1 comment" }).click();
+  await expect(review.getByText("/** Squares a number. */")).toBeVisible({ timeout: 30_000 });
+  await expect(review.getByRole("button", { name: "Merge" })).toBeVisible({ timeout: 30_000 });
+  await page.screenshot({ path: `${SHOTS}/review-1440.png`, fullPage: true });
+  page.once("dialog", (d) => void d.accept());
+  await review.getByRole("button", { name: "Merge" }).click();
+  await expect(page.getByText("Done", { exact: true }).first()).toBeVisible({ timeout: 30_000 });
 });
 
 /** A small orange PNG (40×24), built here so the test has no binary fixture. */

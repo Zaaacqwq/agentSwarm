@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { DiffFileView, ReviewComment, TicketDiffView, TicketView } from "@agentswarm/contracts";
 import { api, when } from "../api.ts";
 import { useResource } from "../live.ts";
@@ -33,6 +33,10 @@ const keyOf = (path: string, line: number) => `${path}:${line}`;
 export function ReviewPanel({ t }: { t: TicketView }) {
   const waiting = t.status === "review";
   const diff = useResource<TicketDiffView>(t.missionId ? `/tickets/${t.key}/diff` : null);
+  // The lead pushes as it works: what you see follows each stage and each return to review.
+  useEffect(() => {
+    diff.reload();
+  }, [t.stage, t.status]);
   const [comments, setComments] = useState<Record<string, string>>({});
   const [general, setGeneral] = useState("");
   const [busy, setBusy] = useState(false);

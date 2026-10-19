@@ -54,6 +54,25 @@ export interface RunBinding {
 export interface RunOpening {
   readonly files: readonly { readonly path: string; readonly base64: string }[];
   readonly images: readonly { readonly data: string; readonly mimeType: string }[];
+  /** R10: paths kept out of commits (the person's files under inputs/). */
+  readonly exclude?: readonly string[];
+}
+
+/** One write per this many bytes: ws-exec takes requests of at most 4 MB, base64 makes them a third bigger. */
+const WRITE_CHUNK = 1_400_000;
+
+/** A run's opening files into its worktree, in parts; the excluded paths are added to the repository's exclude list. */
+async function writeOpening(backend: WorkstationBackend, ws: string, scope: string, opening: RunOpening | null, signal: AbortSignal): Promise<void> {
+  for (const f of opening?.files ?? []) {
+    const data = Buffer.from(f.base64, "base64");
+    for (let at = 0; at === 0 || at < data.length; at += WRITE_CHUNK) {
+      await backend.call(ws, { op: "fs.write", scope, path: f.path, content: data.subarray(at, at + WRITE_CHUNK).toString("base64"), encoding: "base64", append: at > 0 }, { signal });
+    }
+  }
+  if (opening?.exclude?.length) {
+    const lines = opening.exclude.map((p) => p.replace(/[^A-Za-z0-9._/-]/g, "")).filter(Boolean).join("\\n");
+    await backend.call(ws, { op: "exec", scope, command: `printf '${lines}\\n' >> "$(git rev-parse --git-path info/exclude)"`, timeoutMs: 30_000 }, { signal });
+  }
 }
 
 /** Missions extend runs through these; RunService knows nothing else about them. */
@@ -479,9 +498,7 @@ export class RunService {
       bus.runEvent(runId, "status", { status: "worktree", branch: run.branch, base });
     }
     const opening = session || run.kind === "review" ? null : await this.hooks?.opening?.(run) ?? null;
-    for (const f of opening?.files ?? []) {
-      await backend.call(ws, { op: "fs.write", scope: run.worktreeScope, path: f.path, content: f.base64, encoding: "base64" }, { signal });
-    }
+    await writeOpening(backend, ws, run.worktreeScope, opening, signal);
 
     const counters = { turns: run.turns, tokensIn: run.tokensIn, tokensOut: run.tokensOut, costUsd: run.costUsd };
     let report: RunReport | null = null;
@@ -660,9 +677,7 @@ export class RunService {
     if (!run.cliSession) bus.runEvent(run.id, "status", { status: "worktree", branch: run.branch, base, ...(cloned.resumed ? { resumed: true } : {}) });
     // A CLI reads pictures from files: they go into the worktree (images in a message are for native runs).
     const opening = run.cliSession || run.kind === "review" ? null : await this.hooks?.opening?.(run) ?? null;
-    for (const f of opening?.files ?? []) {
-      await backend.call(ws, { op: "fs.write", scope: run.worktreeScope, path: f.path, content: f.base64, encoding: "base64" }, { signal });
-    }
+    await writeOpening(backend, ws, run.worktreeScope, opening, signal);
 
     const stopReason = () => active.reason;
     const deadline = setTimeout(() => {

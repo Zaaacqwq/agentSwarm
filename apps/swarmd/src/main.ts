@@ -40,6 +40,7 @@ async function main(): Promise<void> {
     heavySlots: config.heavySlots,
     screensDir: join(config.dataDir, "screens"),
     attachmentsDir: join(config.dataDir, "attachments"),
+    inboxDir: join(homedir(), "agentSwarm-inbox"),
     log,
     transport: new DiscordJsTransport(),
     // R9: agentSwarm Desktop (scripts/setup-desktop.sh) listens in your own Library.

@@ -1,4 +1,4 @@
-import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, lstatSync } from "node:fs";
+import { appendFileSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, lstatSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import type { ExecEnv } from "../layout.ts";
 import { OpError } from "../protocol.ts";
@@ -40,7 +40,8 @@ export function read(env: ExecEnv, scope: string, path: string, offset = 1, limi
   return { path, fromLine: from, totalLines: lines.length, content: slice.join("\n"), truncated: from - 1 + limit < lines.length };
 }
 
-export function write(env: ExecEnv, scope: string, path: string, content: string, encoding: "utf8" | "base64" = "utf8") {
+/** `append`: adds to the file (R10: a file bigger than one request is written in parts). */
+export function write(env: ExecEnv, scope: string, path: string, content: string, encoding: "utf8" | "base64" = "utf8", append = false) {
   // base64 carries binary files (R7: the pictures attached to a ticket).
   const data = encoding === "base64" ? Buffer.from(content, "base64") : Buffer.from(content, "utf8");
   if (data.byteLength > MAX_WRITE_BYTES) throw new OpError("bad_request", "Content too large");
@@ -49,7 +50,8 @@ export function write(env: ExecEnv, scope: string, path: string, content: string
   const file = resolveInScope(scopeDir, path);
   if (isGitInternal(env, scope, file)) throw new OpError("out_of_scope", "Writing inside .git is not allowed");
   mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, data);
+  if (append) appendFileSync(file, data);
+  else writeFileSync(file, data);
   return { path, bytes: data.byteLength };
 }
 
