@@ -5,6 +5,7 @@ import { useLive, useReconnect, useResource } from "../live.ts";
 import { Field, Form, PageHead } from "../components/ui.tsx";
 import { KIND_LABEL, MoveMenu, NEED_LABEL, PRIORITY_LABEL, PriorityMark, STATUS_LABEL } from "../components/TicketCard.tsx";
 import { MissionDetails, StopMission } from "./Mission.tsx";
+import { ReviewPanel } from "../components/Review.tsx";
 import { Link, navigate } from "../router.tsx";
 
 /** One ticket: your words and pictures, then (once it starts) its mission: conversation, gates, agents, activity. */
@@ -62,6 +63,7 @@ export function TicketPage({ ticketKey }: { ticketKey: string }) {
           <History events={events.data ?? []} />
         </aside>
       </div>
+      {t.missionId && <ReviewPanel t={t} />}
       {t.missionId && <MissionDetails id={t.missionId} hideIntent />}
     </div>
   );

@@ -362,3 +362,27 @@ code.copy { cursor: copy; background: var(--paper-sunk); padding: 1px var(--spac
 .desktop-bar h2 { font-size: var(--text-lg); margin: 0; }
 .desktop-purpose { font-family: var(--font-display); font-size: var(--text-base); color: var(--ink-soft); overflow-wrap: anywhere; }
 @media (min-width: 720px) { .desktop-bar { grid-template-columns: 1fr auto; align-items: center; } .desktop-bar .error { grid-column: 1 / -1; } }
+
+/* R10: the change on the ticket page. */
+.row.spread { justify-content: space-between; flex-wrap: wrap; }
+.review-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: flex-start; }
+.diff-files { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-3); }
+.diff-file { border: 1px solid var(--rule); border-radius: var(--radius-sm); background: var(--paper-raised); overflow: hidden; }
+.diff-file > summary { cursor: pointer; padding: var(--space-2) var(--space-3); font-size: var(--text-sm); overflow-wrap: anywhere; }
+.diff-status { font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700; }
+.diff-status.s-added { color: var(--ok); }
+.diff-status.s-deleted { color: var(--bad); }
+.diff-status.s-renamed { color: var(--run); }
+.diff { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: var(--text-xs); display: block; overflow-x: auto; }
+.diff td { padding: 0 var(--space-2); vertical-align: top; white-space: pre; }
+.diff .ln { color: var(--ink-faint); text-align: right; user-select: none; min-width: 3ch; }
+.diff .sign { display: inline-block; width: 1.5ch; color: var(--ink-faint); }
+.diff .d-add { background: color-mix(in srgb, var(--ok) 12%, transparent); }
+.diff .d-del { background: color-mix(in srgb, var(--bad) 10%, transparent); }
+.diff .d-hunk td { color: var(--run); background: var(--paper-sunk); }
+.diff .commentable { cursor: pointer; }
+.diff .commentable:hover .code { box-shadow: inset 2px 0 0 var(--signal); }
+.diff .d-comment td { white-space: normal; font-family: var(--font-text); font-size: var(--text-sm); padding: var(--space-2) var(--space-3); background: var(--paper); }
+.diff .d-comment textarea { width: 100%; min-height: 56px; }
+.attempts { margin: 0; padding-left: var(--space-6); font-size: var(--text-sm); }
+.retry { border-top: 1px solid var(--rule); padding-top: var(--space-3); }
