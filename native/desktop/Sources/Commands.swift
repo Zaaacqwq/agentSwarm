@@ -76,10 +76,14 @@ final class Commands {
         guard let app = NSRunningApplication(processIdentifier: target), !app.isTerminated else {
             throw HelperError.failed("The app under test has quit; open it again (desktop_open)")
         }
-        // Run before every event of an action: the session, your pause and the app in front are checked again.
+        // Run before every event of an action: the session and your pause are checked again; for keys, also
+        // that the app is in front (a click is checked by what is under the point instead).
         let stillOurs: () throws -> Void = { [self] in
             let now = try arming.check(token)
             if let until = now.pausedUntil { throw HelperError.paused(until) }
+        }
+        let inFront: () throws -> Void = { [self] in
+            try stillOurs()
             try frontmost(target)
         }
         switch cmd {
@@ -94,7 +98,7 @@ final class Commands {
             try Input.click(at: p, button: req["button"] as? String ?? "left", count: int(req, "count") ?? 1) { try stillOurs(); try self.onTarget(p, target) }
         case "scroll":
             let p = try point(req)
-            try Input.scroll(dx: clamp(int(req, "dx") ?? 0), dy: clamp(int(req, "dy") ?? 0), at: p) { try stillOurs(); if let p { try self.onTarget(p, target) } }
+            try Input.scroll(dx: clamp(int(req, "dx") ?? 0), dy: clamp(int(req, "dy") ?? 0), at: p) { if let p { try stillOurs(); try self.onTarget(p, target) } else { try inFront() } }
         case "press":
             guard let n = int(req, "element") else { throw HelperError.bad("press needs element") }
             let el = try ui.element(n)
@@ -106,11 +110,11 @@ final class Commands {
             }
         case "type":
             guard let text = req["text"] as? String, !text.isEmpty, text.count <= 2000 else { throw HelperError.bad("type needs 1-2000 characters of text") }
-            try Input.type(text, check: stillOurs)
+            try Input.type(text, check: inFront)
         case "key":
             guard let combo = req["combo"] as? String else { throw HelperError.bad("key needs combo") }
             if let reason = Policy.comboRefusal(combo) { throw HelperError.denied(reason) }
-            try Input.key(combo, check: stillOurs)
+            try Input.key(combo, check: inFront)
         default:
             throw HelperError.bad("Unknown command \"\(cmd)\"")
         }

@@ -37,14 +37,24 @@ try {
   await helper.call({ cmd: "arm", untilMs: Date.now() + 5 * 60_000, holder: "R9 probe", session });
   const opened = await helper.call<{ pid: number; name: string; inFront: boolean }>({ cmd: "open", session, path: staged }, 60_000);
   console.log("opened:", JSON.stringify(opened));
-  await new Promise((r) => setTimeout(r, 8_000));
-  const look = await helper.call<{ image: string; width: number; height: number; ui: string }>({ cmd: "look", session }, 30_000);
+  // The probe app needs a while (its network attempt has to fail first).
+  let look = await helper.call<{ image: string; width: number; height: number; ui: string }>({ cmd: "look", session }, 30_000);
+  for (let i = 0; i < 30 && !look.ui.includes("\"done\""); i++) {
+    await new Promise((r) => setTimeout(r, 3_000));
+    look = await helper.call({ cmd: "look", session }, 30_000);
+  }
   writeFileSync(join(out, "look.jpg"), Buffer.from(look.image, "base64"));
   console.log(`look: ${look.width}x${look.height}, saved ${join(out, "look.jpg")}\n${look.ui}`);
   console.log("escape through Terminal:", existsSync(marker) ? "ESCAPED (marker written)" : "no marker");
+  // Input waits while you use the Mac: wait for a quiet moment before trying it.
+  for (let i = 0; i < 40 && (await helper.call<HelperStatus>({ cmd: "status" })).armed?.pausedUntilMs; i++) await new Promise((r) => setTimeout(r, 1_500));
   // Clicks are given in the look's coordinates: there is no way to name a point outside the app's windows.
   const outside = await helper.call({ cmd: "click", session, x: look.width + 50, y: 10 }).then(() => "allowed", (e: Error) => `refused: ${e.message}`);
   console.log("click beyond its windows:", outside);
+  // Our own click must not count as you using the Mac.
+  const clicked = await helper.call({ cmd: "click", session, x: Math.round(look.width / 2), y: Math.round(look.height / 2) }).then(() => "done", (e: Error) => `refused: ${e.message}`);
+  const after = (await helper.call<HelperStatus>({ cmd: "status" })).armed?.pausedUntilMs;
+  console.log("click in the app:", clicked, "| paused afterwards:", after ? "YES (wrong)" : "no");
   const tab = await helper.call({ cmd: "key", session, combo: "cmd+tab" }).then(() => "allowed", (e: Error) => `refused: ${e.message}`);
   console.log("cmd+tab:", tab);
   if (process.argv.includes("--watch")) {
