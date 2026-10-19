@@ -36,6 +36,8 @@ export type Request =
   | { op: "sim.screenshot"; scope: string; saveAs?: string; region?: [number, number, number, number] }
   | { op: "sim.logs"; scope: string; process?: string; seconds?: number }
   | { op: "sim.shutdown"; scope: string }
+  /** R9: build the macOS app (unsigned) and return it packed, for swarmd to open on the desktop. */
+  | { op: "mac.build"; scope: string; project?: string; workspace?: string; scheme: string; configuration?: string; timeoutMs?: number }
   /**
    * A headless browser for the run (R6). After this request, swarmd writes browser commands as lines
    * (`{"id": 1, "cmd": "open", "url": …}`); each reply is an event. Ends when swarmd closes stdin.
@@ -101,6 +103,16 @@ export interface SimDevice {
   readonly deviceType: string;
   readonly runtime: string;
   readonly bootMs: number;
+}
+
+/** R9: a macOS build. `archive` is the .app packed by ditto (base64), for swarmd to sign and open. */
+export interface MacBuildResult {
+  readonly ok: boolean;
+  readonly errors: readonly string[];
+  readonly durationMs: number;
+  readonly app: string | null;
+  readonly bundleId: string | null;
+  readonly archive: string | null;
 }
 
 export interface SimBuildResult {

@@ -89,9 +89,16 @@ if (tool === "xcrun") {
     process.exit(65);
   }
   const derived = args[args.indexOf("-derivedDataPath") + 1];
-  const app = join(derived, "Build", "Products", `${args[args.indexOf("-configuration") + 1]}-iphonesimulator`, "Demo.app");
-  mkdirSync(app, { recursive: true });
-  writeFileSync(join(app, "Info.plist"), `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.example.demo</string></dict></plist>\n`);
+  const configuration = args[args.indexOf("-configuration") + 1];
+  const mac = args.includes("platform=macOS");
+  const app = join(derived, "Build", "Products", mac ? configuration : `${configuration}-iphonesimulator`, "Demo.app");
+  const plistDir = mac ? join(app, "Contents") : app;
+  mkdirSync(plistDir, { recursive: true });
+  writeFileSync(join(plistDir, "Info.plist"), `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.example.demo</string></dict></plist>\n`);
+  if (mac) {
+    mkdirSync(join(app, "Contents", "MacOS"), { recursive: true });
+    writeFileSync(join(app, "Contents", "MacOS", "Demo"), "#!/bin/sh\n");
+  }
   process.stdout.write("** BUILD SUCCEEDED **\n");
 }
 save();

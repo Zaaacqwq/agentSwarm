@@ -18,25 +18,25 @@ export const DEFAULT_DEVICE_TYPE = "com.apple.CoreSimulator.SimDeviceType.iPhone
 const IDENT = /^[A-Za-z0-9][A-Za-z0-9.-]{0,150}$/;
 const PROCESS_NAME = /^[A-Za-z0-9 ._-]{1,80}$/;
 export const SIM_BUTTONS = ["home", "lock", "side-button", "siri", "apple-pay"] as const;
-const MAX_BUILD_MS = 1_800_000;
+export const MAX_BUILD_MS = 1_800_000;
 
-interface Ctx {
+export interface Ctx {
   readonly env: ExecEnv;
   readonly scope: string;
   readonly cwd: string;
 }
 
-function ctx(env: ExecEnv, scope: string): Ctx {
+export function ctx(env: ExecEnv, scope: string): Ctx {
   return { env, scope, cwd: resolveScope(env.root, scope) };
 }
 
-async function run(c: Ctx, argv: string[], opts: { timeoutMs?: number; stdin?: string } = {}): Promise<ExecResult> {
+export async function run(c: Ctx, argv: string[], opts: { timeoutMs?: number; stdin?: string } = {}): Promise<ExecResult> {
   const r = await runProcess(c.env, sandboxed(c.env, argv, c.scope), { cwd: c.cwd, scope: c.scope, timeoutMs: opts.timeoutMs ?? 60_000, ...(opts.stdin !== undefined ? { stdin: opts.stdin } : {}) });
   if (r.timedOut) throw new OpError("timeout", `${basename(argv[0]!)} ${argv[1] ?? ""} timed out`);
   return r;
 }
 
-async function ok(c: Ctx, argv: string[], opts: { timeoutMs?: number; stdin?: string } = {}): Promise<string> {
+export async function ok(c: Ctx, argv: string[], opts: { timeoutMs?: number; stdin?: string } = {}): Promise<string> {
   const r = await run(c, argv, opts);
   if (r.exitCode !== 0) throw new OpError("failed", r.output.trim().slice(-800) || `${basename(argv[0]!)} exited with ${r.exitCode}`);
   return r.output;
@@ -156,7 +156,7 @@ export function summarizeBuild(output: string): string[] {
   return [...new Set(errors)].slice(0, 40).map((l) => l.slice(0, 400));
 }
 
-function newestApp(dir: string): string | null {
+export function newestApp(dir: string): string | null {
   if (!existsSync(dir)) return null;
   const apps = readdirSync(dir).filter((f) => f.endsWith(".app")).map((f) => join(dir, f));
   apps.sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
