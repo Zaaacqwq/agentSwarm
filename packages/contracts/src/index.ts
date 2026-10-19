@@ -115,24 +115,35 @@ export interface AgentView {
   readonly instructions: string;
   readonly runtime: "native";
   readonly parentId: string | null;
+  readonly ephemeral: boolean;
   readonly createdAt: number;
 }
 
 export const CreateRun = Type.Object({
   title: Type.String({ minLength: 1, maxLength: 120 }),
   brief: Type.String({ minLength: 1, maxLength: 20_000 }),
+  /** The whole tree's budget: this run and everything it spawns. */
+  budgetUsd: Type.Optional(Type.Number({ minimum: 0.05, maximum: 50 })),
 });
 export type CreateRun = Static<typeof CreateRun>;
 
 export const RunMessage = Type.Object({ text: Type.String({ minLength: 1, maxLength: 20_000 }) });
 export type RunMessage = Static<typeof RunMessage>;
 
-export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+export type RunStatus = "queued" | "running" | "waiting" | "succeeded" | "failed" | "cancelled";
 
 export interface RunReport {
   readonly summary: string;
   readonly tests: string;
   readonly unfinished: string[];
+  readonly recommendations?: string[];
+}
+
+export interface ReviewVerdict {
+  readonly approved: boolean;
+  readonly comments: string;
+  readonly reviewRunId: string;
+  readonly headSha: string;
 }
 
 export interface RunView {
@@ -153,6 +164,26 @@ export interface RunView {
   readonly createdAt: number;
   readonly startedAt: number | null;
   readonly endedAt: number | null;
+  readonly agentName: string;
+  readonly agentRole: string;
+  readonly treeId: string | null;
+  readonly parentRunId: string | null;
+  readonly depth: number;
+  readonly kind: "task" | "review";
+  readonly baseBranch: string | null;
+  readonly budgetUsd: number | null;
+  readonly review: ReviewVerdict | null;
+  readonly reviewOf: string | null;
+  readonly mergedAt: number | null;
+  readonly prUrl: string | null;
+  readonly waitingFor: string[] | null;
+}
+
+/** Every run of one tree, and what the whole tree has spent. */
+export interface TreeView {
+  readonly treeId: string;
+  readonly nodes: RunView[];
+  readonly totalCostUsd: number;
 }
 
 export type RunEventType =
@@ -162,6 +193,7 @@ export type RunEventType =
   | "tool_start"
   | "tool_end"
   | "push"
+  | "results"
   | "error";
 
 export interface RunEventView {

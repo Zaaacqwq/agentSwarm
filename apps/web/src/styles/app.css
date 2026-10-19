@@ -113,3 +113,13 @@ tr.link:hover td { background: var(--paper-sunk); }
 }
 .status-line { padding: 0 var(--space-4); font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.06em; }
 .event details summary { margin-top: var(--space-2); }
+
+/* ---- agent tree ---- */
+.tree, .tree ul { list-style: none; margin: 0; padding: 0; }
+.tree ul { margin-left: var(--space-4); padding-left: var(--space-4); border-left: 1px solid var(--rule); }
+.tree-node { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); }
+.tree-node.here { background: var(--paper-sunk); box-shadow: inset 3px 0 0 var(--signal); }
+.tree-node a { text-decoration: none; }
+.tree-node a:hover { text-decoration: underline; }
+.badge.waiting { color: var(--warn); }
+.event.results { border-color: var(--warn); }

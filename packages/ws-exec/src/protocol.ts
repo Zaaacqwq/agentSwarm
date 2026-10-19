@@ -12,6 +12,8 @@ export type Request =
   | { op: "git.commit"; scope: string; message: string }
   | { op: "git.pushInbox"; scope: string; branch: string }
   | { op: "git.remove"; scope: string }
+  /** Merge another hive branch from the mirror into this worktree (no fast-forward); aborts on conflict. */
+  | { op: "git.merge"; scope: string; branch: string; sha: string; message: string }
   /** Kill every process of this workstation user: the run ended, was cancelled, or swarmd restarted. */
   | { op: "reap" };
 

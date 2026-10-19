@@ -13,7 +13,8 @@ import type { WorkstationBackend } from "../workstations/backend.ts";
 import { EventBus } from "../events/event-bus.ts";
 import { Relay } from "../relay/relay.ts";
 import { AgentService } from "../agents/agent-service.ts";
-import { RunService } from "../agents/run-service.ts";
+import { DEFAULT_LIMITS, RunService } from "../agents/run-service.ts";
+import { TreeService } from "../agents/tree-service.ts";
 import type { RunLimits } from "../db/schema.ts";
 
 export type Logger = (level: "info" | "warn" | "error", msg: string, extra?: Record<string, unknown>) => void;
@@ -45,6 +46,7 @@ export interface Services {
   readonly agents: AgentService;
   readonly relay: Relay;
   readonly runs: RunService;
+  readonly tree: TreeService;
 }
 
 export function createServices(d: ServiceDeps): Services {
@@ -56,11 +58,12 @@ export function createServices(d: ServiceDeps): Services {
   const pool = new WorkstationPool(d.db, d.backend, (workstation) => bus.publish({ kind: "workstation", workstation }));
   const agents = new AgentService(d.db);
   const relay = new Relay({ db: d.db, backend: d.backend, projects, git: d.git, bus, layout: d.layout });
+  const tree = new TreeService({ db: d.db, projects, agents, github, git: d.git, backend: d.backend, limits: d.limits ?? DEFAULT_LIMITS });
   const runs = new RunService({
-    db: d.db, bus, pool, backend: d.backend, projects, agents, gateway, relay,
+    db: d.db, bus, pool, backend: d.backend, projects, agents, gateway, relay, tree,
     maxConcurrent: d.maxConcurrentRuns, refreshMirror: d.refreshMirror ?? true,
     log: (msg, extra) => d.log("warn", msg, extra),
     ...(d.limits ? { limits: d.limits } : {}),
   });
-  return { bus, auth: new AuthService(d.db), endpoints, gateway, github, projects, pool, agents, relay, runs };
+  return { bus, auth: new AuthService(d.db), endpoints, gateway, github, projects, pool, agents, relay, runs, tree };
 }

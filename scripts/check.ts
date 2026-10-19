@@ -34,13 +34,13 @@ if (ws) {
     record(name, r.exitCode !== 0 && /Operation not permitted|Permission denied/.test(r.output), r.output.trim().split("\n")[0]?.slice(0, 100) ?? "");
   };
   try {
-    // .tmp is created on demand by every exec, so it can host the first command.
-    await backend.call(ws, { op: "exec", scope: ".tmp", command: `mkdir -p ../${scope}`, timeoutMs: 10_000 });
     await backend.call(ws, { op: "fs.write", scope, path: "note.txt", content: "hello\n" });
+    await backend.call(ws, { op: "fs.write", scope: `${scope}-other`, path: "secret.txt", content: "other run\n" });
     const own = await run("cat note.txt && echo ok > out.txt && cat out.txt");
     record(`${ws} can read and write its own files`, own.exitCode === 0 && own.output.includes("ok"));
     const id = await run("id -un; id -Gn");
     record(`commands run as ${ws}, not in staff`, id.output.startsWith(ws) && !/\bstaff\b/.test(id.output), id.output.replace(/\n/g, " | ").trim());
+    await denied("cannot read another run's worktree on the same workstation", `cat ../${scope}-other/secret.txt`);
     await denied("cannot read your home", `cat ${JSON.stringify(`${homedir()}/.zshrc`)}`);
     await denied("cannot read /Volumes/Data", "ls /Volumes/Data");
     await denied("cannot read swarmd data", `ls ${PRODUCTION_LAYOUT.swarmdData}`);
@@ -67,7 +67,8 @@ if (ws) {
   } catch (e) {
     record("workstation checks", false, (e as Error).message);
   } finally {
-    await run("cd .. && rm -rf agentswarm-check").catch(() => undefined);
+    await backend.call(ws, { op: "exec", scope: `${scope}-other`, command: "rm -rf ./*", timeoutMs: 10_000 }).catch(() => undefined);
+    await run("rm -rf ./*").catch(() => undefined);
   }
 }
 

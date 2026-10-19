@@ -27,7 +27,10 @@ function tool<P extends TSchema>(name: string, description: string, parameters: 
   };
 }
 
-/** The R1 toolset: everything runs as the leased workstation user, inside its sandbox. */
+/** Read-only tools for reviewers. */
+export const REVIEW_TOOL_NAMES = new Set(["ws_list", "ws_read", "ws_grep", "ws_bash", "git_status"]);
+
+/** The workstation toolset: everything runs as the leased workstation user, inside its sandbox. */
 export function workstationTools(ctx: ToolContext): AgentTool<any, undefined>[] {
   const call = <T>(request: Request, signal?: AbortSignal, timeoutMs?: number) =>
     ctx.backend.call<T>(ctx.workstation, request, { ...(signal ? { signal } : {}), ...(timeoutMs ? { timeoutMs } : {}) });
@@ -106,6 +109,7 @@ const ReportParams = Type.Object({
   summary: Type.String({ minLength: 1, maxLength: 4000 }),
   tests: Type.String({ maxLength: 4000 }),
   unfinished: Type.Array(Type.String({ maxLength: 500 }), { maxItems: 20 }),
+  recommendations: Type.Optional(Type.Array(Type.String({ maxLength: 500 }), { maxItems: 20 })),
 });
 
 function reportTool(onReport: (report: RunReport) => void): AgentTool<typeof ReportParams, undefined> {
@@ -115,7 +119,7 @@ function reportTool(onReport: (report: RunReport) => void): AgentTool<typeof Rep
     description: "Finish the task: what you did, the test results, and anything unfinished. Call this last.",
     parameters: ReportParams,
     execute: async (_id, p) => {
-      onReport({ summary: p.summary, tests: p.tests, unfinished: p.unfinished });
+      onReport({ summary: p.summary, tests: p.tests, unfinished: p.unfinished, ...(p.recommendations?.length ? { recommendations: p.recommendations } : {}) });
       return { ...text("Report received. You are done."), terminate: true };
     },
   };

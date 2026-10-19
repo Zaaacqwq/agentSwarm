@@ -133,15 +133,21 @@ install_node() {
 }
 
 install_exec() {
-  local src="${ROOT}/packages/ws-exec/src" dest="${LIBEXEC}/ws-exec.d"
+  local src="${ROOT}/packages/ws-exec/src" dest="${LIBEXEC}/ws-exec.d" stage out f
   [[ -f "${src}/main.ts" ]] || die "ws-exec sources not found in ${src}"
-  rm -rf "$dest"
-  mkdir -p "${dest}/ops"
-  # main.ts and what it imports; never local-main.ts (the test entry).
-  for f in main.ts dispatch.ts layout.ts passwd.ts paths.ts process.ts protocol.ts sandbox.ts ops/fs.ts ops/exec.ts ops/git.ts; do
-    install -o root -g wheel -m 0644 "${src}/${f}" "${dest}/${f}"
+  # Every source file except local-main.ts (the test entry), staged first and tried before it replaces
+  # the installed copy: a missing module must not leave the workstations without a working ws-exec.
+  stage="$(mktemp -d)"
+  (cd "$src" && find . -name '*.ts' ! -name 'local-main.ts' -print) | while read -r f; do
+    mkdir -p "${stage}/$(dirname "$f")"
+    cp "${src}/${f}" "${stage}/${f}"
   done
-  print -r -- '{ "type": "module" }' > "${dest}/package.json"
+  print -r -- '{ "type": "module" }' > "${stage}/package.json"
+  out="$(print -r -- '{"op":"info"}' | /usr/bin/env -i "${LIBEXEC}/node/bin/node" --disable-warning=ExperimentalWarning "${stage}/main.ts" 2>&1 || true)"
+  [[ "$out" == '{"ok":'* ]] || { rm -rf "$stage"; die "The new ws-exec does not start; nothing was replaced:"$'\n'"$out"; }
+  rm -rf "$dest"
+  mv "$stage" "$dest"
+  chown -R root:wheel "$dest" && find "$dest" -type d -exec chmod 0755 {} + && find "$dest" -type f -exec chmod 0644 {} +
   cat > "$EXEC" <<EOF
 #!/bin/sh
 # Installed by agentswarm scripts/setup.sh. An empty environment: nothing from the caller reaches ws-exec.
@@ -160,7 +166,7 @@ case "\$user" in ws-[0-9]|ws-[0-9][0-9]) ;; *) fail "not a workstation user" ;; 
 uid="\$(/usr/bin/id -u "\$user")"
 exec /bin/launchctl asuser "\$uid" /usr/bin/sudo -n -H -u "\$user" ${EXEC}
 LAUNCHER
-  chown -R root:wheel "$LIBEXEC" && chmod 0755 "$LIBEXEC" "$EXEC" "$LAUNCH" "$dest" "${dest}/ops" && chmod 0644 "${dest}/package.json"
+  chown -R root:wheel "$LIBEXEC" && chmod 0755 "$LIBEXEC" "$EXEC" "$LAUNCH"
   say "Installed ${EXEC} and ${LAUNCH}"
 }
 

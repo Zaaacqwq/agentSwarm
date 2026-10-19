@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { index, integer, real, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 const json = <T>(name: string) => text(name, { mode: "json" }).$type<T>();
@@ -82,6 +83,8 @@ export const agents = sqliteTable("agents", {
   parentId: text("parent_id"),
   depth: integer("depth").notNull(),
   budgetUsd: real("budget_usd"),
+  /** Sub-agents exist for one run and are not listed with the standing agents. */
+  ephemeral: integer("ephemeral", { mode: "boolean" }).notNull().default(false),
   createdAt: integer("created_at").notNull(),
 }, (t) => [index("agents_project_idx").on(t.projectId)]);
 
@@ -101,7 +104,7 @@ export const runs = sqliteTable("runs", {
   worktreeScope: text("worktree_scope").notNull(),
   /** The workstation holding this run's worktree once it has one; follow-ups go back to it. */
   workstationId: text("workstation_id"),
-  status: text("status", { enum: ["queued", "running", "succeeded", "failed", "cancelled"] }).notNull(),
+  status: text("status", { enum: ["queued", "running", "waiting", "succeeded", "failed", "cancelled"] }).notNull(),
   pendingMessage: text("pending_message"),
   report: json<{ summary: string; tests: string; unfinished: string[] }>("report"),
   error: text("error"),
@@ -113,7 +116,34 @@ export const runs = sqliteTable("runs", {
   createdAt: integer("created_at").notNull(),
   startedAt: integer("started_at"),
   endedAt: integer("ended_at"),
-}, (t) => [index("runs_agent_idx").on(t.agentId, t.createdAt), index("runs_status_idx").on(t.status), uniqueIndex("runs_branch_uq").on(t.projectId, t.branch)]);
+  // R2: the agent tree.
+  treeId: text("tree_id"),
+  parentRunId: text("parent_run_id"),
+  depth: integer("depth").notNull().default(0),
+  /** What this run's branch was cut from; null means the project's default branch. */
+  baseBranch: text("base_branch"),
+  /** This node's own spending limit, carved from its parent's; null falls back to limits.maxCostUsd. */
+  budgetUsd: real("budget_usd"),
+  kind: text("kind", { enum: ["task", "review"] }).notNull().default("task"),
+  /** For a review run: the run under review. */
+  reviewOf: text("review_of"),
+  /** On a reviewed run: the reviewer's verdict, for exactly the commit that was reviewed. */
+  review: json<{ approved: boolean; comments: string; reviewRunId: string; headSha: string }>("review"),
+  /** For a review run: the commit it reviews (the branch tip when the review started). */
+  reviewSha: text("review_sha"),
+  mergedAt: integer("merged_at"),
+  prUrl: text("pr_url"),
+  /** While waiting: the child runs it is waiting for. */
+  waitingFor: json<string[]>("waiting_for"),
+}, (t) => [
+  index("runs_agent_idx").on(t.agentId, t.createdAt),
+  index("runs_status_idx").on(t.status),
+  index("runs_branch_idx").on(t.projectId, t.branch),
+  // Two task runs never share a branch; reviewers check out the branch they review.
+  uniqueIndex("runs_task_branch_uq").on(t.projectId, t.branch).where(sql`kind = 'task'`),
+  index("runs_tree_idx").on(t.treeId),
+  index("runs_parent_idx").on(t.parentRunId),
+]);
 
 export const runEvents = sqliteTable("run_events", {
   id: integer("id").primaryKey({ autoIncrement: true }),

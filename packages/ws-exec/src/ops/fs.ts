@@ -42,7 +42,9 @@ export function read(env: ExecEnv, scope: string, path: string, offset = 1, limi
 
 export function write(env: ExecEnv, scope: string, path: string, content: string) {
   if (Buffer.byteLength(content) > MAX_WRITE_BYTES) throw new OpError("bad_request", "Content too large");
-  const file = resolveInScope(resolveScope(env.root, scope), path);
+  const scopeDir = resolveScope(env.root, scope);
+  mkdirSync(scopeDir, { recursive: true, mode: 0o700 });
+  const file = resolveInScope(scopeDir, path);
   if (isGitInternal(env, scope, file)) throw new OpError("out_of_scope", "Writing inside .git is not allowed");
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, content);
@@ -66,7 +68,7 @@ export async function grep(env: ExecEnv, scope: string, pattern: string, path = 
   const scopeDir = resolveScope(env.root, scope);
   const target = resolveInScope(scopeDir, path);
   const argv = ["/usr/bin/grep", "-rnIE", "--exclude-dir=.git", "--exclude-dir=node_modules", ...(glob ? [`--include=${glob}`] : []), "-e", pattern, "--", target];
-  const res = await runProcess(env, sandboxed(env, argv, scope), { cwd: scopeDir, timeoutMs: 30_000 });
+  const res = await runProcess(env, sandboxed(env, argv, scope), { cwd: scopeDir, scope, timeoutMs: 30_000 });
   if (res.exitCode === 2) throw new OpError("bad_request", res.output.slice(0, 300) || "grep failed");
   const lines = res.output.split("\n").filter(Boolean).map((l) => (l.startsWith(scopeDir) ? l.slice(scopeDir.length + 1) : l));
   return { matches: lines.slice(0, maxResults), truncated: lines.length > maxResults || res.truncated };

@@ -72,7 +72,7 @@ describe("commands (sandboxed)", () => {
       assert.equal(r.exitCode, 0);
       assert.match(r.output, /\/ws\/ws-1\/work\n/);
       assert.match(r.output, /secret=none/);
-      assert.match(r.output, new RegExp(`${f.env.home}\\n`));
+      assert.match(r.output, /\/ws\/ws-1\/\.homes\/work\n/);
     } finally {
       delete process.env.SWARM_TEST_SECRET;
       f.cleanup();
@@ -90,6 +90,22 @@ describe("commands (sandboxed)", () => {
       }
       const own = await call<{ exitCode: number }>(f.env, { op: "exec", scope: "work", command: "echo hi > note.txt && cat note.txt" });
       assert.equal(own.exitCode, 0);
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  test("cannot read or write another run's worktree, home or temp dir on the same workstation", async () => {
+    const f = fixture();
+    try {
+      mkdirSync(join(f.env.root, "worktrees/demo/b"), { recursive: true });
+      writeFileSync(join(f.env.root, "worktrees/demo/b/secret.txt"), "b only\n");
+      await call(f.env, { op: "exec", scope: "worktrees/demo/b", command: "echo planted > $HOME/.gitconfig" });
+      const r = await call<{ output: string }>(f.env, { op: "exec", scope: "worktrees/demo/a", command: "cat ../b/secret.txt; echo x > ../b/hook.sh; echo w=$?; ls ../../../.homes 2>&1; cat $HOME/.gitconfig 2>&1; echo own > mine.txt && cat mine.txt" });
+      assert.doesNotMatch(r.output, /b only/);
+      assert.match(r.output, /w=[1-9]/);
+      assert.doesNotMatch(r.output, /planted/);
+      assert.match(r.output, /own/);
     } finally {
       f.cleanup();
     }
@@ -155,9 +171,49 @@ describe("identity and profile", () => {
   test("the profile denies the volume and homes, then allows only this workstation", () => {
     const f = fixture();
     try {
-      const p = sandboxProfile(f.env);
-      assert.ok(p.indexOf(`(deny file-read* file-write* (subpath ${JSON.stringify(f.layout.volume)}))`) < p.indexOf(`(allow file-read* file-write* (subpath ${JSON.stringify(f.env.root)}))`));
+      const p = sandboxProfile(f.env, "worktrees/demo/x");
+      assert.ok(p.indexOf(`(deny file-read* file-write* (subpath ${JSON.stringify(f.layout.volume)}))`) < p.indexOf(`(allow file-read* file-write* (subpath ${JSON.stringify(`${f.env.root}/worktrees/demo/x`)}))`));
+      assert.ok(!p.includes(`(subpath ${JSON.stringify(f.env.root)})`), "the whole workstation root must not be writable");
       assert.ok(!p.includes(f.other));
+    } finally {
+      f.cleanup();
+    }
+  });
+});
+
+describe("git merge (sandboxed)", () => {
+  test("merges another branch from the mirror, and reports conflicts without leaving a half merge", async () => {
+    const f = fixture();
+    try {
+      const child = "worktrees/demo/t1--child";
+      const parent = "worktrees/demo/t1--root";
+      await call(f.env, { op: "git.clone", scope: child, mirror: "demo.git", branch: "swarm/demo/t1/child", base: "main" });
+      writeFileSync(join(f.env.root, child, "child.txt"), "from child\n");
+      await call(f.env, { op: "git.commit", scope: child, message: "child work" });
+      // What the Relay does after a push: the child's branch lands in the mirror.
+      const { execFileSync } = await import("node:child_process");
+      const head = execFileSync("/usr/bin/git", ["-C", join(f.env.root, child), "rev-parse", "HEAD"]).toString().trim();
+      execFileSync("/usr/bin/git", ["-C", join(f.layout.mirrors, "demo.git"), "fetch", "-q", join(f.env.root, child), `+HEAD:refs/heads/swarm/demo/t1/child`]);
+      await call(f.env, { op: "git.clone", scope: parent, mirror: "demo.git", branch: "swarm/demo/t1/root", base: "main" });
+      await assert.rejects(call(f.env, { op: "git.merge", scope: parent, branch: "swarm/demo/t1/child", sha: "0".repeat(40), message: "Merge child" }), /moved since it was reviewed/);
+      const merged = await call<{ merged: boolean; head: string }>(f.env, { op: "git.merge", scope: parent, branch: "swarm/demo/t1/child", sha: head, message: "Merge child" });
+      assert.equal(merged.merged, true);
+      assert.equal(readFileSync(join(f.env.root, parent, "child.txt"), "utf8"), "from child\n");
+      assert.notEqual(merged.head, head);
+
+      // A conflicting change on both sides.
+      writeFileSync(join(f.env.root, child, "README.md"), "child says\n");
+      await call(f.env, { op: "git.commit", scope: child, message: "child readme" });
+      execFileSync("/usr/bin/git", ["-C", join(f.layout.mirrors, "demo.git"), "fetch", "-q", join(f.env.root, child), `+HEAD:refs/heads/swarm/demo/t1/child`]);
+      const head2 = execFileSync("/usr/bin/git", ["-C", join(f.env.root, child), "rev-parse", "HEAD"]).toString().trim();
+      writeFileSync(join(f.env.root, parent, "README.md"), "parent says\n");
+      await call(f.env, { op: "git.commit", scope: parent, message: "parent readme" });
+      const conflict = await call<{ merged: boolean; conflicts: string[] }>(f.env, { op: "git.merge", scope: parent, branch: "swarm/demo/t1/child", sha: head2, message: "Merge child again" });
+      assert.equal(conflict.merged, false);
+      assert.deepEqual(conflict.conflicts, ["README.md"]);
+      assert.equal(readFileSync(join(f.env.root, parent, "README.md"), "utf8"), "parent says\n");
+      const status = await call<{ status: string }>(f.env, { op: "git.status", scope: parent });
+      assert.doesNotMatch(status.status, /UU|AA/);
     } finally {
       f.cleanup();
     }

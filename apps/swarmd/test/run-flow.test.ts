@@ -30,7 +30,7 @@ describe("a run", () => {
       report(),
     ]);
     const run = (await h.api("POST", `/api/agents/${agentId}/runs`, { title: "Fix square", brief: "square(3) should be 9" }, cookie)).body;
-    assert.match(run.branch, /^swarm\/demo\/fix-square-[0-9a-f]{6}$/);
+    assert.match(run.branch, /^swarm\/demo\/fix-square-[0-9a-f]{6}\/root$/);
     const done = await h.services.runs.settled(run.id);
     assert.equal(done.status, "succeeded", done.error ?? "");
     assert.equal(done.report?.summary, "Fixed square");

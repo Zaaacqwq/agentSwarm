@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createFauxCore, type FauxResponseStep } from "@earendil-works/pi-ai";
+import { createFauxCore, fauxAssistantMessage, fauxText, type FauxResponseFactory, type FauxResponseStep } from "@earendil-works/pi-ai";
 import type { ExecEnv, Layout } from "@agentswarm/ws-exec";
 import type { FastifyInstance } from "fastify";
 import { openDatabase, type DbHandle } from "../src/db/client.ts";
@@ -27,8 +27,11 @@ export interface Harness {
   readonly app: FastifyInstance;
   readonly db: DbHandle;
   readonly protectedBranches: Set<string>;
+  readonly pullRequests: { repo: string; head: string; base: string; title: string; body: string }[];
   /** Scripted model replies, consumed one per model request. */
   script(steps: FauxResponseStep[]): void;
+  /** One script per agent name (read from "You are <name>," in the system prompt); order across agents does not matter. */
+  scriptAgents(scripts: Record<string, FauxResponseStep[]>): { remaining(): string[] };
   pending(): number;
   /** Signs in (running first-time setup) and returns a cookie header. */
   login(): Promise<string>;
@@ -76,11 +79,16 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
 
   const faux = createFauxCore({ models: [{ id: "fake-model", input: ["text", "image"] }] });
   const protectedBranches = new Set<string>();
+  const pullRequests: { repo: string; head: string; base: string; title: string; body: string }[] = [];
   const github: GitHubClient = {
     whoami: async () => ({ login: "tester", expiresAt: null }),
     repo: async (_t, fullName) => ({ fullName, defaultBranch: "main", private: true, canAdmin: true, cloneUrl: remote }),
     isProtected: async (_t, fullName, branch) => protectedBranches.has(`${fullName}:${branch}`),
     protect: async (_t, fullName, branch) => void protectedBranches.add(`${fullName}:${branch}`),
+    createPullRequest: async (_t, fullName, input) => {
+      pullRequests.push({ repo: fullName, ...input });
+      return `https://github.com/${fullName}/pull/${pullRequests.length}`;
+    },
   };
   const db = openDatabase(":memory:");
   const services = createServices({
@@ -121,8 +129,21 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
   };
 
   return {
-    base, layout, remote, services, app, db, protectedBranches,
+    base, layout, remote, services, app, db, protectedBranches, pullRequests,
     script: (steps) => faux.setResponses(steps),
+    scriptAgents(scripts) {
+      const queues = new Map(Object.entries(scripts).map(([k, v]) => [k, [...v]]));
+      const router: FauxResponseFactory = (context, options, state, model) => {
+        const system = context.messages.find((m) => m.role === "system") as { content: unknown } | undefined;
+        const text = typeof system?.content === "string" ? system.content : JSON.stringify(system?.content ?? "");
+        const name = /You are ([^,]+),/.exec(text)?.[1] ?? "?";
+        const step = queues.get(name)?.shift();
+        if (!step) return fauxAssistantMessage(fauxText(`(no script left for ${name})`));
+        return typeof step === "function" ? step(context, options, state, model) : step;
+      };
+      faux.setResponses(Array.from({ length: 500 }, () => router));
+      return { remaining: () => [...queues].filter(([, q]) => q.length).map(([k, q]) => `${k}:${q.length}`) };
+    },
     pending: () => faux.getPendingResponseCount(),
     login,
     api,
