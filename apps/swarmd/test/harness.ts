@@ -154,7 +154,8 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
     log: () => {},
     gateway: () => ({
       listModels: async () => [{ id: "fake-model", name: "Fake", vision: true, contextWindow: 100_000, inputPerMTok: 0, outputPerMTok: 0 }],
-      resolve: async () => ({ model: faux.getModel(), streamFn: faux.streamSimple }),
+      // The id asked for, so a test can tell the backup model from the agent's own.
+      resolve: async (_endpointId: string, modelId: string) => ({ model: { ...faux.getModel(), id: modelId }, streamFn: faux.streamSimple }),
     }),
     remoteUrl: (fullName) => remotes.get(fullName) ?? remote,
     refreshMirror: false,

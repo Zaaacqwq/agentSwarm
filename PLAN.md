@@ -310,8 +310,8 @@ main                          ← 只放可发布的代码；只有你能合并
 |---|---|---|
 | PR 先装到手机上测 | 在 App Store Connect 里给 Fridgy 加一条 Xcode Cloud 工作流 "PR TestFlight"：<br>· 触发：Pull Request Changes，源分支任意，目标 `main`，打开 Auto-cancel，可只在 App 代码变化时触发；<br>· 动作：Archive（iOS，scheme Fridgy），部署准备选 TestFlight (Internal Testing Only)，可加 Test；<br>· 后续动作：TestFlight Internal Testing，选只有你自己的内测组；<br>· 不设 `FRIDGY_RELEASE_CHANNEL`，`ci_post_clone.sh` 默认用 TestFlight 配置。<br>可选：在 `ci_post_clone.sh` 里用 `CI_PULL_REQUEST_NUMBER` 写 `TestFlight/WhatToTest.en-US.txt`，标明这个包对应哪个 PR。<br>注意每月 25 小时的编译额度 | R5 验收：PR 合并前没法在模拟器和手机上试 |
 | ~~PR 消息附上拉到本机的命令~~（R7 已做：ticket 页在 PR 就绪时显示 `gh pr checkout`） | Linear 和 Discord 里"PR 已开好"的消息附上 `cd <仓库> && gh pr checkout <编号>`；项目接了 Xcode Cloud 时，提示 TestFlight 包大约多久后出现 | 同上 |
-| 模型拒答时换模型 | 提供方的内容审核拒绝（例如 Alibaba `data_inspection_failed`）时，自动换备用模型重试，不让 lead 直接失败 | R5 验收：ZAA-6 的 lead 因此失败 |
-| researcher 上限 | 给 researcher 加搜索次数、抓取次数和费用的上限，到 30 分钟时限前就收尾交结果 | R5 验收：ZAA-6 的 researcher 跑满 30 分钟，花了 $0.73 |
+| ~~模型拒答时换模型~~（2026-10-19 已做：设置页的"备用模型"） | 提供方的内容审核拒绝（例如 Alibaba `data_inspection_failed`）时，自动换备用模型重试，不让 lead 直接失败 | R5 验收：ZAA-6 的 lead 因此失败 |
+| ~~researcher 上限~~（2026-10-19 已做：12 次搜索、24 次读网页，用掉 60% 的时间或预算就让它交报告） | 给 researcher 加搜索次数、抓取次数和费用的上限，到 30 分钟时限前就收尾交结果 | R5 验收：ZAA-6 的 researcher 跑满 30 分钟，花了 $0.73 |
 | ZAA-6（每日自动 fetch） | 暂时搁置。它的会话仍算一个进行中的名额，需要时在面板或 Linear 里停掉 | 你的决定 |
 
 不暂缓、归入 R6 的：沙箱里的 `xcodebuild` 加载不了 Swift 宏插件（SwiftUIMacros），Agent 目前编译不了 SwiftUI 项目。这是 R6 模拟器验收的前提，在 R6 里先解决。

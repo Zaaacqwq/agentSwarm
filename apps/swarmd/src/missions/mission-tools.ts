@@ -66,8 +66,8 @@ export function missionTools(ops: MissionToolOps, t: StageTools): AgentTool<any,
 }
 
 /** Research on the web, done by swarmd (workstations stay offline). */
-export function webTools(ops: WebToolOps): AgentTool<any, undefined>[] {
-  return [
+export function webTools(ops: WebToolOps, note?: string): AgentTool<any, undefined>[] {
+  const tools: AgentTool<any, undefined>[] = [
     {
       name: "web_search", label: "web_search", parameters: Search,
       description: "Search the web. Returns the top results with URLs and short excerpts. Each search costs about $0.01.",
@@ -79,6 +79,7 @@ export function webTools(ops: WebToolOps): AgentTool<any, undefined>[] {
       execute: async (_id, p: any) => text(await ops.fetch(p.url, p.offset ?? 0)),
     },
   ];
+  return note ? tools.map((t) => ({ ...t, description: `${t.description} ${note}` })) : tools;
 }
 
 const FileTicket = Type.Object({

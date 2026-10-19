@@ -52,6 +52,10 @@ const TREE_TOOLS = new Set(["spawn_agent", "wait_agents", "message_agent", "canc
 /** Taken away in the read-only stages (intake, retro). */
 const WRITE_TOOLS = new Set(["ws_write", "ws_edit", "git_commit", "git_push"]);
 
+/** A researcher's share of the web: enough for one precise question, with time left to write the report. */
+export const RESEARCH_LIMITS = { search: 12, fetch: 24, wrapUpShare: 0.6 } as const;
+const RESEARCH_NOTE = `You have at most ${RESEARCH_LIMITS.search} searches and ${RESEARCH_LIMITS.fetch} page reads; stop when you can answer.`;
+
 export interface MissionDeps {
   readonly db: Db;
   readonly bus: EventBus;
@@ -340,7 +344,7 @@ export class MissionService implements RunHooks {
     const m = this.missionOf(run);
     if (!m) return null;
     // Sub-agents: researchers get the web while the mission researches.
-    if (m.rootRunId !== run.id) return m.stage === "research" ? { add: webTools(this.webOps(run, binding)) } : null;
+    if (m.rootRunId !== run.id) return m.stage === "research" ? { add: webTools(this.webOps(run, binding, true), RESEARCH_NOTE) } : null;
     const t = stageTools(m.stage);
     const keep = (name: string) => {
       if (name === "report") return false;
@@ -488,10 +492,37 @@ export class MissionService implements RunHooks {
     return found;
   }
 
-  private webOps(run: RunRow, binding: RunBinding): WebToolOps {
-    const { web, agents } = this.deps;
+  /**
+   * The web, done by swarmd. A researcher (limited) gets a fixed number of searches and page reads, and is told
+   * to report once most of its time or budget is gone: it used to search until its 30 minutes ran out.
+   */
+  private webOps(run: RunRow, binding: RunBinding, limited = false): WebToolOps {
+    const { web, agents, db } = this.deps;
+    const used = { search: 0, fetch: 0 };
+    const started = Date.now();
+    const spend = () => db.select({ cost: schema.runs.costUsd, budget: schema.runs.budgetUsd }).from(schema.runs).where(eq(schema.runs.id, run.id)).get();
+    // As the run's own limit counts it: its whole budget when it has one, else this execution's spending.
+    const startCost = spend()?.cost ?? 0;
+    const budgetUsed = (): boolean => {
+      const now = spend();
+      if (!now) return false;
+      return now.budget !== null ? now.cost >= now.budget * RESEARCH_LIMITS.wrapUpShare : now.cost - startCost >= run.limits.maxCostUsd * RESEARCH_LIMITS.wrapUpShare;
+    };
+    const stop = (kind: "search" | "fetch"): string | null => {
+      if (!limited) return null;
+      const why = used[kind] >= RESEARCH_LIMITS[kind] ? `you have used all ${RESEARCH_LIMITS[kind]} ${kind === "search" ? "searches" : "page reads"}`
+        : Date.now() - started >= run.limits.maxDurationMs * RESEARCH_LIMITS.wrapUpShare ? "most of your time is used"
+        : budgetUsed() ? "most of your budget is used" : null;
+      if (!why) {
+        used[kind] += 1;
+        return null;
+      }
+      return `Not done: ${why}. Do not search or read more. Write your report now from what you found, with the links, and say what you could not check.`;
+    };
     return {
       fetch: async (url, offset) => {
+        const limit = stop("fetch");
+        if (limit) return limit;
         try {
           return fenced(pageWindow(await web.fetch(url, binding.signal), offset));
         } catch (error) {
@@ -500,6 +531,8 @@ export class MissionService implements RunHooks {
         }
       },
       search: async (query) => {
+        const limit = stop("search");
+        if (limit) return limit;
         const agent = agents.get(run.agentId);
         const res = await web.search(query, { endpointId: agent.endpointId, modelId: agent.modelId }, binding.signal);
         if (!res) return null;

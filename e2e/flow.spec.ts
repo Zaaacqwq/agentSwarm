@@ -158,7 +158,7 @@ test("connect Claude Code and Codex, then watch a Claude Code sub-agent do the w
   await page.screenshot({ path: `${SHOTS}/cli-settings-375.png`, fullPage: true });
 });
 
-test("the board's limit, a project's profile and local files, and the ports agents may not reach", async ({ page }) => {
+test("the board's limit, the backup model, a project's profile and local files, and the ports agents may not reach", async ({ page }) => {
   await page.goto("/settings");
   await page.getByLabel("Password").fill("correct horse battery staple");
   await page.getByRole("button", { name: "Sign in" }).click();
@@ -168,6 +168,13 @@ test("the board's limit, a project's profile and local files, and the ports agen
   await board.getByRole("button", { name: "Save" }).click();
   await page.reload();
   await expect(page.getByRole("region", { name: "Tickets" }).getByLabel("Tickets worked on at once")).toHaveValue("2");
+
+  const backup = page.getByRole("region", { name: "Backup model" });
+  await expect(backup.getByText("None yet")).toBeVisible();
+  await backup.getByLabel("Backup model").fill("anthropic/claude-haiku-5-5");
+  await backup.getByRole("button", { name: "Save" }).click();
+  await page.reload();
+  await expect(page.getByRole("region", { name: "Backup model" }).getByText("anthropic/claude-haiku-5-5", { exact: true })).toBeVisible();
 
   const mac = page.getByRole("region", { name: "This Mac" });
   await expect(mac.getByText("simulators and browsers in use", { exact: false })).toBeVisible();
