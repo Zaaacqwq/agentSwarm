@@ -155,6 +155,7 @@ export class TreeService {
       report: null, error: null, turns: 0, tokensIn: 0, tokensOut: 0, costUsd: 0, limits: this.deps.limits,
       createdAt: now, startedAt: null, endedAt: null, treeId: parent.treeId, parentRunId: parent.id, depth: parent.depth + 1,
       baseBranch: base, budgetUsd: budget, kind: "task", reviewOf: null, review: null, mergedAt: null, prUrl: null, waitingFor: null, reviewSha: null,
+      missionId: parent.missionId, prState: null, cleanedAt: null,
     };
   }
 
@@ -182,6 +183,7 @@ export class TreeService {
       createdAt: now, startedAt: null, endedAt: null, treeId: parent.treeId, parentRunId: parent.id, depth: parent.depth + 1,
       baseBranch: base, budgetUsd: this.carve(parent, TREE_LIMITS.reviewBudgetUsd, true), kind: "review", reviewOf: child.id,
       review: null, mergedAt: null, prUrl: null, waitingFor: null, reviewSha: sha,
+      missionId: parent.missionId, prState: null, cleanedAt: null,
     };
     db.insert(schema.runs).values(row).run();
     return row;
@@ -294,7 +296,7 @@ export class TreeService {
     return [
       brief.trim(),
       "",
-      `(You are a sub-agent of ${parentName}. Your branch starts from ${base}. When the work is done: run the tests, git_commit, git_push, then report. Your parent only sees your report.)`,
+      `(You are a sub-agent of ${parentName}. Your branch starts from ${base}. When the work is done: if you changed files, run the tests, git_commit and git_push; then report. Your parent only sees your report.)`,
     ].join("\n");
   }
 

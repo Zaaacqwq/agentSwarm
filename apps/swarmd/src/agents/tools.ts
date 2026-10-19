@@ -3,6 +3,7 @@ import { Type, type TSchema } from "@earendil-works/pi-ai";
 import type { ExecResult, Request } from "@agentswarm/ws-exec";
 import type { RunReport } from "@agentswarm/contracts";
 import type { WorkstationBackend } from "../workstations/backend.ts";
+import { clipToSchema } from "./clip.ts";
 
 export interface ToolContext {
   readonly backend: WorkstationBackend;
@@ -106,7 +107,7 @@ export function workstationTools(ctx: ToolContext): AgentTool<any, undefined>[] 
 }
 
 const ReportParams = Type.Object({
-  summary: Type.String({ minLength: 1, maxLength: 4000 }),
+  summary: Type.String({ minLength: 1, maxLength: 8000 }),
   tests: Type.String({ maxLength: 4000 }),
   unfinished: Type.Array(Type.String({ maxLength: 500 }), { maxItems: 20 }),
   recommendations: Type.Optional(Type.Array(Type.String({ maxLength: 500 }), { maxItems: 20 })),
@@ -118,6 +119,7 @@ function reportTool(onReport: (report: RunReport) => void): AgentTool<typeof Rep
     label: "report",
     description: "Finish the task: what you did, the test results, and anything unfinished. Call this last.",
     parameters: ReportParams,
+    prepareArguments: clipToSchema(ReportParams),
     execute: async (_id, p) => {
       onReport({ summary: p.summary, tests: p.tests, unfinished: p.unfinished, ...(p.recommendations?.length ? { recommendations: p.recommendations } : {}) });
       return { ...text("Report received. You are done."), terminate: true };

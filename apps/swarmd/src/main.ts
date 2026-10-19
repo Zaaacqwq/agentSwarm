@@ -9,6 +9,7 @@ import { buildApp } from "./http/app.ts";
 import { SudoBackend } from "./workstations/backend.ts";
 import { GitHubRest } from "./github/github-client.ts";
 import { createGitRunner } from "./github/git.ts";
+import { DiscordJsTransport } from "./discord/discord-js.ts";
 
 const log: Logger = (level, msg, extra) => {
   process.stderr.write(`${JSON.stringify({ time: new Date().toISOString(), level, msg, ...extra })}\n`);
@@ -33,6 +34,8 @@ async function main(): Promise<void> {
     layout: PRODUCTION_LAYOUT,
     maxConcurrentRuns: config.maxConcurrentRuns,
     log,
+    transport: new DiscordJsTransport(),
+    dashboardUrl: `http://${config.host === "::1" ? "[::1]" : config.host}:${config.port}`,
   });
 
   services.pool.resetLeases();
@@ -52,12 +55,16 @@ async function main(): Promise<void> {
   });
   await app.listen({ host: config.host, port: config.port });
   log("info", "swarmd listening", { url: `http://${config.host}:${config.port}`, dataDir: config.dataDir });
+  services.watcher.start();
+  void services.discord.start();
 
   let stopping = false;
   const shutdown = async (signal: string) => {
     if (stopping) return;
     stopping = true;
     log("info", "shutting down", { signal });
+    services.watcher.stop();
+    await services.discord.stop();
     await services.runs.stopAll();
     await app.close();
     database.close();

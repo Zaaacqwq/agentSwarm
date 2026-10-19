@@ -177,6 +177,9 @@ export interface RunView {
   readonly mergedAt: number | null;
   readonly prUrl: string | null;
   readonly waitingFor: string[] | null;
+  readonly missionId: string | null;
+  readonly prState: "open" | "merged" | "closed" | null;
+  readonly cleanedAt: number | null;
 }
 
 /** Every run of one tree, and what the whole tree has spent. */
@@ -204,11 +207,96 @@ export interface RunEventView {
   readonly createdAt: number;
 }
 
+// ---- missions (R3) -----------------------------------------------------------------------
+export type MissionStage =
+  | "intake" | "research" | "discussion" | "planning" | "awaiting_approval"
+  | "building" | "verifying" | "awaiting_merge" | "retro" | "done" | "cancelled";
+
+export const CreateMission = Type.Object({
+  projectId: Type.String(),
+  idea: Type.String({ minLength: 3, maxLength: 4000 }),
+  /** Skip research and discussion (small changes). */
+  fast: Type.Optional(Type.Boolean()),
+  budgetUsd: Type.Optional(Type.Number({ minimum: 0.1, maximum: 50 })),
+  /** The lead; default: the project's agent named Lead, else its newest agent. */
+  agentId: Type.Optional(Type.String()),
+});
+export type CreateMission = Static<typeof CreateMission>;
+
+export const MissionReply = Type.Object({ text: Type.String({ minLength: 1, maxLength: 8000 }) });
+export type MissionReply = Static<typeof MissionReply>;
+
+export const MissionBudget = Type.Object({ budgetUsd: Type.Number({ minimum: 0.1, maximum: 50 }) });
+export type MissionBudget = Static<typeof MissionBudget>;
+
+export interface MissionView {
+  readonly id: string;
+  readonly projectId: string;
+  readonly projectName: string;
+  readonly githubRepo: string;
+  readonly title: string;
+  readonly intent: string;
+  readonly stage: MissionStage;
+  readonly fast: boolean;
+  readonly leadAgentId: string;
+  readonly rootRunId: string;
+  readonly treeId: string;
+  readonly branch: string;
+  readonly docsPath: string;
+  /** Links to the mission's documents on GitHub, for the ones that exist on its branch. */
+  readonly docs: { readonly name: string; readonly url: string }[];
+  readonly budgetUsd: number;
+  readonly costUsd: number;
+  /** What the lead is doing right now: running, waiting (for sub-agents or for you), or idle. */
+  readonly leadStatus: RunStatus;
+  readonly waitingForYou: boolean;
+  readonly stageSummary: string | null;
+  readonly prUrl: string | null;
+  readonly prState: "open" | "merged" | "closed" | null;
+  readonly retro: string | null;
+  readonly discordThreadId: string | null;
+  readonly error: string | null;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  readonly endedAt: number | null;
+}
+
+export interface MissionMessageView {
+  readonly id: number;
+  readonly missionId: string;
+  readonly author: "user" | "lead" | "system";
+  readonly kind: "text" | "question" | "stage" | "approval" | "error";
+  readonly text: string;
+  readonly source: "dashboard" | "discord" | "agentswarm";
+  readonly createdAt: number;
+}
+
+// ---- Discord (R3) ------------------------------------------------------------------------
+export const SetDiscord = Type.Object({
+  /** Omit to keep the stored token. */
+  token: Type.Optional(Type.String({ minLength: 50, maxLength: 200 })),
+  channelId: Type.String({ pattern: "^[0-9]{17,20}$" }),
+  ownerId: Type.String({ pattern: "^[0-9]{17,20}$" }),
+});
+export type SetDiscord = Static<typeof SetDiscord>;
+
+export interface DiscordStatus {
+  readonly configured: boolean;
+  readonly connected: boolean;
+  readonly botTag: string | null;
+  readonly channelId: string | null;
+  readonly channelName: string | null;
+  readonly ownerId: string | null;
+  readonly error: string | null;
+}
+
 /** What the WebSocket sends: every run event and every run row change. */
 export type LiveMessage =
   | { readonly kind: "event"; readonly event: RunEventView }
   | { readonly kind: "run"; readonly run: RunView }
-  | { readonly kind: "workstation"; readonly workstation: WorkstationView };
+  | { readonly kind: "workstation"; readonly workstation: WorkstationView }
+  | { readonly kind: "mission"; readonly mission: MissionView }
+  | { readonly kind: "mission_message"; readonly message: MissionMessageView };
 
 // ---- system check ------------------------------------------------------------------------
 export interface CheckItem {

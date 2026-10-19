@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { EndpointKind, EndpointView, GitHubStatus } from "@agentswarm/contracts";
+import type { DiscordStatus, EndpointKind, EndpointView, GitHubStatus } from "@agentswarm/contracts";
 import { api, when } from "../api.ts";
 import { useResource } from "../live.ts";
 import { Badge, Field, Form, PageHead } from "../components/ui.tsx";
@@ -61,6 +61,49 @@ export function SettingsPage() {
           </Form>
         </section>
       </div>
+      <Discord />
     </div>
+  );
+}
+
+function Discord() {
+  const status = useResource<DiscordStatus>("/discord");
+  const [token, setToken] = useState("");
+  const [channelId, setChannelId] = useState("");
+  const [ownerId, setOwnerId] = useState("");
+  const [tested, setTested] = useState<string | null>(null);
+  const s = status.data;
+  return (
+    <section className="card stack" aria-labelledby="dc">
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <h2 id="dc">Discord</h2>
+        {s?.configured && <Badge status={s.connected ? "ok" : "bad"}>{s.connected ? `${s.botTag} in #${s.channelName}` : "not connected"}</Badge>}
+      </div>
+      <p className="muted">Each mission gets a thread in one channel. Only your Discord account is obeyed; everyone else is ignored.</p>
+      {s?.error && <p className="error" role="alert">{s.error}</p>}
+      <Form submit={s?.configured ? "Save and reconnect" : "Connect"} onSubmit={async () => {
+        await api<DiscordStatus>("PUT", "/discord", { ...(token ? { token } : {}), channelId: channelId || s?.channelId, ownerId: ownerId || s?.ownerId });
+        setToken("");
+        status.reload();
+      }}>
+        <div className="grid">
+          <Field label="Bot token" hint={s?.configured ? "Leave empty to keep the stored token." : "From the Discord developer portal (Bot → Reset Token)."}>
+            <input type="password" autoComplete="off" value={token} onChange={(e) => setToken(e.target.value)} required={!s?.configured} />
+          </Field>
+          <Field label="Channel ID" hint="Right-click the channel → Copy Channel ID (developer mode).">
+            <input inputMode="numeric" pattern="[0-9]{17,20}" value={channelId} onChange={(e) => setChannelId(e.target.value)} placeholder={s?.channelId ?? ""} required={!s?.channelId} />
+          </Field>
+          <Field label="Your user ID" hint="Right-click your name → Copy User ID.">
+            <input inputMode="numeric" pattern="[0-9]{17,20}" value={ownerId} onChange={(e) => setOwnerId(e.target.value)} placeholder={s?.ownerId ?? ""} required={!s?.ownerId} />
+          </Field>
+        </div>
+      </Form>
+      {s?.connected && (
+        <div className="row">
+          <button className="btn ghost" onClick={() => api("POST", "/discord/test", {}).then(() => setTested("Sent a test message to the channel.")).catch((e: Error) => setTested(e.message))}>Send a test message</button>
+          {tested && <span className="faint">{tested}</span>}
+        </div>
+      )}
+    </section>
   );
 }

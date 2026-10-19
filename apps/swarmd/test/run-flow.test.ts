@@ -102,6 +102,16 @@ describe("a run", () => {
     assert.match(done.error ?? "", /turn limit/);
   });
 
+  test("a run that finishes on its last allowed turn succeeds", async () => {
+    h = await harness({ limits: { maxTurns: 2, maxDurationMs: 60_000, maxCostUsd: 1 } });
+    const { cookie, agentId } = await h.ready();
+    h.script([call("git_status", {}), report("just in time")]);
+    const run = (await h.api("POST", `/api/agents/${agentId}/runs`, { title: "Tight", brief: "x" }, cookie)).body;
+    const done = await h.services.runs.settled(run.id);
+    assert.equal(done.status, "succeeded", done.error ?? "");
+    assert.equal(done.report?.summary, "just in time");
+  });
+
   test("a failed model request is retried", async () => {
     h = await harness();
     const { cookie, agentId } = await h.ready();
