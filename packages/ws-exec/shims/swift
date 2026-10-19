@@ -1,0 +1,6 @@
+#!/bin/sh
+# Installed by agentswarm scripts/setup.sh (R6): SwiftPM's own sandbox cannot start inside agentSwarm's seatbelt.
+case "${1:-}" in
+  build|test|run|package) sub="$1"; shift; exec /usr/bin/swift "$sub" --disable-sandbox "$@" ;;
+esac
+exec /usr/bin/swift "$@"

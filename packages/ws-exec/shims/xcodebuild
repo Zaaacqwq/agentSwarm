@@ -1,0 +1,18 @@
+#!/bin/sh
+# Installed by agentswarm scripts/setup.sh, first on agents' PATH (R6). Swift's compiler, SwiftPM's manifests
+# and package plugins each start a sandbox of their own, and no sandbox can start inside agentSwarm's
+# seatbelt: turn those inner ones off. The two outer walls (the workstation user and seatbelt) still hold.
+for arg in "$@"; do
+  case "$arg" in
+    -version|-showsdks|-list|-showdestinations|-help|-usage|-license|-checkFirstLaunchStatus) exec /usr/bin/xcodebuild "$@" ;;
+  esac
+done
+# Xcode puts DerivedData under the real home (/Users/ws-N), which the sandbox denies: use the run's own HOME.
+for arg in "$@"; do
+  [ "$arg" = "-derivedDataPath" ] && exec /usr/bin/xcodebuild -skipMacroValidation -skipPackagePluginValidation \
+    -IDEPackageSupportDisableManifestSandbox=YES -IDEPackageSupportDisablePluginExecutionSandbox=YES \
+    'OTHER_SWIFT_FLAGS=$(inherited) -disable-sandbox' "$@"
+done
+exec /usr/bin/xcodebuild -derivedDataPath "$HOME/Library/Developer/Xcode/DerivedData" -skipMacroValidation -skipPackagePluginValidation \
+  -IDEPackageSupportDisableManifestSandbox=YES -IDEPackageSupportDisablePluginExecutionSandbox=YES \
+  'OTHER_SWIFT_FLAGS=$(inherited) -disable-sandbox' "$@"

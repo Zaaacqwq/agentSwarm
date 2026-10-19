@@ -1,0 +1,56 @@
+/* Editorial control room: warm paper, ink, one signal colour for things that need you. */
+:root {
+  --paper: #f6f3ec;
+  --paper-raised: #fffdf8;
+  --paper-sunk: #ece7dc;
+  --ink: #1d1b16;
+  --ink-soft: #5c574c;
+  --ink-faint: #8d877a;
+  --rule: #d9d2c3;
+  --signal: #e8590c;
+  --signal-ink: #ffffff;
+  --ok: #2f7d4f;
+  --warn: #b7791f;
+  --bad: #c0392b;
+  --run: #2b6cb0;
+
+  --font-display: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  --font-text: -apple-system, "SF Pro Text", "Helvetica Neue", sans-serif;
+  --font-mono: "SF Mono", ui-monospace, Menlo, monospace;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-base: 0.9375rem;
+  --text-lg: 1.125rem;
+  --text-xl: clamp(1.5rem, 1.2rem + 1vw, 2rem);
+  --text-hero: clamp(2rem, 1.4rem + 2.4vw, 3rem);
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+
+  --radius-sm: 4px;
+  --radius: 8px;
+  --shadow: 0 1px 0 rgb(29 27 22 / 0.04), 0 8px 24px -12px rgb(29 27 22 / 0.18);
+  --duration-fast: 120ms;
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+:root:not([data-theme="light"]) {
+  @media (prefers-color-scheme: dark) {
+    --paper: #15140f;
+    --paper-raised: #1d1b15;
+    --paper-sunk: #0f0e0a;
+    --ink: #ece6d8;
+    --ink-soft: #b0a996;
+    --ink-faint: #7d7766;
+    --rule: #34302a;
+    --signal: #ff7a33;
+    --signal-ink: #1a0d04;
+    --shadow: 0 1px 0 rgb(0 0 0 / 0.3), 0 8px 24px -12px rgb(0 0 0 / 0.6);
+  }
+}

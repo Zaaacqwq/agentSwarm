@@ -1,7 +1,7 @@
-# Hive：一句话驱动的多 Agent 开发团队（重写方案，草案）
+# agentSwarm：一句话驱动的多 Agent 开发团队（重写方案，草案）
 
-> 本文档取代旧版 `HIVE_PLAN.md`，是重写的依据。
-> 旧实现 P1–P5 已停止：PR #1–#5 已关闭（未合并），`hive/*` 分支、运行数据和 Hive Desktop 已删除，工作站用户和 HiveWS 卷由卸载脚本删除。旧代码只能在已关闭的 PR 页面里查看，本文只吸收其中的经验。
+> 本文档取代旧版 `PLAN.md`，是重写的依据。
+> 旧实现 P1–P5 已停止：PR #1–#5 已关闭（未合并），`swarm/*` 分支、运行数据和 agentSwarm Desktop 已删除，工作站用户和 SwarmWS 卷由卸载脚本删除。旧代码只能在已关闭的 PR 页面里查看，本文只吸收其中的经验。
 > 标 **【需验证】** 的内容写作时无法确认，在 R0 实测或查官方文档后再定。
 > 已定决策见第 0.2 节和第 15 节。
 
@@ -26,7 +26,7 @@
 | Claude 和 Codex 的接入方式 | 两种都要：API，以及订阅版 CLI（Claude Code / Codex 在沙箱里当 worker） |
 | 合并权限 | 子分支合回父分支由父 Agent 审阅后合并；**只有合进 `main` 必须由你来合** |
 | 模型 | 现在全部走 OpenRouter，默认 `qwen/qwen3.8-omni-flash`（支持图片输入）；Mac Studio 到位后换本地模型 |
-| 旧实现 | PR #1–#5 关闭不合并；分支、数据、本地程序删除；工作站用户和 HiveWS 卷由卸载脚本删除 |
+| 旧实现 | PR #1–#5 关闭不合并；分支、数据、本地程序删除；工作站用户和 SwarmWS 卷由卸载脚本删除 |
 | 仓库 | 继续用 `Zaaacqwq/agentSwarm`，从 `main` 重新开始 |
 
 ---
@@ -48,7 +48,7 @@
  你 ──Discord──┐            ┌── 面板（网页，本机 / Tailscale）
                ▼            ▼
         ┌──────────────────────────────┐
-        │ hived（常驻守护进程，不以 root 运行） │
+        │ swarmd（常驻守护进程，不以 root 运行） │
         │  · 项目与流水线状态机（关口）         │
         │  · Agent 树：派生、排队、预算、并发槽  │
         │  · 模型路由：OpenRouter / API / 本地  │
@@ -63,8 +63,8 @@
        └──────────────┘     └──────────────┘
 ```
 
-- 只有一个守护进程 `hived`。它持有数据库、密钥和 GitHub 凭据；沙箱里拿不到这些。
-- 沙箱里的一切操作都通过一个以 `ws-N` 身份运行的小执行程序完成，由它把命令放进 seatbelt 沙箱。这个设计沿用 P2 的 hive-exec 思路，代码重写。
+- 只有一个守护进程 `swarmd`。它持有数据库、密钥和 GitHub 凭据；沙箱里拿不到这些。
+- 沙箱里的一切操作都通过一个以 `ws-N` 身份运行的小执行程序完成，由它把命令放进 seatbelt 沙箱。这个设计沿用 P2 的 agentswarm-exec 思路，代码重写。
 
 ---
 
@@ -104,12 +104,12 @@
 | 阶段 | 谁来做 | 产出 |
 |---|---|---|
 | 收集 | lead | 原话存档；必要时问你 2–3 个澄清问题 |
-| 调研 | lead 派 researcher 子 Agent 并行做：市场与竞品、技术可行性、可复用的开源项目 | `docs/hive/research.md`：结论加来源链接 |
-| 讨论 | lead 和你在 Discord 上来回 | 方向和取舍记入 `docs/hive/decisions.md` |
-| 方案 | architect 子 Agent | `docs/hive/plan.md`：范围、架构、工作包（含验收标准和依赖）、风险、预算 |
+| 调研 | lead 派 researcher 子 Agent 并行做：市场与竞品、技术可行性、可复用的开源项目 | `docs/agentswarm/research.md`：结论加来源链接 |
+| 讨论 | lead 和你在 Discord 上来回 | 方向和取舍记入 `docs/agentswarm/decisions.md` |
+| 方案 | architect 子 Agent | `docs/agentswarm/plan.md`：范围、架构、工作包（含验收标准和依赖）、风险、预算 |
 | 开发 | lead 按工作包派 dev 子 Agent，dev 可以再派 | 每个工作包一个分支，代码加测试，评审通过后合回父分支 |
 | 评审 | 每次合并前由 reviewer 子 Agent 读 diff 给出结论 | 评审意见；打回则由 dev 修改 |
-| 验证 | QA 子 Agent | 跑全部测试；网页和 App 实际操作并截图；`docs/hive/acceptance.md` |
+| 验证 | QA 子 Agent | 跑全部测试；网页和 App 实际操作并截图；`docs/agentswarm/acceptance.md` |
 | 营销 | marketer 子 Agent，关口 A 之后开始 | 定位、落地页文案、App Store 文案；截图取自验证阶段 |
 | 发布 | lead | 集成分支到 `main` 的 PR，附摘要、验收报告和截图 |
 | 复盘 | lead | 把这次学到的东西写进团队经验库 |
@@ -152,18 +152,18 @@
 
 ```
 main                          ← 只放可发布的代码；只有你能合并
-└─ hive/<项目>                 ← lead 的集成分支
-   ├─ hive/<项目>/<工作包>      ← dev 子 Agent，合回集成分支
-   │  └─ hive/<项目>/<工作包>/<子项>   ← 孙 Agent，合回上一级分支
-   └─ hive/<项目>/marketing    ← 营销文件（落地页文案等）
+└─ swarm/<项目>                 ← lead 的集成分支
+   ├─ swarm/<项目>/<工作包>      ← dev 子 Agent，合回集成分支
+   │  └─ swarm/<项目>/<工作包>/<子项>   ← 孙 Agent，合回上一级分支
+   └─ swarm/<项目>/marketing    ← 营销文件（落地页文案等）
 ```
 
 - 每个子 Agent 从**父分支**的最新提交切出自己的分支，在自己沙箱里的 worktree 中工作，互不干扰。
-- 合回父分支的过程：子 Agent 完成 → reviewer 子 Agent 评审 diff → 父 Agent 确认 → Relay 在 hived 端执行合并。冲突交给父 Agent 解决，或者再派一个子 Agent 去解决。
+- 合回父分支的过程：子 Agent 完成 → reviewer 子 Agent 评审 diff → 父 Agent 确认 → Relay 在 swarmd 端执行合并。冲突交给父 Agent 解决，或者再派一个子 Agent 去解决。
 - GitHub 上只开一个 PR：集成分支 → `main`。子分支也会推送到 GitHub，方便你看，但不开 PR，避免刷屏。
 - **两道保险保证 `main` 只能由你合并**：
   - Relay 拒绝任何写 `main` 的推送；
-  - GitHub 对 `main` 开启分支保护（必须经过 PR 和你的批准），Hive 使用的令牌没有绕过保护的权限。
+  - GitHub 对 `main` 开启分支保护（必须经过 PR 和你的批准），agentSwarm 使用的令牌没有绕过保护的权限。
 
 ---
 
@@ -173,11 +173,11 @@ main                          ← 只放可发布的代码；只有你能合并
 
 | 运行时 | 用在哪 | 说明 |
 |---|---|---|
-| 原生循环 | lead、researcher、architect、reviewer、QA、marketer，以及默认的 dev | 在 hived 里跑，用 Pi 的统一模型接口（`earendil-works/pi`）。每个工具调用都经过 Hive 的授权和记录 |
+| 原生循环 | lead、researcher、architect、reviewer、QA、marketer，以及默认的 dev | 在 swarmd 里跑，用 Pi 的统一模型接口（`earendil-works/pi`）。每个工具调用都经过 agentSwarm 的授权和记录 |
 | Claude Code CLI | 难的开发工作包 | 在沙箱里以 `ws-N` 身份运行无头模式，用你的订阅额度。【需验证】长期令牌的授权方式、并发上限、服务条款 |
 | Codex CLI | 同上 | 用 `codex exec` 的 JSON 输出模式。【需验证】登录凭据放进 `ws-N` 的方式 |
 
-- CLI worker 的工具调用不经过 Hive 逐个授权，只能靠沙箱兜底。它们的事件流会解析后显示在面板上。
+- CLI worker 的工具调用不经过 agentSwarm 逐个授权，只能靠沙箱兜底。它们的事件流会解析后显示在面板上。
 - 父 Agent 派生时可以指定运行时；不指定就按角色的默认设置。
 
 ### 7.2 模型路由
@@ -185,13 +185,13 @@ main                          ← 只放可发布的代码；只有你能合并
 - 每个角色可以单独换模型，例如 lead 和 architect 换更强的模型。
 - 支持 OpenAI 兼容的端点（以后接本地的 Ollama / LM Studio），加 Anthropic、OpenAI 的 API。
 - 按模型实时记录费用；预算按项目和 Agent 两级控制。
-- Mac Studio 到位后：用同一套评测任务对比本地模型和 OpenRouter，再决定把哪些角色挪到本地（R7）。
+- Mac Studio 到位后：用同一套评测任务对比本地模型和 OpenRouter，再决定把哪些角色挪到本地（R10）。
 
 ---
 
 ## 8. 沙箱与资源
 
-- **用户池**：建 `ws-1` 到 `ws-8` 共 8 个 macOS 用户，用一次性的 sudo 安装脚本创建（由你运行）。旧的 `ws-1`、`ws-2` 和 HiveWS 卷随旧实现一起删除，R1 重新创建。每个运行中的 worker 独占一个用户；用户池用完时，新 worker 排队等待。
+- **用户池**：建 `ws-1` 到 `ws-8` 共 8 个 macOS 用户，用一次性的 sudo 安装脚本创建（由你运行）。旧的 `ws-1`、`ws-2` 和 SwarmWS 卷随旧实现一起删除，R1 重新创建。每个运行中的 worker 独占一个用户；用户池用完时，新 worker 排队等待。
 - 每个用户有自己的家目录、worktree 区和浏览器状态目录。seatbelt 配置只放行它自己的目录。这个设计在 P2、P5 验证过。
 - 并发槽（按 16 GB 内存设置，可调）：
   - 普通 worker 6 个：模型在云端，Agent 循环本身很轻；
@@ -233,7 +233,7 @@ main                          ← 只放可发布的代码；只有你能合并
 ## 11. 记忆
 
 - **原话存档**：见第 3 节。
-- **项目文档**：调研、决策、方案、验收都放进项目仓库的 `docs/hive/`。
+- **项目文档**：调研、决策、方案、验收都放进项目仓库的 `docs/agentswarm/`。
 - **团队经验库**：复盘时写入。只有置顶的少数几条常驻在每个 Agent 的提示词里，其余用 `recall` 按需检索（借鉴 ClaudeTeam）。
 - **角色手册**：每个角色一份 Markdown 写的工作方法，可以随项目积累迭代。
 
@@ -252,9 +252,9 @@ main                          ← 只放可发布的代码；只有你能合并
 
 ## 13. 安全底线
 
-- hived 不以 root 运行；需要 sudo 的步骤只出现在由你运行的安装脚本里。
+- swarmd 不以 root 运行；需要 sudo 的步骤只出现在由你运行的安装脚本里。
 - 只有你能合并进 `main`；Agent 永远不能强推。
-- 密钥只在 hived 里，加密保存；沙箱和日志里都不出现。
+- 密钥只在 swarmd 里，加密保存；沙箱和日志里都不出现。
 - Discord 只接受白名单账号的指令。
 - 网页、文件、截图里的文字一律当作数据，不当作指令。
 - 桌面控制需要你批准会话；系统设置、钥匙串、终端、密码管理器在禁区里。
@@ -266,13 +266,16 @@ main                          ← 只放可发布的代码；只有你能合并
 | 阶段 | 内容 | 验收 |
 |---|---|---|
 | **R0 实测**（S） | 在这台 Mac 上做最小验证：<br>· 模拟器在 `ws-N` 下能否启动、截图、点击；<br>· Claude Code / Codex 在沙箱里用订阅额度的无头运行；<br>· Discord 机器人收发消息和按钮；<br>· qwen3.8-omni-flash 看模拟器截图做判断的准确度；<br>· Node 24 + Pi 的基本循环 | 每项给出"可行 / 不可行 + 替代方案"，写成 `docs/R0_FINDINGS.md` |
-| **R1 骨架**（M） | 守护进程、数据库、登录、面板外壳、OpenRouter 端点、原生循环、用户池安装脚本、执行程序和沙箱、Relay | 一个 Agent 在 `ws-1` 的沙箱里改代码、跑测试、推到 `hive/*` 分支；它读不到其他沙箱和你的家目录 |
+| **R1 骨架**（M） | 守护进程、数据库、登录、面板外壳、OpenRouter 端点、原生循环、用户池安装脚本、执行程序和沙箱、Relay | 一个 Agent 在 `ws-1` 的沙箱里改代码、跑测试、推到 `swarm/*` 分支；它读不到其他沙箱和你的家目录 |
 | **R2 子 Agent 与分支树**（M） | 派生、排队、并发槽、预算、层数上限、结果约定、评审后合回父分支、取消整棵子树 | lead 把一个功能拆成 3 个工作包；其中一个 dev 再派一个孙 Agent；全部评审通过后合回集成分支，开出到 `main` 的 PR |
 | **R3 流水线与 Discord**（M） | 阶段状态机、两道关口、调研和方案文档、Discord 频道、线程和按钮、面板的 Agent 树和流水线视图 | 你在 Discord 发一句想法（例如一个小网页工具），经过调研、讨论、你批准方案、并行开发、验证，最后出现一个到 `main` 的 PR，附调研、方案和验收文档 |
 | **R4 CLI worker**（S–M） | Claude Code、Codex 作为运行时；事件流显示到面板；费用和额度记录 | 同一个工作包分别交给原生循环、Claude Code、Codex 完成，结果都能评审合并 |
-| **R5 眼睛和手**（M–L） | 浏览器、识图和局部放大、模拟器（构建、运行、点击、截图）、桌面会话改进 | 一个小 SwiftUI App 从想法走到 PR：QA 在模拟器里点完主要流程，验收报告带截图；一个网页项目同样用浏览器完成验证 |
-| **R6 营销与记忆**（S） | 营销阶段、团队经验库、角色手册、复盘 | 一个项目结束后同时产出落地页文案；下一个项目能用上上次的经验 |
-| **R7 本地模型**（S，等 Mac Studio） | 接本地端点、跑评测对比、调整各角色的模型 | 评测报告：每个角色用本地模型和云端模型的成功率、速度、费用 |
+| **R5 Linear 与多项目**（M–L，2026-10-17 插入） | Linear Agent 应用作为发任务和对话的入口；ticket 按类型走固定流程；同时处理多张 ticket；项目档案与本地配置文件；沙盒实验与立项；记录回溯；webhook 经 Tailscale Funnel 进来 | 同时交出 3 张 ticket（两个真实项目加一个沙盒），用手机回答和批准，三件事并行完成，ticket 里留下完整记录。见 `docs/R5_IMPLEMENTATION_PLAN.md` |
+| **R6 眼睛和手**（M–L） | 沙箱里编译 Swift（宏）、模拟器（构建、运行、点击、截图）、无头浏览器、识图和局部放大、QA 截图留痕、重任务槽 | Fridgy 的一张 UI ticket：QA 在模拟器里点完验收标准，验收报告带截图；betterUWWorks 的一张网页 ticket 同样用浏览器验证。见 `docs/R6_IMPLEMENTATION_PLAN.md` |
+| **R7 内置看板**（M，2026-10-18 插入，替换 Linear） | 面板里的 ticket 看板：backlog、看板和列表视图、优先级、标签、评论和批准、手机上好用的界面、Discord 提醒；Agent 按 ticket 排队和汇报；做完后删掉 Linear 集成，关掉 Tailscale Funnel 的公网入口。参考 agent-swarm-ng 的 tickets | 用手机在面板上建 3 张 ticket，回答、批准、看进度和截图，全程不用 Linear；Linear 代码和 Funnel 入口已移除 |
+| **R8 营销与记忆**（S） | 营销阶段、团队经验库、角色手册、复盘 | 一个项目结束后同时产出落地页文案；下一个项目能用上上次的经验 |
+| **R9 桌面会话**（M，2026-10-17 从 R6 移出） | 操作 Mac 原生 App：你批准会话、有时间限制、禁区、随时停止；切换到非禁区应用；"先看后动"的额度 | 一个 Mac App 的改动由 QA 在桌面会话里点完主要流程，验收报告带截图 |
+| **R10 本地模型**（S，等 Mac Studio） | 接本地端点、跑评测对比、调整各角色的模型 | 评测报告：每个角色用本地模型和云端模型的成功率、速度、费用 |
 
 每个阶段沿用现在的流程：先写方案文档并由你确认 → 在新分支上实现 → 测试、E2E、真实模型验收、代码审查 → 写验收文档 → 推送并开 PR。
 
@@ -283,7 +286,7 @@ main                          ← 只放可发布的代码；只有你能合并
 1. **参考旧代码**：重写，但允许从已关闭的 PR #1–#5 里审阅后移植验证过的小模块，例如 seatbelt 配置、网址拦截、系统用户查询、Swift 桌面助手。
 2. **守护进程运行时**：Node 24 LTS。
 3. **用户池**：8 个（`ws-1`…`ws-8`），由你运行一次安装脚本创建。
-4. **`main` 分支保护**：开启；Hive 使用权限受限的令牌（细粒度 PAT 或 GitHub App）。
+4. **`main` 分支保护**：开启；agentSwarm 使用权限受限的令牌（细粒度 PAT 或 GitHub App）。
 5. **第一个真实项目**：由我准备一个小网页工具，用于 R3 验收。
 
 ---
@@ -298,3 +301,17 @@ main                          ← 只放可发布的代码；只有你能合并
 | 便宜模型做方案和评审的质量不够 | 返工多 | 每个角色可以单独换模型；R3 验收后看数据再调整 |
 | 16 GB 内存同时跑构建、模拟器和浏览器 | 卡顿、被系统杀掉 | 重任务槽限制为 2 个，加内存压力监控，超标时暂停新任务 |
 | Discord 被别人发指令 | 安全 | 账号白名单；其他人的消息当作不可信数据 |
+
+---
+
+## 17. 暂缓事项（2026-10-17 记录，主线完成后再做）
+
+| 事项 | 内容 | 来源 |
+|---|---|---|
+| PR 先装到手机上测 | 在 App Store Connect 里给 Fridgy 加一条 Xcode Cloud 工作流 "PR TestFlight"：<br>· 触发：Pull Request Changes，源分支任意，目标 `main`，打开 Auto-cancel，可只在 App 代码变化时触发；<br>· 动作：Archive（iOS，scheme Fridgy），部署准备选 TestFlight (Internal Testing Only)，可加 Test；<br>· 后续动作：TestFlight Internal Testing，选只有你自己的内测组；<br>· 不设 `FRIDGY_RELEASE_CHANNEL`，`ci_post_clone.sh` 默认用 TestFlight 配置。<br>可选：在 `ci_post_clone.sh` 里用 `CI_PULL_REQUEST_NUMBER` 写 `TestFlight/WhatToTest.en-US.txt`，标明这个包对应哪个 PR。<br>注意每月 25 小时的编译额度 | R5 验收：PR 合并前没法在模拟器和手机上试 |
+| ~~PR 消息附上拉到本机的命令~~（R7 已做：ticket 页在 PR 就绪时显示 `gh pr checkout`） | Linear 和 Discord 里"PR 已开好"的消息附上 `cd <仓库> && gh pr checkout <编号>`；项目接了 Xcode Cloud 时，提示 TestFlight 包大约多久后出现 | 同上 |
+| 模型拒答时换模型 | 提供方的内容审核拒绝（例如 Alibaba `data_inspection_failed`）时，自动换备用模型重试，不让 lead 直接失败 | R5 验收：ZAA-6 的 lead 因此失败 |
+| researcher 上限 | 给 researcher 加搜索次数、抓取次数和费用的上限，到 30 分钟时限前就收尾交结果 | R5 验收：ZAA-6 的 researcher 跑满 30 分钟，花了 $0.73 |
+| ZAA-6（每日自动 fetch） | 暂时搁置。它的会话仍算一个进行中的名额，需要时在面板或 Linear 里停掉 | 你的决定 |
+
+不暂缓、归入 R6 的：沙箱里的 `xcodebuild` 加载不了 Swift 宏插件（SwiftUIMacros），Agent 目前编译不了 SwiftUI 项目。这是 R6 模拟器验收的前提，在 R6 里先解决。
