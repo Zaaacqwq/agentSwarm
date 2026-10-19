@@ -134,6 +134,7 @@ function ProjectSetup({ p, onChange }: { p: ProjectView; onChange: () => void })
             }} placeholder="https://staging.example.com" style={{ minHeight: 40 }} />
           </Field>
         </div>
+        <label className="row"><input type="checkbox" checked={profile.product ?? false} onChange={(e) => setProfile((x) => ({ ...x, product: e.target.checked || undefined }))} /> This is a product: feature tickets also update the changelog and the store or landing copy</label>
         <label className="row"><input type="checkbox" checked={profile.autoApproveBugs ?? false} onChange={(e) => setProfile((x) => ({ ...x, autoApproveBugs: e.target.checked }))} /> Bug fixes go ahead without asking me to approve the plan (I still merge the pull request)</label>
       </Form>
       <div className="stack">

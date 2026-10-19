@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { and, asc, desc, eq, gt, inArray } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, inArray, sql } from "drizzle-orm";
 import type { CreateMission, MissionMessageView, MissionView } from "@agentswarm/contracts";
 import type { Db } from "../db/client.ts";
 import { schema } from "../db/client.ts";
@@ -19,6 +19,12 @@ import { pageWindow, type WebAccess } from "../web/web-access.ts";
 import { FetchError } from "../web/web-fetch.ts";
 import { MISSION_FINISH, changesBrief, intakeBrief, missionPromptSection, stageBrief, type BriefContext } from "./briefs.ts";
 import { fileTicketTool, missionTools, webTools, type WebToolOps } from "./mission-tools.ts";
+import type { LessonService } from "../memory/lessons.ts";
+import type { HandbookService } from "../memory/handbooks.ts";
+import { proposeHandbookTool, recordLessonTool } from "../memory/tools.ts";
+import type { Role } from "../db/schema.ts";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
+import { secretValues } from "../relay/relay.ts";
 import { ENDED, GATES, STAGE_LABEL, WORKING, afterStageDone, canMove, requiredDocs, stageTools, DOC_NAMES, type Actor, type Flow } from "./stages.ts";
 
 export type MissionRow = typeof schema.missions.$inferSelect;
@@ -34,7 +40,7 @@ export interface CreateOptions {
 
 const flowOf = (m: Pick<MissionRow, "kind" | "fast">): Flow => ({ kind: m.kind, fast: m.fast });
 /** Which kinds each kind of project can run: local projects never reach GitHub, so no pull requests. */
-const KINDS_FOR: Record<"github" | "local", readonly MissionKind[]> = { github: ["feature", "bug", "research"], local: ["research", "experiment"] };
+const KINDS_FOR: Record<"github" | "local", readonly MissionKind[]> = { github: ["feature", "bug", "research", "marketing"], local: ["research", "experiment"] };
 
 export const DEFAULT_MISSION_BUDGET_USD = 3;
 
@@ -57,8 +63,15 @@ export interface MissionDeps {
   readonly web: WebAccess;
   readonly cleanup: TreeCleanup;
   readonly log: (msg: string, extra?: Record<string, unknown>) => void;
+  /** R8: lessons at the start, and what a retrospective records. */
+  readonly memory?: { readonly lessons: LessonService; readonly handbooks: HandbookService };
 }
 
+/** At most this many lessons and handbook proposals one mission adds (R8). */
+const MAX_LESSONS = 3;
+const MAX_PROPOSALS = 2;
+
+const money = (usd: number) => `$${usd.toFixed(usd < 0.01 ? 4 : 2)}`;
 const slug = (text: string, max: number) => text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, max).replace(/-+$/, "");
 
 /** Data from the web or other agents, fenced so it reads as information. */
@@ -73,6 +86,8 @@ function fenced(text: string): string {
 export class MissionService implements RunHooks {
   private readonly deps: MissionDeps;
 
+  /** record_lesson calls per mission (a rewrite adds no row, but must not go on forever). */
+  private readonly lessonCalls = new Map<string, number>();
   private openingSource: ((m: MissionRow) => Promise<RunOpening | null>) | null = null;
   private ticketFiler: ((m: MissionRow, agent: string, input: { title: string; description: string; kind: "feature" | "bug" | "research" }) => string) | null = null;
 
@@ -144,7 +159,9 @@ export class MissionService implements RunHooks {
     const docsPath = `docs/agentswarm/${slug(title, 32) || "mission"}-${randomBytes(3).toString("hex")}`;
     // Bugs take the short path: reproduce and plan, then the gate.
     const fast = kind === "bug" ? true : input.fast ?? false;
-    const brief = intakeBrief({ intent: idea, docs: docsPath, fast, defaultBranch: project.defaultBranch, kind });
+    // What earlier work learned that fits this request (R8).
+    const advice = this.deps.runs.lessonsFor({ projectId: project.id }, "lead", `${title}\n${idea}`, 3, true);
+    const brief = [intakeBrief({ intent: idea, docs: docsPath, fast, defaultBranch: project.defaultBranch, kind }), ...(advice ? ["", advice] : [])].join("\n");
     // The run cannot reach a hook before the mission row exists: it starts executing only after an await.
     const run = this.deps.runs.create(actor, lead.id, { title, brief, budgetUsd: input.budgetUsd ?? DEFAULT_MISSION_BUDGET_USD }, now, id);
     this.deps.db.insert(schema.missions).values({
@@ -271,7 +288,7 @@ export class MissionService implements RunHooks {
         this.post(m.id, "system", "text", `The pull request is ready: ${root.prUrl}\nMerge it on GitHub when you are happy with it (or close it to drop the mission). agentSwarm checks every few minutes.`, "agentswarm");
         break;
       case "retro":
-        this.deliver(m, stageBrief("retro", brief, `The person merged the pull request ${ctx.prUrl ?? root.prUrl ?? ""}.`));
+        this.deliver(m, stageBrief("retro", brief, `The person merged the pull request ${ctx.prUrl ?? root.prUrl ?? ""}.\n\n${this.retroFacts(m)}\n`));
         break;
       case "done":
         void this.deps.cleanup.cleanWhenSettled(m.treeId).catch((e: Error) => this.deps.log("cleanup failed", { missionId: m.id, error: e.message }));
@@ -297,7 +314,9 @@ export class MissionService implements RunHooks {
 
   private briefContext(m: MissionRow): BriefContext {
     const project = this.deps.projects.get(m.projectId);
-    return { intent: m.intent, docs: m.docsPath, fast: m.fast, defaultBranch: project.defaultBranch, kind: m.kind };
+    const profile = project.profile ?? {};
+    const ios = Boolean(profile.ios?.scheme) || /\bios\b|swiftui/i.test(profile.platform ?? "");
+    return { intent: m.intent, docs: m.docsPath, fast: m.fast, defaultBranch: project.defaultBranch, kind: m.kind, product: Boolean(profile.product), ios };
   }
 
   // ---- run hooks ------------------------------------------------------------------------
@@ -340,9 +359,63 @@ export class MissionService implements RunHooks {
       requestApproval: (summary: string) => this.finishStage(m.id, summary, true),
     };
     const filer = this.ticketFiler;
+    // Lessons at the retrospective, and at the last step of the flows that have none (R8).
+    const last = m.stage === "retro" || (m.kind === "research" && m.stage === "discussion") || (m.kind === "experiment" && m.stage === "building");
+    const memory = last && this.deps.memory ? this.memoryTools(m, this.deps.agents.get(run.agentId).name, m.stage === "retro") : [];
     const file = m.origin === "ticket" && filer ? [fileTicketTool((input) => filer(m, this.deps.agents.get(run.agentId).name, input))] : [];
-    return { keep, add: [...missionTools(ops, t), ...(t.web ? webTools(this.webOps(run, binding)) : []), ...file] };
+    return { keep, add: [...missionTools(ops, t), ...(t.web ? webTools(this.webOps(run, binding)) : []), ...file, ...memory] };
   }
+
+  private memoryTools(m: MissionRow, agentName: string, retro: boolean): AgentTool<any, undefined>[] {
+    const memory = this.deps.memory!;
+    // A name that would read as the person's ("you") never labels an agent's words.
+    const agent = agentName.trim().toLowerCase() === "you" ? `agent ${agentName}` : agentName;
+    // Unique per mission: a ticket's key, else the mission's own id.
+    const source = ticketKey(m) ?? `${m.title.slice(0, 50)} (${m.id.slice(-6)})`;
+    const tools: AgentTool<any, undefined>[] = [
+      recordLessonTool(async (input) => {
+        const calls = (this.lessonCalls.get(m.id) ?? 0) + 1;
+        this.lessonCalls.set(m.id, calls);
+        if (memory.lessons.countFor(m.id) >= MAX_LESSONS || calls > MAX_LESSONS * 2) return `You have recorded enough lessons for ${source}; put anything else in your retrospective.`;
+        const forbidden = secretValues(await this.deps.projects.files(m.projectId));
+        const role = input.role as Role | undefined;
+        const r = memory.lessons.record({ scope: input.scope, title: input.title, text: input.text, ...(role ? { role } : {}) }, { agent, source, missionId: m.id, projectId: m.projectId, forbidden });
+        return r.outcome === "recorded" ? `Recorded for this project: ${r.lesson.title}`
+          : r.outcome === "suggested" ? `Suggested to the person (lessons for the whole team or a role need their approval): ${r.lesson.title}`
+          : r.outcome === "improved" ? `Improved the existing lesson: ${r.lesson.title}`
+          : `Already known (the person's or approved): ${r.lesson.title}`;
+      }),
+    ];
+    if (retro) tools.push(proposeHandbookTool((input) => {
+      const proposed = memory.handbooks.proposals().filter((p) => p.source === source).length;
+      if (proposed >= MAX_PROPOSALS) return `You have proposed ${MAX_PROPOSALS} changes for ${source} already.`;
+      memory.handbooks.propose(agent, source, input.role as Role, input.change, input.why);
+      return "Proposed. The person will see it on the dashboard and decide.";
+    }));
+    return tools;
+  }
+
+  /** What the retrospective should know for sure, from the record rather than memory (R8). */
+  private retroFacts(m: MissionRow, now = Date.now()): string {
+    const root = this.deps.tree.run(m.rootRunId);
+    const runs = [root, ...this.deps.tree.descendants(root.id)];
+    const rejected = runs.filter((r) => r.kind === "review" && /^Changes requested/.test(r.report?.summary ?? "")).length;
+    const failed = runs.filter((r) => r.status === "failed" && r.id !== root.id);
+    const ids = runs.map((r) => r.id);
+    const modelErrors = this.deps.db.select({ n: count() }).from(schema.runEvents)
+      .where(and(eq(schema.runEvents.type, "error"), inArray(schema.runEvents.runId, ids), sql`json_extract(${schema.runEvents.data}, '$.message') like 'Model request failed%'`)).get()?.n ?? 0;
+    const hours = (now - m.createdAt) / 3_600_000;
+    // Sub-agents' titles and errors are their words: shown as data.
+    const failures = failed.map((r) => `${r.title}: ${(r.error ?? "no reason").split("\n")[0]!.slice(0, 120)}`).join("\n");
+    return [
+      "Facts:",
+      `- ${hours < 1 ? `${Math.round(hours * 60)} minutes` : `${hours.toFixed(1)} hours`} from the request to now, including the time waiting for the person; ${money(this.deps.tree.subtreeCost(root))} spent by ${runs.length} runs.`,
+      `- Reviews that asked for changes: ${rejected}.`,
+      `- Model requests that failed and were retried: ${modelErrors}.`,
+      failed.length ? `- Sub-agents that failed (${failed.length}):\n${fenced(failures)}` : "- No sub-agent failed.",
+    ].join("\n");
+  }
+
 
   ended(run: RunRow): void {
     const m = this.missionOf(run);

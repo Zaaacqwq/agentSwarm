@@ -100,6 +100,8 @@ export const ProjectProfile = Type.Object({
   })),
   /** Sites besides the local dev server where the browser may click and type (R6): origins, e.g. https://staging.example.com. */
   testSites: Type.Optional(Type.Array(Type.String({ maxLength: 200, pattern: "^https?://[^/\\s]+$" }), { maxItems: 20 })),
+  /** R8: a product: feature tickets also update the changelog and store copy. */
+  product: Type.Optional(Type.Boolean()),
 });
 export type ProjectProfile = Static<typeof ProjectProfile>;
 
@@ -295,10 +297,10 @@ export const CreateMission = Type.Object({
   /** The lead; default: the project's agent named Lead, else its newest agent. */
   agentId: Type.Optional(Type.String()),
   /** R5: which flow (default feature). */
-  kind: Type.Optional(Type.Union([Type.Literal("feature"), Type.Literal("bug"), Type.Literal("research"), Type.Literal("experiment")])),
+  kind: Type.Optional(Type.Union([Type.Literal("feature"), Type.Literal("bug"), Type.Literal("research"), Type.Literal("experiment"), Type.Literal("marketing")])),
 });
 export type CreateMission = Static<typeof CreateMission>;
-export type MissionKind = "feature" | "bug" | "research" | "experiment";
+export type MissionKind = "feature" | "bug" | "research" | "experiment" | "marketing";
 
 export const MissionReply = Type.Object({ text: Type.String({ minLength: 1, maxLength: 8000 }) });
 export type MissionReply = Static<typeof MissionReply>;
@@ -507,7 +509,7 @@ export interface TicketView {
   readonly queuePosition: number | null;
 }
 
-const TicketKindT = Type.Union([Type.Literal("feature"), Type.Literal("bug"), Type.Literal("research"), Type.Literal("experiment")]);
+const TicketKindT = Type.Union([Type.Literal("feature"), Type.Literal("bug"), Type.Literal("research"), Type.Literal("experiment"), Type.Literal("marketing")]);
 const TicketSpaceT = Type.Union([Type.Literal("project"), Type.Literal("sandbox"), Type.Literal("ideas")]);
 const PriorityT = Type.Integer({ minimum: 0, maximum: 4 });
 
@@ -559,3 +561,91 @@ export type PromoteTicket = Static<typeof PromoteTicket>;
 
 export const TicketSettings = Type.Object({ maxActive: Type.Integer({ minimum: 1, maximum: 8 }) });
 export type TicketSettings = Static<typeof TicketSettings>;
+
+// ---- the team's memory (R8) --------------------------------------------------------------------
+export type Role = "lead" | "researcher" | "architect" | "developer" | "reviewer" | "qa" | "marketer";
+export const ROLES: readonly Role[] = ["lead", "researcher", "architect", "developer", "reviewer", "qa", "marketer"];
+export type LessonScope = "team" | "project" | "role";
+
+export interface LessonView {
+  readonly id: string;
+  readonly scope: LessonScope;
+  readonly projectId: string | null;
+  readonly projectName: string | null;
+  readonly role: Role | null;
+  readonly title: string;
+  readonly text: string;
+  /** "you", or the agent that wrote it (then it is advice, not a requirement). */
+  readonly author: string;
+  readonly source: string | null;
+  readonly pinned: boolean;
+  readonly retired: boolean;
+  /** An agent's lesson for the whole team or a role: shown to no agent until you approve it. */
+  readonly suggested: boolean;
+  readonly uses: number;
+  readonly lastUsedAt: number | null;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+const RoleT = Type.Union([Type.Literal("lead"), Type.Literal("researcher"), Type.Literal("architect"), Type.Literal("developer"), Type.Literal("reviewer"), Type.Literal("qa"), Type.Literal("marketer")]);
+const ScopeT = Type.Union([Type.Literal("team"), Type.Literal("project"), Type.Literal("role")]);
+
+export const CreateLesson = Type.Object({
+  scope: ScopeT,
+  projectId: Type.Optional(Type.String({ maxLength: 64 })),
+  role: Type.Optional(RoleT),
+  title: Type.String({ minLength: 3, maxLength: 160 }),
+  text: Type.String({ minLength: 1, maxLength: 1000 }),
+});
+export type CreateLesson = Static<typeof CreateLesson>;
+
+export const UpdateLesson = Type.Object({
+  title: Type.Optional(Type.String({ minLength: 3, maxLength: 160 })),
+  text: Type.Optional(Type.String({ minLength: 1, maxLength: 1000 })),
+  pinned: Type.Optional(Type.Boolean()),
+  retired: Type.Optional(Type.Boolean()),
+  /** Approve an agent's suggested lesson: from then on agents see it. */
+  approved: Type.Optional(Type.Literal(true)),
+});
+export type UpdateLesson = Static<typeof UpdateLesson>;
+
+export interface LessonVersionView {
+  readonly id: number;
+  readonly title: string;
+  readonly text: string;
+  readonly author: string;
+  readonly createdAt: number;
+}
+
+export interface HandbookView {
+  readonly role: Role;
+  readonly text: string;
+  readonly updatedBy: string;
+  readonly updatedAt: number | null;
+  /** Still the text agentSwarm started with. */
+  readonly isDefault: boolean;
+  readonly versions: readonly { readonly id: number; readonly author: string; readonly createdAt: number }[];
+}
+
+export const SetHandbook = Type.Object({ text: Type.String({ minLength: 1, maxLength: 4000 }) });
+export type SetHandbook = Static<typeof SetHandbook>;
+
+export interface HandbookProposalView {
+  readonly id: string;
+  readonly role: Role;
+  readonly change: string;
+  readonly why: string;
+  readonly author: string;
+  readonly source: string | null;
+  readonly status: "open" | "accepted" | "rejected";
+  readonly createdAt: number;
+  readonly decidedAt: number | null;
+}
+
+/** Accept as proposed (appended to the handbook), or with the handbook's whole new text as you edited it. */
+export const DecideProposal = Type.Object({
+  accept: Type.Boolean(),
+  text: Type.Optional(Type.String({ minLength: 1, maxLength: 4000 })),
+});
+export type DecideProposal = Static<typeof DecideProposal>;

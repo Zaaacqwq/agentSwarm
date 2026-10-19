@@ -99,7 +99,7 @@ describe("eyes and hands in a run (fake simulator, real sandbox)", () => {
     assert.equal(h.services.runs.view(lead.id).status, "succeeded");
     assert.equal(qa.status, "succeeded", qa.error ?? "");
 
-    assert.ok(!leadPrompt.includes("sim_build") && qaPrompt.includes("sim_build"), "only the run with needs is told about the simulator");
+    assert.ok(!leadPrompt.includes("Seeing and using the app") && qaPrompt.includes("Seeing and using the app"), "only the run with needs is told about the simulator");
     assert.match(leadSimResult, /not found|unknown|no such tool/i, `the lead has no simulator: ${leadSimResult}`);
     assert.match(cliRefused, /for native agents/);
     assert.ok(!tree.nodes.some((n) => n.title === "Coder"), "nothing was spawned for the refused request");
