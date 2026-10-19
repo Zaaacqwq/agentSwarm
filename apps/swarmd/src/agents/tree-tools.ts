@@ -25,7 +25,7 @@ const Spawn = Type.Object({
   budget_usd: Type.Optional(Type.Number({ minimum: 0.01, maximum: 50 })),
   model: Type.Optional(Type.String({ maxLength: 200 })),
   runtime: Type.Optional(Type.Union([Type.Literal("native"), Type.Literal("claude_code"), Type.Literal("codex")], { description: "Who does the work (default native)" })),
-  needs: Type.Optional(Type.Array(Type.Union([Type.Literal("simulator"), Type.Literal("browser")]), { maxItems: 2, description: "simulator: an iOS simulator to build, run and tap the app; browser: a headless browser for a web app" })),
+  needs: Type.Optional(Type.Array(Type.Union([Type.Literal("simulator"), Type.Literal("browser"), Type.Literal("desktop")]), { maxItems: 3, description: "simulator: an iOS simulator to build, run and tap the app; browser: a headless browser for a web app; desktop: this Mac's desktop to test a macOS app (each session approved by the person)" })),
 });
 const Ids = Type.Object({ ids: Type.Optional(Type.Array(Type.String(), { maxItems: 20 })) });
 const Id = Type.Object({ id: Type.String() });

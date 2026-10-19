@@ -147,6 +147,14 @@ export async function buildApp(o: AppOptions): Promise<FastifyInstance> {
     // Shown as text, never rendered: an agent wrote it.
     return reply.type("text/plain; charset=utf-8").header("x-content-type-options", "nosniff").header("content-security-policy", "default-src 'none'; sandbox").send(text);
   });
+  // R9: desktop sessions. You approve, deny and stop; agents ask through their tools.
+  app.get("/api/desktop", async () => {
+    await s.desktop.refresh();
+    return s.desktop.view();
+  });
+  app.post<{ Params: { id: string } }>("/api/desktop/sessions/:id/approve", async (req) => s.desktop.approve(actor(req), req.params.id));
+  app.post<{ Params: { id: string } }>("/api/desktop/sessions/:id/deny", async (req) => s.desktop.deny(actor(req), req.params.id));
+  app.post("/api/desktop/stop", async (req) => s.desktop.stop(actor(req)));
   app.get("/api/models/settings", async () => s.backupModel.get());
   app.put<{ Body: ModelSettings }>("/api/models/settings", { schema: { body: ModelSettings } }, async (req) => s.backupModel.set(actor(req), req.body));
   app.get("/api/machine", async () => s.machine.get());

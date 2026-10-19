@@ -15,6 +15,7 @@ import { MissionPage } from "./pages/Mission.tsx";
 import { TicketsPage } from "./pages/Tickets.tsx";
 import { TicketPage } from "./pages/Ticket.tsx";
 import { MemoryPage } from "./pages/Memory.tsx";
+import { DesktopBar } from "./components/DesktopBar.tsx";
 
 const Mark = () => (
   <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 2l12 7v14l-12 7-12-7V9z" fill="var(--signal)" /><path d="M16 9l6 3.5v7L16 23l-6-3.5v-7z" fill="var(--paper)" /></svg>
@@ -64,7 +65,10 @@ export function App() {
         <div className="spacer" />
         <button className="btn ghost" onClick={logout}>Sign out {me.username}</button>
       </nav>
-      <main className="main">{page}</main>
+      <main className="main">
+        <DesktopBar />
+        {page}
+      </main>
     </div>
   );
 }

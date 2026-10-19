@@ -19,6 +19,8 @@ import { FakeDiscord } from "./fake-discord.ts";
 import type { RunLimits } from "../src/db/schema.ts";
 import { installFakeCli, type FakeCli } from "../../../packages/ws-exec/test/fake-cli.ts";
 import { installFakeSim, type FakeSim } from "../../../packages/ws-exec/test/fake-sim.ts";
+import { fakeDesktop, type FakeDesktop } from "./fake-desktop.ts";
+import { SYSTEM_TOOLS } from "../src/desktop/stage.ts";
 
 const LOCAL_MAIN = fileURLToPath(new URL("../../../packages/ws-exec/src/local-main.ts", import.meta.url));
 export const ADMIN = { username: "admin", password: "correct horse battery staple" };
@@ -41,6 +43,10 @@ export interface Harness {
   sim(user: string): FakeSim;
   /** Pages web_fetch can read, by URL; web_search answers with `searchResult`. */
   readonly web: { pages: Map<string, string>; searches: string[]; searchResult: string };
+  /** R9: the fake desktop helper, and the apps the run signed for the App Sandbox (codesign arguments). */
+  readonly desktop: FakeDesktop;
+  readonly signed: string[][];
+  readonly appsDir: string;
   /** Scripted model replies, consumed one per model request. */
   script(steps: FauxResponseStep[]): void;
   /** One script per agent name (read from "You are <name>," in the system prompt); order across agents does not matter. */
@@ -137,6 +143,9 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
       throw new Error("the test remote is local; branches are deleted with git");
     },
   };
+  const desktop = fakeDesktop();
+  const signed: string[][] = [];
+  const appsDir = join(base, "desktop-apps");
   const db = openDatabase(":memory:");
   const services = createServices({
     db: db.db,
@@ -161,6 +170,11 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
     refreshMirror: false,
     ...(opts.limits ? { limits: opts.limits } : {}),
     web: () => web,
+    desktop: { helper: desktop, appsDir, stageTools: { ...SYSTEM_TOOLS, codesign: async (args) => {
+      if (args[0] === "-d") return "<key>com.apple.security.app-sandbox</key><true/>";
+      signed.push(args);
+      return "";
+    } } },
     transport: discord,
     dashboardUrl: "http://127.0.0.1:4399",
     ...(opts.prPollMs ? { prPollMs: opts.prPollMs } : {}),
@@ -187,7 +201,7 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
 
   return {
     sim: (user) => sims.get(user)!,
-    base, layout, remote, services, app, db, protectedBranches, pullRequests, prStates, discord, cli, web: webState,
+    base, layout, remote, services, app, db, protectedBranches, pullRequests, prStates, discord, cli, web: webState, desktop, signed, appsDir,
     script: (steps) => faux.setResponses(steps),
     scriptAgents(scripts) {
       const queues = new Map(Object.entries(scripts).map(([k, v]) => [k, [...v]]));
@@ -219,6 +233,7 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
     async close() {
       services.watcher.stop();
       await services.discord.stop();
+      services.desktop.stopAll();
       await services.runs.stopAll();
       await app.close();
       db.close();

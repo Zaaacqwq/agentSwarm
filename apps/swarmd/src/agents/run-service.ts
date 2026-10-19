@@ -19,6 +19,10 @@ import type { Relay } from "../relay/relay.ts";
 import type { AgentService } from "./agent-service.ts";
 import { REVIEW_TOOL_NAMES, workstationTools } from "./tools.ts";
 import { Eyes } from "../eyes/eyes.ts";
+import { DesktopTools } from "../desktop/desktop-tools.ts";
+import type { DesktopService } from "../desktop/desktop-service.ts";
+import type { DesktopHelper } from "../desktop/helper.ts";
+import type { StageTools } from "../desktop/stage.ts";
 import { lessonLines, type LessonService } from "../memory/lessons.ts";
 import { roleOf, type HandbookService } from "../memory/handbooks.ts";
 import { recallTool } from "../memory/tools.ts";
@@ -104,6 +108,8 @@ export interface RunDeps {
   readonly screensDir: string;
   /** R8: the team's lessons and the roles' handbooks, in every prompt. */
   readonly memory?: { readonly lessons: LessonService; readonly handbooks: HandbookService };
+  /** R9: desktop sessions, for runs that need the desktop. */
+  readonly desktop?: { readonly service: DesktopService; readonly helper: DesktopHelper; readonly appsDir: string; readonly stageTools?: StageTools };
   /** The model to switch to when a run's own refuses the content or keeps failing (none: the run fails). */
   readonly backupModel?: () => BackupModel | null;
   readonly limits?: RunLimits;
@@ -374,8 +380,9 @@ export class RunService {
         if (this.active.size >= this.deps.maxConcurrent) break;
         if (run.needs?.length) {
           if (heavy >= this.deps.heavySlots) continue;
+          // Simulators and browsers stay up for the whole run; a desktop test is a small app you approved.
           pressure ??= this.deps.memoryPressure();
-          if (pressure > 1) {
+          if (pressure > 1 && run.needs.some((n) => n !== "desktop")) {
             this.retryOnMemory();
             continue;
           }
@@ -498,7 +505,16 @@ export class RunService {
       const found = this.deps.memory!.lessons.search(query, viewer, 5, { use: true });
       return found.length ? lessonLines(found).join("\n") : "No lessons match. Try other words, or carry on.";
     }) as AgentTool<any, undefined>);
-    if (!isReview && run.needs?.length) {
+    if (!isReview && run.needs?.includes("desktop") && this.deps.desktop) {
+      const d = this.deps.desktop;
+      tools.push(...(new DesktopTools({
+        service: d.service, helper: d.helper, appsDir: d.appsDir, backend, workstation: ws, run: this.get(runId), agent: agentRow.name,
+        projectSlug: project.slug, profile: project.profile, screensDir: join(this.deps.screensDir, runId),
+        waitForUser: () => (active.waitFor = [...(active.waitFor ?? []), WAIT_FOR_USER]),
+        ...(d.stageTools ? { stageTools: d.stageTools } : {}),
+      }).tools() as AgentTool<any, undefined>[]));
+    }
+    if (!isReview && run.needs?.some((n) => n !== "desktop")) {
       active.eyes = new Eyes({ backend, workstation: ws, scope: run.worktreeScope, needs: run.needs, profile: project.profile, screensDir: join(this.deps.screensDir, runId) });
       tools.push(...(active.eyes.tools() as AgentTool<any, undefined>[]));
     }
@@ -806,6 +822,8 @@ export class RunService {
   }
 
   private finish(runId: string, status: RunRow["status"], report: RunReport | null, error: string | null, now = Date.now()): void {
+    // Its desktop session (R9) ends with the execution: the app is closed and you have your Mac back.
+    if (this.deps.desktop) void this.deps.desktop.service.runEnded(runId).catch((e: Error) => this.deps.log("desktop release failed", { runId, error: e.message }));
     this.deps.db.update(schema.runs).set({ status, report, error, endedAt: now, waitingFor: null }).where(eq(schema.runs.id, runId)).run();
     this.deps.bus.runEvent(runId, "status", { status, ...(error ? { error } : {}) }, now);
     this.emit(runId);

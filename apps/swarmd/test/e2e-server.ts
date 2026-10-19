@@ -51,6 +51,20 @@ h.scriptAgents({
     // The board (R7): a ticket's lead asks, you answer, it asks again.
     call("ask_user", { question: "Which colour should the button be?" }),
     call("ask_user", { question: "Got it: orange. Anything else?" }),
+    // R9: a tester asks for the desktop; you approve it on the dashboard, then stop it.
+    call("spawn_agent", { name: "Tester", role: "qa", brief: "Open the Notes app on the desktop and check that New Note adds a note.", needs: ["desktop"] }),
+    call("wait_agents", {}),
+    call("report", { summary: "Tester was stopped before it finished.", tests: "-", unfinished: [] }),
+  ],
+  Tester: [
+    call("desktop_request", { purpose: "Check that New Note adds a note", minutes: 10 }),
+    call("desktop_open", { scheme: "Demo", project: "App.xcodeproj" }),
+    // You are using the Mac: its click waits, and the dashboard says so.
+    () => {
+      h.desktop.pauseFor(8000);
+      return call("desktop_click", { element: 1 });
+    },
+    call("report", { summary: "Stopped by the person.", tests: "-", unfinished: [] }),
   ],
   Builder: [
     call("ws_write", { path: "cube.js", content: "export const cube = (x) => x * x * x;\n" }),

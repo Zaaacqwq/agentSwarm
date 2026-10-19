@@ -17,7 +17,8 @@
     "typecheck": "tsc -p tsconfig.json && tsc -p apps/web/tsconfig.json",
     "e2e": "playwright test",
     "check": "node scripts/check.ts",
-    "db:generate": "drizzle-kit generate --config apps/swarmd/drizzle.config.ts"
+    "db:generate": "drizzle-kit generate --config apps/swarmd/drizzle.config.ts",
+    "test:desktop": "zsh native/desktop/test.sh"
   },
   "devDependencies": {
     "@playwright/test": "1.64.1",

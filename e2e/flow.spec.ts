@@ -329,6 +329,33 @@ test("memory: an agent's lesson approved and pinned, a lesson of your own, a han
   expect(overflow).toBeLessThanOrEqual(0);
 });
 
+test("the desktop: an agent asks to use this Mac, you approve it, it pauses while you use the Mac, and you stop it", async ({ page }) => {
+  await page.goto("/agents");
+  await page.getByLabel("Password").fill("correct horse battery staple");
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await page.getByRole("cell", { name: "Dev", exact: true }).click();
+  await page.getByLabel("Title").fill("Check the Notes app");
+  await page.getByLabel("Brief").fill("Have a tester check New Note on the desktop.");
+  await page.getByRole("button", { name: "Start run" }).click();
+  const bar = page.getByRole("region", { name: "Desktop" });
+  await expect(bar.getByRole("heading", { name: "Tester asks to use this Mac for 10 minutes" })).toBeVisible({ timeout: 30_000 });
+  await expect(bar.getByText("“Check that New Note adds a note”")).toBeVisible();
+  await page.screenshot({ path: `${SHOTS}/desktop-ask-1440.png` });
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.screenshot({ path: `${SHOTS}/desktop-ask-375.png` });
+  const overflow = await page.evaluate("document.documentElement.scrollWidth - document.documentElement.clientWidth") as number;
+  expect(overflow).toBeLessThanOrEqual(0);
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  await bar.getByRole("button", { name: "Approve" }).click();
+  await expect(bar.getByRole("heading", { name: "Tester is testing Demo on this Mac" })).toBeVisible({ timeout: 30_000 });
+  await expect(bar.getByText(/Paused while you use the Mac/)).toBeVisible({ timeout: 15_000 });
+  await page.screenshot({ path: `${SHOTS}/desktop-active-1440.png` });
+  await bar.getByRole("button", { name: "Stop" }).click();
+  await expect(page.getByRole("region", { name: "Desktop" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Report" })).toBeVisible({ timeout: 30_000 });
+});
+
 /** A small orange PNG (40×24), built here so the test has no binary fixture. */
 const PNG = (() => {
   const w = 40, h = 24;

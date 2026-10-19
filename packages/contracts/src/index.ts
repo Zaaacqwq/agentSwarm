@@ -98,6 +98,13 @@ export const ProjectProfile = Type.Object({
     /** e.g. com.apple.CoreSimulator.SimDeviceType.iPhone-17 */
     deviceType: Type.Optional(Type.String({ maxLength: 150, pattern: "^[A-Za-z0-9.-]+$" })),
   })),
+  /** Mac apps (R9): what to build for the desktop, and whether the app under test may use the network. */
+  mac: Type.Optional(Type.Object({
+    project: Type.Optional(Type.String({ maxLength: 200, pattern: "\\.xcodeproj$" })),
+    workspace: Type.Optional(Type.String({ maxLength: 200, pattern: "\\.xcworkspace$" })),
+    scheme: Type.Optional(Type.String({ maxLength: 100 })),
+    network: Type.Optional(Type.Boolean()),
+  })),
   /** Sites besides the local dev server where the browser may click and type (R6): origins, e.g. https://staging.example.com. */
   testSites: Type.Optional(Type.Array(Type.String({ maxLength: 200, pattern: "^https?://[^/\\s]+$" }), { maxItems: 20 })),
   /** R8: a product: feature tickets also update the changelog and store copy. */
@@ -261,8 +268,8 @@ export interface MachineLoadView {
 }
 
 /** What a run may use beyond its worktree (R6). Each holds a heavy slot while the run works. */
-export type RunNeed = "simulator" | "browser";
-export const RUN_NEEDS: readonly RunNeed[] = ["simulator", "browser"];
+export type RunNeed = "simulator" | "browser" | "desktop";
+export const RUN_NEEDS: readonly RunNeed[] = ["simulator", "browser", "desktop"];
 
 /** Every run of one tree, and what the whole tree has spent. */
 export interface TreeView {
@@ -387,7 +394,8 @@ export type LiveMessage =
   | { readonly kind: "mission"; readonly mission: MissionView }
   | { readonly kind: "mission_message"; readonly message: MissionMessageView }
   | { readonly kind: "ticket"; readonly ticket: TicketView }
-  | { readonly kind: "ticket_removed"; readonly id: string };
+  | { readonly kind: "ticket_removed"; readonly id: string }
+  | { readonly kind: "desktop"; readonly desktop: DesktopView };
 
 // ---- CLI workers (R4) --------------------------------------------------------------------
 export type AgentRuntime = "native" | "claude_code" | "codex";
@@ -655,3 +663,40 @@ export const DecideProposal = Type.Object({
   text: Type.Optional(Type.String({ minLength: 1, maxLength: 4000 })),
 });
 export type DecideProposal = Static<typeof DecideProposal>;
+
+// ---- desktop sessions (R9) ---------------------------------------------------------------------
+export type DesktopSessionStatus = "queued" | "pending" | "active" | "ended" | "denied";
+
+/** An agent's turn at this Mac's desktop, to test one app. */
+export interface DesktopSessionView {
+  readonly id: string;
+  readonly runId: string;
+  readonly runTitle: string;
+  readonly agent: string;
+  readonly projectName: string;
+  /** The board ticket the run works for, if any. */
+  readonly ticketKey: string | null;
+  readonly purpose: string;
+  readonly minutes: number;
+  readonly status: DesktopSessionStatus;
+  readonly until: number | null;
+  /** The person is using the Mac: the agent's input waits until then. */
+  readonly pausedUntil: number | null;
+  /** The app under test, once it is open. */
+  readonly app: string | null;
+  readonly endReason: string | null;
+  readonly createdAt: number;
+}
+
+/** The desktop helper on this Mac, and the sessions that are not over. */
+export interface DesktopView {
+  readonly helper: {
+    readonly running: boolean;
+    readonly screenRecording: boolean;
+    readonly accessibility: boolean;
+    readonly watching: boolean;
+    readonly stoppedByUser: boolean;
+  };
+  /** The active session first, then the one waiting for you, then the queue. */
+  readonly sessions: readonly DesktopSessionView[];
+}

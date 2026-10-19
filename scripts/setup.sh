@@ -20,6 +20,9 @@ DATA_VOLUME="/Volumes/Data"
 LIBEXEC="/usr/local/libexec/agentswarm"
 EXEC="${LIBEXEC}/ws-exec"
 LAUNCH="${LIBEXEC}/ws-launch"
+# Tried for R9 and dropped (App Sandbox cannot start for another user in your GUI session): removed if present.
+LEGACY_WSAPP="${LIBEXEC}/ws-app"
+LEGACY_APPS_DIR="${VOLUME}/desktop-apps"
 SUDOERS="/etc/sudoers.d/agentswarm"
 GROUP="swarm-ws"
 NODE_VERSION="24.22.0"
@@ -191,6 +194,7 @@ case "\$user" in ws-[0-9]|ws-[0-9][0-9]) ;; *) fail "not a workstation user" ;; 
 uid="\$(/usr/bin/id -u "\$user")"
 exec /bin/launchctl asuser "\$uid" /usr/bin/sudo -n -H -u "\$user" ${EXEC}
 LAUNCHER
+  rm -f "$LEGACY_WSAPP" && rm -rf "$LEGACY_APPS_DIR"
   chown -R root:wheel "$LIBEXEC" && chmod 0755 "$LIBEXEC" "$EXEC" "$LAUNCH"
   say "Installed ${EXEC} and ${LAUNCH}"
 }

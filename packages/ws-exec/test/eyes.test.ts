@@ -1,6 +1,6 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createServer, type Server } from "node:http";
 import { join } from "node:path";
@@ -8,7 +8,7 @@ import { execFileSync } from "node:child_process";
 import { dispatch } from "../src/dispatch.ts";
 import { denyPortsFile, sandboxProfile } from "../src/sandbox.ts";
 import { PRODUCTION_LAYOUT, type ExecEnv } from "../src/layout.ts";
-import type { ImageResult, Request, SimBuildResult, SimDevice, UiElement } from "../src/protocol.ts";
+import type { ImageResult, MacBuildResult, Request, SimBuildResult, SimDevice, UiElement } from "../src/protocol.ts";
 import { compareVersions, deviceName, summarizeBuild } from "../src/ops/sim.ts";
 import { addressAllowed, interactAllowed, urlAllowed } from "../src/ops/browser-driver.ts";
 import { imageSize } from "../src/ops/image.ts";
@@ -348,6 +348,32 @@ describe("the browser (real headless Chromium, real sandbox)", { skip: browserTo
       assert.equal((await s.send({ cmd: "click", ref: "e1; alert(1)" })).ok, false);
       s.close();
       await s.done;
+    } finally {
+      f.cleanup();
+    }
+  });
+});
+
+describe("a macOS app for the desktop (R9)", () => {
+  test("mac.build builds for macOS, unsigned, and returns the app packed; errors and paths are checked", async () => {
+    const f = fixture(true);
+    try {
+      await call(f.env, clone);
+      const sim = installFakeSim(f.layout, join(f.env.root, "cache"));
+      const built = await call<MacBuildResult>(f.env, { op: "mac.build", scope: SCOPE, project: "App.xcodeproj", scheme: "Demo" });
+      assert.deepEqual([built.ok, built.app, built.bundleId], [true, "Demo.app", "com.example.demo"]);
+      const xb = sim.calls().find((c) => c[0] === "xcodebuild")!;
+      assert.ok(xb.includes("platform=macOS") && xb.includes("CODE_SIGNING_ALLOWED=NO"), JSON.stringify(xb));
+      // The archive is the app itself, as a tar.
+      const out = mkdtempSync(join(tmpdir(), "mac-app-"));
+      writeFileSync(join(out, "app.tgz"), Buffer.from(built.archive!, "base64"));
+      execFileSync("/usr/bin/tar", ["-xzf", join(out, "app.tgz"), "-C", out]);
+      assert.ok(existsSync(join(out, "Demo.app", "Contents", "Info.plist")));
+      rmSync(out, { recursive: true, force: true });
+      const broken = await call<MacBuildResult>(f.env, { op: "mac.build", scope: SCOPE, scheme: "FAIL_BUILD" });
+      assert.deepEqual([broken.ok, broken.archive], [false, null]);
+      await assert.rejects(call(f.env, { op: "mac.build", scope: SCOPE, project: "../../other/App.xcodeproj", scheme: "Demo" }), { code: "out_of_scope" });
+      await assert.rejects(call(f.env, { op: "mac.build", scope: SCOPE, scheme: "Demo; rm -rf /" }), { code: "bad_request" });
     } finally {
       f.cleanup();
     }

@@ -85,6 +85,13 @@
       "when": 1792322631661,
       "tag": "0011_lesson_review",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1792434574403,
+      "tag": "0012_desktop_sessions",
+      "breakpoints": true
     }
   ]
 }

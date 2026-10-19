@@ -10,6 +10,10 @@ import type { SecretBox } from "../crypto/secret-box.ts";
 import { AuthService } from "../auth/auth-service.ts";
 import { EndpointService } from "../endpoints/endpoint-service.ts";
 import { BackupModelService } from "../models/backup.ts";
+import { DesktopService } from "../desktop/desktop-service.ts";
+import { keyOf } from "../tickets/ticket-service.ts";
+import type { DesktopHelper } from "../desktop/helper.ts";
+import type { StageTools } from "../desktop/stage.ts";
 import { PiModelGateway, type ModelGateway } from "../models/model-gateway.ts";
 import type { GitHubClient } from "../github/github-client.ts";
 import { GitHubService } from "../github/github-service.ts";
@@ -62,6 +66,8 @@ export interface ServiceDeps {
   /** Links in Discord messages point here. */
   readonly dashboardUrl: string;
   readonly prPollMs?: number;
+  /** R9: agentSwarm Desktop in your GUI session (tests use a fake), and where it may open apps from. */
+  readonly desktop?: { readonly helper: DesktopHelper; readonly appsDir: string; readonly stageTools?: StageTools };
 }
 
 export interface Services {
@@ -83,6 +89,7 @@ export interface Services {
   readonly cli: CliService;
   readonly machine: MachineService;
   readonly backupModel: BackupModelService;
+  readonly desktop: DesktopService;
   readonly tickets: TicketService;
   readonly lessons: LessonService;
   readonly handbooks: HandbookService;
@@ -103,7 +110,21 @@ export function createServices(d: ServiceDeps): Services {
   // R8: the team's memory, read by every run and written at retrospectives.
   const memory = { lessons: new LessonService(d.db, (id) => d.db.select({ name: schema.projects.name }).from(schema.projects).where(eq(schema.projects.id, id)).get()?.name ?? null), handbooks: new HandbookService(d.db) };
   const backupModel = new BackupModelService(d.db, gateway);
+  const desktopHelper: DesktopHelper = d.desktop?.helper ?? { call: () => Promise.reject(new Error("agentSwarm Desktop is not configured")) };
+  const appsDir = d.desktop?.appsDir ?? "/nonexistent";
+  const desktop = new DesktopService({
+    db: d.db, bus, helper: desktopHelper, appsDir, log: (msg, extra) => d.log("warn", msg, extra),
+    message: (runId, text) => void runs.message("agentswarm", runId, text, Date.now(), "agentswarm"),
+    run: (id) => runs.get(id),
+    projectName: (id) => projects.get(id).name,
+    ticketKey: (run) => {
+      const t = run.missionId ? tickets.byMission(run.missionId) : null;
+      return t ? keyOf(t) : null;
+    },
+    notify: (s, what, decide) => discord.notifyDesktop(s, what, decide),
+  });
   const runs = new RunService({
+    desktop: { service: desktop, helper: desktopHelper, appsDir, ...(d.desktop?.stageTools ? { stageTools: d.desktop.stageTools } : {}) },
     memory,
     db: d.db, bus, pool, backend: d.backend, projects, agents, gateway, relay, tree, cli, backupModel: () => backupModel.backup(),
     maxConcurrent: d.maxConcurrentRuns, refreshMirror: d.refreshMirror ?? true,
@@ -126,10 +147,10 @@ export function createServices(d: ServiceDeps): Services {
       await cleanup.clean(root.treeId!);
     },
   });
-  const discord = new DiscordBridge({ db: d.db, secrets: d.secrets, bus, missions, projects, transport: d.transport, dashboardUrl: d.dashboardUrl, log: warn, quota: () => cli.quota() });
+  const discord = new DiscordBridge({ db: d.db, secrets: d.secrets, bus, missions, projects, desktop, transport: d.transport, dashboardUrl: d.dashboardUrl, log: warn, quota: () => cli.quota() });
   const tickets = new TicketService({
     db: d.db, bus, missions, projects, agents, runs, tree, github, git: d.git, attachments: new Attachments(d.db, d.attachmentsDir), log: warn,
     notify: (t, what) => discord.notifyTicket(t, what),
   });
-  return { bus, auth: new AuthService(d.db), endpoints, gateway, github, projects, pool, agents, relay, runs, tree, cleanup, missions, watcher, discord, cli, machine: new MachineService(d.db, d.layout.mirrors), backupModel, tickets, lessons: memory.lessons, handbooks: memory.handbooks };
+  return { bus, auth: new AuthService(d.db), endpoints, gateway, github, projects, pool, agents, relay, runs, tree, cleanup, missions, watcher, discord, cli, machine: new MachineService(d.db, d.layout.mirrors), backupModel, desktop, tickets, lessons: memory.lessons, handbooks: memory.handbooks };
 }

@@ -5,6 +5,7 @@ import * as fs from "./ops/fs.ts";
 import { exec } from "./ops/exec.ts";
 import * as git from "./ops/git.ts";
 import * as cli from "./ops/cli.ts";
+import * as mac from "./ops/mac.ts";
 import * as sim from "./ops/sim.ts";
 import * as browser from "./ops/browser.ts";
 
@@ -77,6 +78,7 @@ function run(env: ExecEnv, r: Request, emit: cli.Emit, input: AsyncIterable<stri
     case "sim.screenshot": return sim.screenshot(env, r.scope, r.saveAs, r.region);
     case "sim.logs": return sim.logs(env, r.scope, r.process, r.seconds);
     case "sim.shutdown": return sim.shutdown(env, r.scope);
+    case "mac.build": return mac.build(env, r.scope, r);
     case "browser.session": return browser.session(env, r.scope, r.interact ?? [], r.timeoutMs, input, emit);
     default: throw new OpError("bad_request", `Unknown op ${(r as { op?: unknown }).op}`);
   }
