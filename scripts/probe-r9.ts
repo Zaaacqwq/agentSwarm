@@ -7,7 +7,7 @@ import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { SocketHelper, type HelperStatus } from "../apps/swarmd/src/desktop/helper.ts";
 import { stageApp } from "../apps/swarmd/src/desktop/stage.ts";
 
@@ -25,8 +25,8 @@ console.log("helper:", JSON.stringify(status));
 if (!status.screenRecording || !status.accessibility) throw new Error("Grant Screen Recording and Accessibility first");
 
 const work = mkdtempSync(join(tmpdir(), "probe-r9-"));
-execFileSync("/usr/bin/ditto", ["-c", "-k", "--keepParent", app, join(work, "app.zip")]);
-const staged = await stageApp({ archive: readFileSync(join(work, "app.zip")), dir: join(support, "apps", "probe-r9"), app: basename(app), projectSlug: "probe", network: false });
+execFileSync("/usr/bin/tar", ["-czf", join(work, "app.tgz"), "-C", dirname(app), basename(app)]);
+const staged = await stageApp({ archive: readFileSync(join(work, "app.tgz")), dir: join(support, "apps", "probe-r9"), app: basename(app), projectSlug: "probe", network: false });
 rmSync(work, { recursive: true, force: true });
 console.log("staged:", staged);
 console.log(execFileSync("/usr/bin/codesign", ["-d", "--entitlements", "-", staged], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));

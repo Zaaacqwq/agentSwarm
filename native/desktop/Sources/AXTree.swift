@@ -23,8 +23,11 @@ final class UITree {
         if roots.isEmpty, let windows = UITree.attr(app, kAXWindowsAttribute) as? [AXUIElement] { roots = Array(windows.prefix(1)) }
         var found: [AXUIElement] = []
         var lines: [String] = []
+        var visited = 0
         func walk(_ el: AXUIElement, depth: Int) {
-            guard found.count < maxNodes, depth < 30 else { return }
+            // Bounded however deep or wide the app's tree is.
+            visited += 1
+            guard found.count < maxNodes, depth < 30, visited < maxNodes * 20 else { return }
             let role = UITree.string(el, kAXRoleAttribute) ?? "?"
             // Menus are huge; list only the top level of the menu bar.
             if role == "AXMenu" && depth > 1 { return }
@@ -71,13 +74,9 @@ final class UITree {
         return AXUIElementGetPid(el, &pid) == .success ? pid : nil
     }
 
-    /// Presses an element (AXPress), falling back to clicking its centre.
-    func press(_ n: Int) throws -> CGPoint? {
-        let el = try element(n)
-        if AXUIElementPerformAction(el, kAXPressAction as CFString) == .success { return nil }
-        guard let c = UITree.center(el) else { throw HelperError.failed("Element [\(n)] cannot be pressed and has no position") }
-        try Input.click(at: c, button: "left", count: 1)
-        return c
+    /// Presses an element with AXPress; false when it has no such action (then it is clicked).
+    func pressAX(_ n: Int) throws -> Bool {
+        AXUIElementPerformAction(try element(n), kAXPressAction as CFString) == .success
     }
 
     static func attr(_ el: AXUIElement, _ name: String) -> CFTypeRef? {

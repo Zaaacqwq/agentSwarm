@@ -26,15 +26,19 @@ struct Look {
     }
 }
 
-/// Runs an async call from a plain (non-main) thread.
-func blocking<T>(_ op: @escaping () async throws -> T) throws -> T {
+/// Runs an async call from a plain (non-main) thread; a call that hangs fails after `seconds`.
+func blocking<T>(seconds: Double = 20, _ op: @escaping () async throws -> T) throws -> T {
     let sem = DispatchSemaphore(value: 0)
+    let lock = NSLock()
     var result: Result<T, Error>?
     Task.detached {
-        do { result = .success(try await op()) } catch { result = .failure(error) }
+        let r: Result<T, Error>
+        do { r = .success(try await op()) } catch { r = .failure(error) }
+        lock.withLock { result = r }
         sem.signal()
     }
-    sem.wait()
+    guard sem.wait(timeout: .now() + seconds) == .success else { throw HelperError.failed("macOS did not answer in time") }
+    lock.lock(); defer { lock.unlock() }
     return try result!.get()
 }
 

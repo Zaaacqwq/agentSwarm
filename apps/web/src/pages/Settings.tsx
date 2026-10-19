@@ -164,6 +164,12 @@ function Machine() {
 function DesktopHelper() {
   const d = useResource<DesktopView>("/desktop");
   useLive((m) => void (m.kind === "desktop" && d.set(() => m.desktop)));
+  // Permissions are granted in System Settings, not here: look again now and then.
+  const reload = d.reload;
+  useEffect(() => {
+    const t = setInterval(reload, 10_000);
+    return () => clearInterval(t);
+  }, [reload]);
   const h = d.data?.helper;
   if (!h) return null;
   const missing = [!h.screenRecording && "Screen & System Audio Recording", !h.accessibility && "Accessibility"].filter(Boolean);

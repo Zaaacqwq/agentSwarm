@@ -69,7 +69,21 @@ final class Arming {
         let wasPaused = pausedUntil.map { $0 > Date() } ?? false
         pausedUntil = Date().addingTimeInterval(Arming.pause)
         lock.unlock()
-        if !wasPaused { changed() }
+        if !wasPaused {
+            changed()
+            resumeLater(after: Arming.pause)
+        }
+    }
+
+    /// Says when the pause is over (the menu bar shows it), however often you extended it meanwhile.
+    private func resumeLater(after seconds: TimeInterval) {
+        DispatchQueue.global().asyncAfter(deadline: .now() + seconds + 0.2) { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            let left = self.pausedUntil.map { $0.timeIntervalSinceNow } ?? 0
+            self.lock.unlock()
+            if left > 0 { self.resumeLater(after: left) } else { self.changed() }
+        }
     }
 
     /// The session for this token, or why there is none.

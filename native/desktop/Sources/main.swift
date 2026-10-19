@@ -18,7 +18,11 @@ let menu = StatusMenu(onStop: { commands.stopByUser() })
 commands.arming.onChange = { state in menu.update(state) }
 let watcher = PersonWatcher(arming: commands.arming)
 watcher.start()
-commands.watching = { watcher.active }
+// Accessibility granted after the helper started: the watcher is set up on the next status request.
+commands.watching = {
+    if !watcher.active && AXIsProcessTrusted() { DispatchQueue.main.async { watcher.start() } }
+    return watcher.active
+}
 let server = Server(path: socketPath, handler: commands.handle)
 Thread { server.run() }.start()
 log("agentswarm-desktop started (screen recording: \(CGPreflightScreenCaptureAccess()), accessibility: \(AXIsProcessTrusted()), watching: \(watcher.active))")

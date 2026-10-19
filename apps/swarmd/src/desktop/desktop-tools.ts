@@ -1,4 +1,4 @@
-import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type, type TSchema } from "@earendil-works/pi-ai";
@@ -7,6 +7,7 @@ import type { ProjectProfile } from "../db/schema.ts";
 import type { RunRow } from "../agents/run-service.ts";
 import type { WorkstationBackend } from "../workstations/backend.ts";
 import { MAX_EVIDENCE } from "../eyes/eyes.ts";
+import { saveScreen } from "../eyes/images.ts";
 import type { DesktopService } from "./desktop-service.ts";
 import { HelperError, type DesktopHelper } from "./helper.ts";
 import { stageApp, type StageTools } from "./stage.ts";
@@ -50,16 +51,10 @@ interface LookReply {
  */
 export class DesktopTools {
   private readonly deps: DesktopToolDeps;
-  private shots: number;
   private evidence = 0;
 
   constructor(deps: DesktopToolDeps) {
     this.deps = deps;
-    try {
-      this.shots = readdirSync(deps.screensDir).length;
-    } catch {
-      this.shots = 0;
-    }
   }
 
   tools(): AgentTool<any, Details>[] {
@@ -107,7 +102,7 @@ export class DesktopTools {
   }
 
   private async open(p: { scheme?: string; project?: string; workspace?: string; configuration?: string }, signal?: AbortSignal): Promise<string> {
-    const { token } = this.deps.service.session(this.deps.run.id);
+    this.deps.service.session(this.deps.run.id);
     const mac = this.deps.profile?.mac ?? {};
     const scheme = p.scheme ?? mac.scheme;
     if (!scheme) return "Say which scheme to build (find it with `xcodebuild -list`).";
@@ -117,10 +112,21 @@ export class DesktopTools {
       op: "mac.build", scope: this.deps.run.worktreeScope, scheme, ...(project ? { project } : {}), ...(workspace ? { workspace } : {}), ...(p.configuration ? { configuration: p.configuration } : {}), timeoutMs: BUILD_TIMEOUT_MS,
     }, { ...(signal ? { signal } : {}), timeoutMs: BUILD_TIMEOUT_MS + 60_000 });
     if (!built.ok || !built.archive || !built.app) return `The build failed (${Math.round(built.durationMs / 1000)} s):\n${built.errors.join("\n") || "(no error lines; run xcodebuild yourself to see why)"}`;
+    // The build can take long: the session may have ended meanwhile.
+    const { token: still } = this.deps.service.session(this.deps.run.id);
     // A fresh folder per opening: the one before it may still be in use by the app being replaced.
-    const dir = join(this.deps.appsDir, this.deps.run.id, String(Date.now()));
-    const path = await stageApp({ archive: Buffer.from(built.archive, "base64"), dir, app: built.app, projectSlug: this.deps.projectSlug, network: Boolean(mac.network), ...(this.deps.stageTools ? { tools: this.deps.stageTools } : {}) });
-    const opened = await this.deps.helper.call<{ name: string; inFront: boolean }>({ cmd: "open", session: token, path }, 60_000);
+    const runDir = join(this.deps.appsDir, this.deps.run.id);
+    const dir = join(runDir, String(Date.now()));
+    let opened: { name: string; inFront: boolean };
+    try {
+      const path = await stageApp({ archive: Buffer.from(built.archive, "base64"), dir, app: built.app, projectSlug: this.deps.projectSlug, network: Boolean(mac.network), ...(this.deps.stageTools ? { tools: this.deps.stageTools } : {}) });
+      opened = await this.deps.helper.call<{ name: string; inFront: boolean }>({ cmd: "open", session: still, path }, 60_000);
+    } catch (error) {
+      rmSync(dir, { recursive: true, force: true });
+      throw error;
+    }
+    // The app it replaced has been closed: its copy goes.
+    for (const old of readdirSync(runDir)) if (join(runDir, old) !== dir) rmSync(join(runDir, old), { recursive: true, force: true });
     this.deps.service.opened(this.deps.run.id, opened.name || built.app);
     return `Built in ${Math.round(built.durationMs / 1000)} s and opened ${opened.name || built.app}${opened.inFront ? "" : " (not in front yet: desktop_focus)"}. Look at it with desktop_look.`;
   }
@@ -130,10 +136,7 @@ export class DesktopTools {
     if (saveAs !== undefined && this.evidence >= MAX_EVIDENCE) throw new Error(`At most ${MAX_EVIDENCE} evidence screenshots per run; pick the ones that matter`);
     const shot = await this.deps.helper.call<LookReply>({ cmd: "look", session: token }, 30_000);
     this.deps.service.looked(this.deps.run.id);
-    mkdirSync(this.deps.screensDir, { recursive: true });
-    this.shots += 1;
-    const file = `${String(this.shots).padStart(3, "0")}.jpg`;
-    writeFileSync(join(this.deps.screensDir, file), Buffer.from(shot.image, "base64"));
+    const file = saveScreen(this.deps.screensDir, Buffer.from(shot.image, "base64"));
     let saved = "";
     if (saveAs !== undefined) {
       await this.deps.backend.call(this.deps.workstation, { op: "fs.write", scope: this.deps.run.worktreeScope, path: saveAs, content: shot.image, encoding: "base64" }, signal ? { signal } : {});
@@ -156,12 +159,13 @@ export class DesktopTools {
   /** One action, counted against the looks; while you use the Mac it waits for you to stop, then goes on. */
   private async act(request: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
     if (request.cmd === "click" && (request.x === undefined || request.y === undefined)) return "Give an element number, or both x and y.";
-    this.deps.service.act(this.deps.run.id);
+    this.deps.service.mayAct(this.deps.run.id);
     const started = Date.now();
     for (;;) {
       const { token } = this.deps.service.session(this.deps.run.id);
       try {
         const r = await this.deps.helper.call<{ inFront: boolean }>({ ...request, session: token });
+        this.deps.service.acted(this.deps.run.id);
         const waited = Date.now() - started > 5_000 ? ` (waited ${Math.round((Date.now() - started) / 1000)} s while the person used the Mac)` : "";
         return `Done${waited}.${r.inFront ? "" : " The app is no longer in front."} Look (desktop_look) to see what it did.`;
       } catch (error) {

@@ -1,5 +1,5 @@
 import { existsSync, rmSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { ExecEnv } from "../layout.ts";
 import { OpError, type MacBuildResult } from "../protocol.ts";
 import { readProduced, resolveInScope } from "../paths.ts";
@@ -11,7 +11,7 @@ export const MAX_APP_BYTES = 100 * 1024 * 1024;
 
 /**
  * R9: builds the macOS app in this workstation's sandbox (unsigned: swarmd signs it for the App Sandbox) and
- * packs it with ditto, so swarmd can open it in your session during an approved desktop session.
+ * packs it with tar, so swarmd can open it in your session during an approved desktop session.
  */
 export async function build(env: ExecEnv, scope: string, r: { project?: string; workspace?: string; scheme: string; configuration?: string; timeoutMs?: number }): Promise<MacBuildResult> {
   const c = ctx(env, scope);
@@ -36,11 +36,12 @@ export async function build(env: ExecEnv, scope: string, r: { project?: string; 
   const app = newestApp(join(derived, "Build", "Products", configuration));
   if (!app) return failed(["The build succeeded but produced no .app (is the scheme a macOS app?)"]);
   const bundleId = (await ok(c, ["/usr/bin/plutil", "-extract", "CFBundleIdentifier", "raw", "-o", "-", join(app, "Contents", "Info.plist")])).trim();
-  const zip = join(home, "mac-app.zip");
-  rmSync(zip, { force: true });
-  await ok(c, ["/usr/bin/ditto", "-c", "-k", "--keepParent", app, zip], { timeoutMs: 120_000 });
-  if (!existsSync(zip)) return failed(["Packing the app failed"]);
-  const archive = readProduced(zip, MAX_APP_BYTES);
-  rmSync(zip, { force: true });
+  // A tar: swarmd lists it before unpacking, and the system's tar refuses paths that leave the folder.
+  const packed = join(home, "mac-app.tgz");
+  rmSync(packed, { force: true });
+  await ok(c, ["/usr/bin/tar", "-czf", packed, "-C", dirname(app), basename(app)], { timeoutMs: 120_000 });
+  if (!existsSync(packed)) return failed(["Packing the app failed"]);
+  const archive = readProduced(packed, MAX_APP_BYTES);
+  rmSync(packed, { force: true });
   return { ok: true, errors, durationMs: Date.now() - started, app: basename(app), bundleId, archive: archive.toString("base64") };
 }

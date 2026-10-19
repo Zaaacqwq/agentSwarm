@@ -12,11 +12,11 @@ func throwsCode(_ code: String, _ what: String, line: Int = #line, _ op: () thro
 // Shortcuts: spelling does not matter; app switching and launchers are refused.
 expect(Policy.normalizedCombo("Shift+Command+Q") == "cmd+shift+q", "normalized order")
 expect(Policy.normalizedCombo("option+cmd+esc") == "cmd+alt+escape", "aliases")
-for combo in ["cmd+tab", "Command+Space", "cmd+opt+esc", "ctrl+left", "cmd+h"] {
-    expect(Policy.deniedCombos.contains(Policy.normalizedCombo(combo)), "\(combo) is denied")
+for combo in ["cmd+tab", "Command+Space", "cmd+opt+esc", "ctrl+left", "cmd+h", "alt+space", "cmd+shift+3", "ctrl+cmd+space", "f3", "fn+f", "cmd+alt+d", "cmd+shift+q", "cmd+`"] {
+    expect(Policy.comboRefusal(combo) != nil, "\(combo) is refused")
 }
-for combo in ["cmd+s", "cmd+n", "return", "cmd+shift+n"] {
-    expect(!Policy.deniedCombos.contains(Policy.normalizedCombo(combo)), "\(combo) is allowed")
+for combo in ["cmd+s", "cmd+n", "return", "cmd+shift+n", "shift+tab", "alt+left", "alt+delete", "escape", "cmd+z", "cmd+shift+z", "a"] {
+    expect(Policy.comboRefusal(combo) == nil, "\(combo) is allowed")
 }
 
 // Only the app under test.

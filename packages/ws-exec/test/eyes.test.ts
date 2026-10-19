@@ -364,10 +364,10 @@ describe("a macOS app for the desktop (R9)", () => {
       assert.deepEqual([built.ok, built.app, built.bundleId], [true, "Demo.app", "com.example.demo"]);
       const xb = sim.calls().find((c) => c[0] === "xcodebuild")!;
       assert.ok(xb.includes("platform=macOS") && xb.includes("CODE_SIGNING_ALLOWED=NO"), JSON.stringify(xb));
-      // The archive is the app itself, unpacked as ditto packed it.
+      // The archive is the app itself, as a tar.
       const out = mkdtempSync(join(tmpdir(), "mac-app-"));
-      writeFileSync(join(out, "app.zip"), Buffer.from(built.archive!, "base64"));
-      execFileSync("/usr/bin/ditto", ["-x", "-k", join(out, "app.zip"), out]);
+      writeFileSync(join(out, "app.tgz"), Buffer.from(built.archive!, "base64"));
+      execFileSync("/usr/bin/tar", ["-xzf", join(out, "app.tgz"), "-C", out]);
       assert.ok(existsSync(join(out, "Demo.app", "Contents", "Info.plist")));
       rmSync(out, { recursive: true, force: true });
       const broken = await call<MacBuildResult>(f.env, { op: "mac.build", scope: SCOPE, scheme: "FAIL_BUILD" });

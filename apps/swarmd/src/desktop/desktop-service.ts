@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { rmSync } from "node:fs";
+import { readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { and, asc, eq, inArray } from "drizzle-orm";
 import type { DesktopSessionView, DesktopView } from "@agentswarm/contracts";
@@ -58,6 +58,9 @@ export class DesktopService {
   private lastView = "";
   /** swarmd is stopping: nothing touches the database any more. */
   private closed = false;
+  /** Approvals and endings in progress: a second click, a timer or a poll must not run them twice. */
+  private readonly deciding = new Set<string>();
+  private readonly ending = new Set<string>();
 
   constructor(deps: DesktopDeps) {
     this.deps = deps;
@@ -77,26 +80,39 @@ export class DesktopService {
 
   /** You approve: the helper is armed with a fresh token, and the agent goes on. */
   async approve(actor: string, id: string, now = Date.now()): Promise<DesktopSessionView> {
-    const row = this.row(id);
-    if (row.status !== "pending") throw conflict(row.status === "queued" ? "Another session has the desktop; this one waits its turn" : "That request is no longer waiting");
-    const status = await this.refresh();
-    if (!status) throw conflict("agentSwarm Desktop is not running on this Mac: run zsh scripts/setup-desktop.sh");
-    if (!status.screenRecording || !status.accessibility) throw conflict("agentSwarm Desktop needs Screen Recording and Accessibility (System Settings → Privacy & Security)");
-    const token = randomBytes(24).toString("hex");
-    const until = now + row.minutes * 60_000;
-    // Your approval is the confirmation a Stop on the Mac waits for.
-    if (status.stoppedByUser) await this.deps.helper.call({ cmd: "ack_stop" });
-    await this.deps.helper.call({ cmd: "arm", untilMs: until, holder: row.agent, session: token });
-    const timer = setTimeout(() => void this.end(id, "its time was up"), until - now);
-    timer.unref();
-    this.live.set(id, { token, timer, actions: 0, app: null });
-    this.deps.db.update(schema.desktopSessions).set({ status: "active", until, decidedAt: now }).where(eq(schema.desktopSessions.id, id)).run();
-    audit(this.deps.db, actor, "desktop.approve", id, { runId: row.runId, minutes: row.minutes }, now);
-    const at = new Date(until).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
-    this.deps.message(row.runId, `The person approved your desktop session: ${row.minutes} minutes, until ${at}. Open the app with desktop_open, look (desktop_look) before you act, and call desktop_release as soon as you are done.`);
-    this.changed(this.row(id), "may use the desktop now");
-    this.watch();
-    return this.toView(this.row(id));
+    if (this.deciding.has(id)) throw conflict("That request is being approved already");
+    this.deciding.add(id);
+    try {
+      const row = this.row(id);
+      if (row.status !== "pending") throw conflict(row.status === "queued" ? "Another session has the desktop; this one waits its turn" : "That request is no longer waiting");
+      const status = await this.refresh();
+      if (!status) throw conflict("agentSwarm Desktop is not running on this Mac: run zsh scripts/setup-desktop.sh");
+      if (!status.screenRecording || !status.accessibility) throw conflict("agentSwarm Desktop needs Screen Recording and Accessibility (System Settings → Privacy & Security)");
+      if (!status.watching) throw conflict("agentSwarm Desktop cannot yet tell when you use the Mac: run zsh scripts/setup-desktop.sh again to restart it");
+      const token = randomBytes(24).toString("hex");
+      const until = now + row.minutes * 60_000;
+      // Your approval is the confirmation a Stop on the Mac waits for.
+      if (status.stoppedByUser) await this.deps.helper.call({ cmd: "ack_stop" });
+      await this.deps.helper.call({ cmd: "arm", untilMs: until, holder: row.agent, session: token });
+      // Checked again after the waits: it may have been declined or withdrawn meanwhile.
+      const claimed = this.deps.db.update(schema.desktopSessions).set({ status: "active", until, decidedAt: now })
+        .where(and(eq(schema.desktopSessions.id, id), eq(schema.desktopSessions.status, "pending"))).run();
+      if (claimed.changes === 0) {
+        await this.deps.helper.call({ cmd: "disarm", session: token }).catch(() => undefined);
+        throw conflict("That request is no longer waiting");
+      }
+      const timer = setTimeout(() => void this.end(id, "its time was up").catch((e: Error) => this.deps.log("desktop expiry failed", { id, error: e.message })), until - now);
+      timer.unref();
+      this.live.set(id, { token, timer, actions: 0, app: null });
+      audit(this.deps.db, actor, "desktop.approve", id, { runId: row.runId, minutes: row.minutes }, now);
+      const at = new Date(until).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+      this.tell(row.runId, `The person approved your desktop session: ${row.minutes} minutes, until ${at}. Open the app with desktop_open, look (desktop_look) before you act, and call desktop_release as soon as you are done.`);
+      this.changed(this.row(id), "may use the desktop now");
+      this.watch();
+      return this.toView(this.row(id));
+    } finally {
+      this.deciding.delete(id);
+    }
   }
 
   deny(actor: string, id: string, now = Date.now()): DesktopSessionView {
@@ -104,7 +120,7 @@ export class DesktopService {
     if (row.status !== "pending" && row.status !== "queued") throw conflict("That request is no longer waiting");
     this.close(row, "denied", "you declined it", now);
     audit(this.deps.db, actor, "desktop.deny", id, { runId: row.runId }, now);
-    this.deps.message(row.runId, "The person declined your desktop session. Do not ask again for the same thing; report what you could check without it.");
+    this.tell(row.runId, "The person declined your desktop session. Do not ask again for the same thing; report what you could check without it.");
     return this.toView(this.row(id));
   }
 
@@ -148,12 +164,17 @@ export class DesktopService {
     return { row, token: live.token };
   }
 
-  /** Counts an action; refuses when the agent has not looked for a while. */
-  act(runId: string): void {
+  /** Refuses an action when the agent has not looked for a while. */
+  mayAct(runId: string): void {
     const { row } = this.session(runId);
-    const live = this.live.get(row.id)!;
-    if (live.actions >= ACTIONS_PER_LOOK) throw conflict(`Look first (desktop_look): at most ${ACTIONS_PER_LOOK} actions between two looks`);
-    live.actions += 1;
+    if (this.live.get(row.id)!.actions >= ACTIONS_PER_LOOK) throw conflict(`Look first (desktop_look): at most ${ACTIONS_PER_LOOK} actions between two looks`);
+  }
+
+  /** Counts an action that happened. */
+  acted(runId: string): void {
+    const row = this.forRun(runId);
+    const live = row && this.live.get(row.id);
+    if (live) live.actions += 1;
   }
 
   looked(runId: string): void {
@@ -192,19 +213,32 @@ export class DesktopService {
     await this.deps.helper.call({ cmd: "disarm" }).catch(() => undefined);
     for (const row of this.deps.db.select().from(schema.desktopSessions).where(inArray(schema.desktopSessions.status, [...OPEN])).all()) {
       this.deps.db.update(schema.desktopSessions).set({ status: "ended", endReason: "swarmd restarted", endedAt: now }).where(eq(schema.desktopSessions.id, row.id)).run();
+      // A run that waits for the approval would wait for ever.
+      this.tell(row.runId, "Your desktop session ended because agentSwarm restarted. Ask again with desktop_request if you still need it.");
+    }
+    try {
+      for (const name of readdirSync(this.deps.appsDir)) rmSync(join(this.deps.appsDir, name), { recursive: true, force: true });
+    } catch {
+      // Not installed yet: nothing staged.
     }
     await this.refresh();
   }
 
+  /** swarmd stops: the desktop is handed back (best effort, not awaited). */
   stopAll(): void {
     this.closed = true;
     if (this.poller) clearInterval(this.poller);
     this.poller = null;
-    for (const l of this.live.values()) clearTimeout(l.timer);
+    for (const l of this.live.values()) {
+      clearTimeout(l.timer);
+      void this.deps.helper.call({ cmd: "disarm", session: l.token }).catch(() => undefined);
+    }
   }
 
   /** Reads the helper; a Stop on the Mac or a lapsed session ends the session here too. */
   async refresh(now = Date.now()): Promise<HelperStatus | null> {
+    // A session approved while this status was on its way is not ended by it.
+    const before = this.active();
     try {
       this.status = await this.deps.helper.call<HelperStatus & { ok: true }>({ cmd: "status" }, 5_000);
     } catch {
@@ -212,7 +246,7 @@ export class DesktopService {
     }
     if (this.closed) return this.status;
     const active = this.active();
-    if (active && this.status && !this.status.armed) {
+    if (active && before && active.id === before.id && this.status && !this.status.armed) {
       await this.end(active.id, this.status.stoppedByUser ? "you stopped it on the Mac" : "its time was up", now);
     } else {
       this.emit();
@@ -227,17 +261,33 @@ export class DesktopService {
 
   /** `tell`: the agent learns it lost the desktop (not when it released it, or its run is over). */
   private async end(id: string, reason: string, now = Date.now(), tell = true): Promise<void> {
-    const row = this.row(id);
-    if (row.status !== "active") return;
-    const live = this.live.get(id);
-    if (live) clearTimeout(live.timer);
-    this.live.delete(id);
-    await this.deps.helper.call({ cmd: "disarm", ...(live ? { session: live.token } : {}) }).catch((e: Error) => this.deps.log("desktop disarm failed", { id, error: e.message }));
-    // You stopped it on the Mac: the helper keeps refusing until swarmd has ended the session, which it now has.
-    if (this.status?.stoppedByUser) await this.deps.helper.call({ cmd: "ack_stop" }).catch(() => undefined);
-    rmSync(join(this.deps.appsDir, row.runId), { recursive: true, force: true });
-    this.close(row, "ended", reason, now);
-    if (tell) this.deps.message(row.runId, `Your desktop session has ended: ${reason}. The app under test was closed.`);
+    if (this.ending.has(id) || this.row(id).status !== "active") return;
+    this.ending.add(id);
+    try {
+      const row = this.row(id);
+      const live = this.live.get(id);
+      if (live) clearTimeout(live.timer);
+      this.live.delete(id);
+      // Only with its token: a late end never disarms a newer session.
+      if (live) await this.deps.helper.call({ cmd: "disarm", session: live.token }).catch((e: Error) => this.deps.log("desktop disarm failed", { id, error: e.message }));
+      // You stopped it on the Mac: the helper keeps refusing until swarmd has ended the session, which it now has.
+      if (this.status?.stoppedByUser) await this.deps.helper.call({ cmd: "ack_stop" }).catch(() => undefined);
+      rmSync(join(this.deps.appsDir, row.runId), { recursive: true, force: true });
+      this.close(row, "ended", reason, now);
+      if (tell) this.tell(row.runId, `Your desktop session has ended: ${reason}. The app under test was closed.`);
+    } finally {
+      this.ending.delete(id);
+    }
+  }
+
+  /** A note to the run; never to a finished one, which a message would start again. */
+  private tell(runId: string, text: string): void {
+    try {
+      const status = this.deps.run(runId).status;
+      if (status === "queued" || status === "running" || status === "waiting") this.deps.message(runId, text);
+    } catch (e) {
+      this.deps.log("desktop message failed", { runId, error: (e as Error).message });
+    }
   }
 
   /** Ends or denies a session that holds nothing, and lets the next one ask. */

@@ -14,7 +14,8 @@ final class PersonWatcher {
     }
 
     func start() {
-        let types: [CGEventType] = [.mouseMoved, .leftMouseDown, .rightMouseDown, .otherMouseDown, .leftMouseDragged, .scrollWheel, .keyDown, .flagsChanged]
+        guard tap == nil else { return }
+        let types: [CGEventType] = [.mouseMoved, .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp, .otherMouseDown, .leftMouseDragged, .rightMouseDragged, .scrollWheel, .keyDown, .keyUp, .flagsChanged]
         let mask = types.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << CGEventMask($1.rawValue)) }
         let me = Unmanaged.passUnretained(self).toOpaque()
         guard let tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .listenOnly, eventsOfInterest: mask, callback: { _, type, event, refcon in

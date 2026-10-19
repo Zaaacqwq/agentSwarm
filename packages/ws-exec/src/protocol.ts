@@ -105,7 +105,7 @@ export interface SimDevice {
   readonly bootMs: number;
 }
 
-/** R9: a macOS build. `archive` is the .app packed by ditto (base64), for swarmd to sign and open. */
+/** R9: a macOS build. `archive` is the .app as a gzipped tar (base64), for swarmd to check, sign and open. */
 export interface MacBuildResult {
   readonly ok: boolean;
   readonly errors: readonly string[];

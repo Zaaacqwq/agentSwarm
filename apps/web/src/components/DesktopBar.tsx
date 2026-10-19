@@ -12,6 +12,7 @@ const clock = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "2-dig
 export function DesktopBar() {
   const desktop = useResource<DesktopView>("/desktop");
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const [, tick] = useState(0);
   useLive((m) => void (m.kind === "desktop" && desktop.set(() => m.desktop)));
   useEffect(() => {
@@ -22,18 +23,24 @@ export function DesktopBar() {
   const now = sessions.find((s) => s.status === "active" || s.status === "pending");
   if (!now) return null;
   const queued = sessions.filter((s) => s.status === "queued").length;
-  const act = (path: string) => api<unknown>("POST", path, {}).then(() => setError(null)).catch((e: Error) => setError(e.message)).finally(desktop.reload);
+  const act = (path: string) => {
+    setBusy(true);
+    return api<unknown>("POST", path, {}).then(() => setError(null)).catch((e: Error) => setError(e.message)).finally(() => {
+      setBusy(false);
+      desktop.reload();
+    });
+  };
   return (
-    <section className={`desktop-bar ${now.status}`} aria-label="Desktop">
+    <section className={`desktop-bar ${now.status}`} aria-label="Desktop" aria-live="polite">
       {now.status === "pending" ? <Ask s={now} /> : <Active s={now} />}
       <div className="row">
         {now.status === "pending" ? (
           <>
-            <button className="btn signal" onClick={() => void act(`/desktop/sessions/${now.id}/approve`)}>Approve</button>
-            <button className="btn ghost" onClick={() => void act(`/desktop/sessions/${now.id}/deny`)}>Deny</button>
+            <button className="btn signal" disabled={busy} onClick={() => void act(`/desktop/sessions/${now.id}/approve`)}>Approve</button>
+            <button className="btn ghost" disabled={busy} onClick={() => void act(`/desktop/sessions/${now.id}/deny`)}>Deny</button>
           </>
         ) : (
-          <button className="btn danger" onClick={() => void act("/desktop/stop")}>Stop</button>
+          <button className="btn danger" disabled={busy} onClick={() => void act("/desktop/stop")}>Stop</button>
         )}
         {queued > 0 && <span className="faint">{queued} more waiting</span>}
       </div>

@@ -14,11 +14,31 @@ enum Policy {
         "com.apple.Spotlight", "com.raycast.macos", "com.runningwithcrayons.Alfred", "com.apple.systemevents",
     ]
 
-    /// Shortcuts that open launchers, switch apps or end the session.
-    static let deniedCombos: Set<String> = [
-        "cmd+space", "cmd+alt+space", "ctrl+space", "cmd+alt+escape", "cmd+shift+q", "cmd+alt+shift+q", "ctrl+cmd+q",
-        "cmd+tab", "cmd+shift+tab", "cmd+`", "ctrl+up", "ctrl+down", "ctrl+left", "ctrl+right", "cmd+h", "cmd+alt+h", "cmd+m",
+    /// Keys used for editing; with Option they move by words.
+    static let editingKeys: Set<String> = [
+        "return", "enter", "tab", "space", "delete", "backspace", "escape", "forwarddelete",
+        "home", "end", "pageup", "pagedown", "left", "right", "up", "down",
     ]
+
+    /**
+     * Why a key combination is refused, or nil. An allowlist: typing and editing keys, Option for words, and
+     * Command shortcuts inside the app. Never Control, Fn or function keys, Command with Option, launchers,
+     * app or window switching, hiding, screenshots or logging out: they reach the system, not the app.
+     */
+    static func comboRefusal(_ combo: String) -> String? {
+        let parts = normalizedCombo(combo).split(separator: "+").map(String.init)
+        guard let key = parts.last else { return "No key" }
+        let mods = Set(parts.dropLast())
+        let refused = "\(combo) is not allowed: only typing, editing keys and the app's own Command shortcuts"
+        let functionKey = key.count > 1 && key.hasPrefix("f") && Int(key.dropFirst()) != nil
+        if functionKey || mods.contains("ctrl") || mods.contains("fn") { return refused }
+        if mods.isSubset(of: ["shift"]) { return nil }
+        if mods.isSubset(of: ["alt", "shift"]) { return key == "space" ? refused : nil }
+        guard mods.contains("cmd"), mods.isSubset(of: ["cmd", "shift"]) else { return refused }
+        if ["space", "tab", "`", "h", "m", "escape"].contains(key) { return refused }
+        if mods.contains("shift") && (key == "q" || (key.count == 1 && key.first!.isNumber)) { return refused }
+        return nil
+    }
 
     static func normalizedCombo(_ combo: String) -> String {
         let order = ["ctrl", "cmd", "alt", "shift", "fn"]
@@ -69,11 +89,34 @@ enum Windows {
         }
     }
 
+    /// The process whose element is at a point, as Accessibility sees it: windows that let clicks through are not it.
+    static func axPid(at p: CGPoint) -> pid_t? {
+        let system = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(system, 1.0)
+        var element: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(system, Float(p.x), Float(p.y), &element) == .success, let element else { return nil }
+        return UITree.pid(of: element)
+    }
+
     /// The app that has keyboard focus (a Spotlight panel can have it while another app is frontmost).
     static func focusedPid() -> pid_t? {
         let system = AXUIElementCreateSystemWide()
         AXUIElementSetMessagingTimeout(system, 1.0)
         guard let app = UITree.element(system, kAXFocusedApplicationAttribute) else { return nil }
         return UITree.pid(of: app)
+    }
+}
+
+/// Whether a process runs in a sandbox (sandbox_check from libsystem_sandbox). Unknown counts as not.
+enum Sandbox {
+    private typealias Check = @convention(c) (pid_t, UnsafePointer<CChar>?, Int32) -> Int32
+    private static let check: Check? = {
+        guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "sandbox_check") else { return nil }
+        return unsafeBitCast(sym, to: Check.self)
+    }()
+
+    static func applies(to pid: pid_t) -> Bool {
+        guard let check else { return false }
+        return check(pid, nil, 0) == 1
     }
 }

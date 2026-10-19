@@ -7,22 +7,26 @@ final class Commands {
     private let appsDir: String
     /// Whether the helper can tell when you use the Mac (it needs Accessibility at start).
     var watching: () -> Bool = { false }
-    /// One command at a time touches the screen; status and ping never wait behind it.
+    /// One action at a time touches the screen. Session commands (arm, disarm, Stop) never wait behind it.
     private let work = NSLock()
     /// The last look: clicks are given in its coordinates, and an element number refers to its list.
+    private let lookLock = NSLock()
     private var lastLook: Look?
+    /// The helper ends a session at its time even if swarmd does not.
+    private var lapse: DispatchWorkItem?
+    private static let sessionCommands: Set<String> = ["ping", "status", "request_access", "arm", "disarm", "ack_stop"]
 
     init(appsDir: String) {
         self.appsDir = appsDir
     }
 
     func stopByUser() {
-        quit(arming.disarm(byUser: true))
+        endSession(arming.disarm(byUser: true))
     }
 
     func handle(_ req: [String: Any]) -> [String: Any] {
         let cmd = req["cmd"] as? String ?? ""
-        let exclusive = cmd != "status" && cmd != "ping"
+        let exclusive = !Commands.sessionCommands.contains(cmd)
         if exclusive { work.lock() }
         defer { if exclusive { work.unlock() } }
         do {
@@ -49,26 +53,34 @@ final class Commands {
                 throw HelperError.bad("arm needs untilMs, holder and session")
             }
             try arming.arm(until: Date(timeIntervalSince1970: ms / 1000), holder: holder, session: session)
-            lastLook = nil
+            setLook(nil)
+            scheduleLapse(session: session)
             return status()
         case "disarm":
-            quit(arming.disarm(session: req["session"] as? String))
-            lastLook = nil
+            endSession(arming.disarm(session: req["session"] as? String))
             return status()
         case "ack_stop":
             arming.acknowledgeStop()
             return status()
         default:
-            return try control(cmd, req, session: try arming.check(req["session"] as? String))
+            let token = req["session"] as? String
+            return try control(cmd, req, token: token ?? "", session: try arming.check(token))
         }
     }
 
-    /// The commands of a session.
-    private func control(_ cmd: String, _ req: [String: Any], session: (target: pid_t?, pausedUntil: Date?)) throws -> [String: Any] {
-        if cmd == "open" { return try open(req) }
+    /// The commands of a session. Only `look` and `close` go on while you use the Mac.
+    private func control(_ cmd: String, _ req: [String: Any], token: String, session: (target: pid_t?, pausedUntil: Date?)) throws -> [String: Any] {
+        if let until = session.pausedUntil, cmd != "look", cmd != "close" { throw HelperError.paused(until) }
+        if cmd == "open" { return try open(req, token: token) }
         guard let target = session.target else { throw HelperError.bad("No app is open yet; open it first (desktop_open)") }
         guard let app = NSRunningApplication(processIdentifier: target), !app.isTerminated else {
             throw HelperError.failed("The app under test has quit; open it again (desktop_open)")
+        }
+        // Run before every event of an action: the session, your pause and the app in front are checked again.
+        let stillOurs: () throws -> Void = { [self] in
+            let now = try arming.check(token)
+            if let until = now.pausedUntil { throw HelperError.paused(until) }
+            try frontmost(target)
         }
         switch cmd {
         case "look": return try look(target, req)
@@ -77,40 +89,39 @@ final class Commands {
             return [:]
         case "focus":
             try focus(app)
-            return settle(target)
-        default: break
-        }
-        // Input: never while you are using the Mac.
-        if let until = session.pausedUntil { throw HelperError.paused(until) }
-        switch cmd {
-        case "click", "scroll":
-            let p = try point(req, required: cmd == "click")
-            if let p { try onTarget(p, target) } else { try frontmost(target) }
-            if cmd == "click" { try Input.click(at: p!, button: req["button"] as? String ?? "left", count: int(req, "count") ?? 1) }
-            else { try Input.scroll(dx: clamp(int(req, "dx") ?? 0), dy: clamp(int(req, "dy") ?? 0), at: p) }
+        case "click":
+            let p = try point(req)!
+            try Input.click(at: p, button: req["button"] as? String ?? "left", count: int(req, "count") ?? 1) { try stillOurs(); try self.onTarget(p, target) }
+        case "scroll":
+            let p = try point(req)
+            try Input.scroll(dx: clamp(int(req, "dx") ?? 0), dy: clamp(int(req, "dy") ?? 0), at: p) { try stillOurs(); if let p { try self.onTarget(p, target) } }
         case "press":
             guard let n = int(req, "element") else { throw HelperError.bad("press needs element") }
             let el = try ui.element(n)
             if let reason = Policy.refusal(pid: UITree.pid(of: el), target: target) { throw HelperError.denied(reason) }
-            if let c = UITree.center(el) { try onTarget(c, target) }
-            _ = try ui.press(n)
+            try stillOurs()
+            if try !ui.pressAX(n) {
+                guard let c = UITree.center(el) else { throw HelperError.failed("Element [\(n)] cannot be pressed and has no position") }
+                try Input.click(at: c, button: "left", count: 1) { try stillOurs(); try self.onTarget(c, target) }
+            }
         case "type":
             guard let text = req["text"] as? String, !text.isEmpty, text.count <= 2000 else { throw HelperError.bad("type needs 1-2000 characters of text") }
-            try frontmost(target)
-            try Input.type(text)
+            try Input.type(text, check: stillOurs)
         case "key":
             guard let combo = req["combo"] as? String else { throw HelperError.bad("key needs combo") }
-            if Policy.deniedCombos.contains(Policy.normalizedCombo(combo)) { throw HelperError.denied("\(combo) is off limits to agents") }
-            try frontmost(target)
-            try Input.key(combo)
+            if let reason = Policy.comboRefusal(combo) { throw HelperError.denied(reason) }
+            try Input.key(combo, check: stillOurs)
         default:
             throw HelperError.bad("Unknown command \"\(cmd)\"")
         }
         return settle(target)
     }
 
-    /// Opens an app swarmd staged for this session (and only from there), as a new instance started by the system.
-    private func open(_ req: [String: Any]) throws -> [String: Any] {
+    /**
+     * Opens an app swarmd staged (and only from there), as a new instance started by the system, so it is not
+     * the helper's child and has none of its permissions. An app that is not in the App Sandbox is closed at once.
+     */
+    private func open(_ req: [String: Any], token: String) throws -> [String: Any] {
         guard let path = req["path"] as? String, path.hasSuffix(".app") else { throw HelperError.bad("open needs the path of a .app") }
         let root = URL(fileURLWithPath: appsDir).resolvingSymlinksInPath().path + "/"
         let url = URL(fileURLWithPath: path).resolvingSymlinksInPath()
@@ -120,20 +131,29 @@ final class Commands {
         config.activates = true
         config.addsToRecentItems = false
         config.promptsUserIfNeeded = false
-        let opened: NSRunningApplication = try blocking {
+        let opened: NSRunningApplication = try blocking(seconds: 60) {
             try await NSWorkspace.shared.openApplication(at: url, configuration: config)
         }
-        let session = req["session"] as? String ?? ""
-        if let previous = try arming.setTarget(opened.processIdentifier, session: session), previous != opened.processIdentifier { quit(previous) }
-        lastLook = nil
+        guard Sandbox.applies(to: opened.processIdentifier) else {
+            opened.forceTerminate()
+            throw HelperError.denied("The app was not running in the App Sandbox, so it was closed")
+        }
+        do {
+            if let previous = try arming.setTarget(opened.processIdentifier, session: token), previous != opened.processIdentifier { quit(previous) }
+        } catch {
+            // The session ended while the app was starting: it does not stay open.
+            opened.forceTerminate()
+            throw error
+        }
+        setLook(nil)
         usleep(1_500_000)
-        return ["pid": Int(opened.processIdentifier), "name": opened.localizedName ?? ""] .merging(settle(opened.processIdentifier)) { a, _ in a }
+        return ["pid": Int(opened.processIdentifier), "name": opened.localizedName ?? ""].merging(settle(opened.processIdentifier)) { a, _ in a }
     }
 
     private func look(_ target: pid_t, _ req: [String: Any]) throws -> [String: Any] {
         let maxWidth = max(320, min(int(req, "maxWidth") ?? 1280, 2560))
         let shot = try Capture.look(pid: target, maxWidth: maxWidth, grid: req["grid"] as? Bool ?? true)
-        lastLook = shot
+        setLook(shot)
         let text: String
         do {
             text = try ui.dump(pid: target, position: { shot.toImage($0) }, maxNodes: int(req, "maxNodes") ?? 300)
@@ -144,24 +164,32 @@ final class Commands {
             .merging(settle(target, wait: false)) { a, _ in a }
     }
 
-    private func point(_ req: [String: Any], required: Bool) throws -> CGPoint? {
+    private func setLook(_ look: Look?) {
+        lookLock.lock(); lastLook = look; lookLock.unlock()
+    }
+
+    private func point(_ req: [String: Any]) throws -> CGPoint? {
         guard let x = req["x"] as? Double, let y = req["y"] as? Double else {
-            if required { throw HelperError.bad("click needs x and y") }
+            if req["cmd"] as? String == "click" { throw HelperError.bad("click needs x and y") }
             return nil
         }
-        guard let look = lastLook else { throw HelperError.bad("Look first (desktop_look): coordinates are in its screenshot") }
+        lookLock.lock()
+        let look = lastLook
+        lookLock.unlock()
+        guard let look else { throw HelperError.bad("Look first (desktop_look): coordinates are in its screenshot") }
         return try look.toGlobal(x: x, y: y)
     }
 
+    /// The point is on the app under test, both by its windows and by what Accessibility finds there: a window
+    /// that lets clicks through to another app is not enough.
     private func onTarget(_ p: CGPoint, _ target: pid_t) throws {
         if let reason = Policy.refusal(pid: Windows.at(p)?.pid, target: target) { throw HelperError.denied(reason) }
+        if let reason = Policy.refusal(pid: Windows.axPid(at: p), target: target) { throw HelperError.denied(reason) }
     }
 
-    /// Typing and keys go to whatever has focus: it must be the app under test.
+    /// Typing and keys go to whatever has focus: it must be the app under test (unknown focus counts as not).
     private func frontmost(_ target: pid_t) throws {
-        let front = NSWorkspace.shared.frontmostApplication?.processIdentifier
-        let focused = Windows.focusedPid()
-        if front != target || (focused != nil && focused != target) {
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == target, Windows.focusedPid() == target else {
             throw HelperError.denied("The app under test is not in front; bring it forward first (desktop_focus)")
         }
     }
@@ -174,6 +202,23 @@ final class Commands {
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier else {
             throw HelperError.failed("macOS did not bring the app forward; try again")
         }
+    }
+
+    /// At the session's end the helper closes the app itself, whether or not swarmd says so.
+    private func scheduleLapse(session: String) {
+        lapse?.cancel()
+        guard let until = arming.state.until else { return }
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.endSession(self.arming.disarm(session: session))
+        }
+        lapse = item
+        DispatchQueue.global().asyncAfter(deadline: .now() + max(0, until.timeIntervalSinceNow) + 0.5, execute: item)
+    }
+
+    private func endSession(_ app: pid_t?) {
+        setLook(nil)
+        quit(app)
     }
 
     private func quit(_ pid: pid_t?) {

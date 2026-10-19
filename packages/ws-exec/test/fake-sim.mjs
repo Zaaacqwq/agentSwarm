@@ -94,10 +94,12 @@ if (tool === "xcrun") {
   const app = join(derived, "Build", "Products", mac ? configuration : `${configuration}-iphonesimulator`, "Demo.app");
   const plistDir = mac ? join(app, "Contents") : app;
   mkdirSync(plistDir, { recursive: true });
-  writeFileSync(join(plistDir, "Info.plist"), `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.example.demo</string></dict></plist>\n`);
+  writeFileSync(join(plistDir, "Info.plist"), `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.example.demo</string><key>CFBundleExecutable</key><string>Demo</string><key>CFBundleURLTypes</key><array/></dict></plist>\n`);
   if (mac) {
+    // Starts like a Mach-O program (swarmd refuses a script as an app's main program).
     mkdirSync(join(app, "Contents", "MacOS"), { recursive: true });
-    writeFileSync(join(app, "Contents", "MacOS", "Demo"), "#!/bin/sh\n");
+    writeFileSync(join(app, "Contents", "MacOS", "Demo"), Buffer.concat([Buffer.from([0xcf, 0xfa, 0xed, 0xfe]), Buffer.alloc(60)]));
+    mkdirSync(join(app, "Contents", "Library", "LoginItems", "Helper.app"), { recursive: true });
   }
   process.stdout.write("** BUILD SUCCEEDED **\n");
 }

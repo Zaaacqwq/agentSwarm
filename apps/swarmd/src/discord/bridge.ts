@@ -354,9 +354,13 @@ export class DiscordBridge {
     // The purpose is the agent's words: shown as code, so it cannot carry links or formatting.
     const purpose = session.purpose.replace(/[`\r\n]+/g, " ").slice(0, 200);
     const where = session.ticketKey ? `**${session.ticketKey}** ` : "";
+    // Names an agent chose (its own, its app's): plain words only, no formatting, links or mentions.
+    const plain = (s: string) => s.replace(/[^\p{L}\p{N} ._()-]+/gu, " ").trim().slice(0, 40) || "an agent";
+    const agent = plain(session.agent);
+    const said = plain(what);
     const content = decide
-      ? `${where}**${session.agent}** asks to use this Mac's desktop for ${session.minutes} minutes, to test \`${purpose}\`. Only the app it builds can be seen and used; it runs in the App Sandbox. ${link}`
-      : `${where}Desktop session (${session.agent}) ${what}. ${link}`;
+      ? `${where}**${agent}** asks to use this Mac's desktop for ${session.minutes} minutes, to test \`${purpose}\`. Only the app it builds can be seen and used; it runs in the App Sandbox. ${link}`
+      : `${where}Desktop session (${agent}) ${said}. ${link}`;
     const buttons = decide
       ? [{ id: `desktop-approve:${session.id}`, label: "Approve", style: "success" as const }, { id: `desktop-deny:${session.id}`, label: "Deny", style: "danger" as const }]
       : session.status === "active" ? [{ id: `desktop-stop:${session.id}`, label: "Stop", style: "danger" as const }] : undefined;

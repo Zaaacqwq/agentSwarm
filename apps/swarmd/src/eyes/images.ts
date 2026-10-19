@@ -1,3 +1,5 @@
+import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
 /** How many screenshots stay in an agent's context; older ones become a line of text (R6 plan, section 6). */
@@ -27,4 +29,16 @@ export function keepRecentImages(messages: readonly AgentMessage[], keep = KEEP_
     out.push({ ...m, content: next } as AgentMessage);
   }
   return out.reverse();
+}
+
+/**
+ * Keeps a screenshot for the dashboard as the run's next NNN.jpg. Numbered from what is on disk, so the
+ * simulator, the browser and the desktop of one run never write the same name.
+ */
+export function saveScreen(dir: string, jpeg: Buffer): string {
+  mkdirSync(dir, { recursive: true });
+  const last = readdirSync(dir).map((f) => /^(\d{3,6})\.jpg$/.exec(f)?.[1]).filter(Boolean).map(Number).reduce((a, b) => Math.max(a, b), 0);
+  const file = `${String(last + 1).padStart(3, "0")}.jpg`;
+  writeFileSync(join(dir, file), jpeg, { flag: "wx" });
+  return file;
 }

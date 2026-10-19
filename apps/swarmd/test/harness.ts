@@ -170,7 +170,11 @@ export async function harness(opts: { limits?: RunLimits; maxConcurrentRuns?: nu
     refreshMirror: false,
     ...(opts.limits ? { limits: opts.limits } : {}),
     web: () => web,
-    desktop: { helper: desktop, appsDir, stageTools: { ...SYSTEM_TOOLS, codesign: async (args) => void signed.push(args) } },
+    desktop: { helper: desktop, appsDir, stageTools: { ...SYSTEM_TOOLS, codesign: async (args) => {
+      if (args[0] === "-d") return "<key>com.apple.security.app-sandbox</key><true/>";
+      signed.push(args);
+      return "";
+    } } },
     transport: discord,
     dashboardUrl: "http://127.0.0.1:4399",
     ...(opts.prPollMs ? { prPollMs: opts.prPollMs } : {}),

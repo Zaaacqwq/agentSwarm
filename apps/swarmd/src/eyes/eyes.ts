@@ -1,5 +1,3 @@
-import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type, type TSchema } from "@earendil-works/pi-ai";
 import type { RunNeed } from "@agentswarm/contracts";
@@ -8,6 +6,7 @@ import type { ImageResult, SimBuildResult, SimDevice, UiElement } from "@agentsw
 import type { WorkstationBackend } from "../workstations/backend.ts";
 import { BrowserSession } from "./browser-session.ts";
 import { formatScreen, numberElements, type Screen } from "./ui-tree.ts";
+import { saveScreen } from "./images.ts";
 
 /** Evidence screenshots one run may save into the worktree (R6 plan, decision 3). */
 export const MAX_EVIDENCE = 20;
@@ -47,15 +46,9 @@ export class Eyes {
   private browser: BrowserSession | null = null;
   private last: "simulator" | "browser" | null = null;
   private evidence = 0;
-  private shots: number;
 
   constructor(deps: EyesDeps) {
     this.deps = deps;
-    try {
-      this.shots = readdirSync(deps.screensDir).length;
-    } catch {
-      this.shots = 0;
-    }
   }
 
   get used(): boolean {
@@ -95,10 +88,7 @@ export class Eyes {
   /** The model gets the image; the dashboard gets a copy under the run's screens. */
   private image(note: string, img: ImageResult): AgentToolResult<Details> {
     if (img.saved) this.evidence += 1;
-    mkdirSync(this.deps.screensDir, { recursive: true });
-    this.shots += 1;
-    const file = `${String(this.shots).padStart(3, "0")}.jpg`;
-    writeFileSync(join(this.deps.screensDir, file), Buffer.from(img.jpeg, "base64"));
+    const file = saveScreen(this.deps.screensDir, Buffer.from(img.jpeg, "base64"));
     const saved = img.saved ? ` Saved as evidence: ${img.saved}.` : "";
     return { content: [{ type: "text", text: `${note}${saved}` }, { type: "image", data: img.jpeg, mimeType: "image/jpeg" }], details: { screen: file } };
   }

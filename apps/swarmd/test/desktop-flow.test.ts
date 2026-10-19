@@ -1,13 +1,14 @@
 import { afterEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, type FauxResponseFactory, type TranscriptContext } from "@earendil-works/pi-ai";
 import type { DesktopView } from "@agentswarm/contracts";
 import { harness, type Harness } from "./harness.ts";
 import { CHANNEL, OWNER, until } from "./fake-discord.ts";
-import { entitlements, linksOutside, testBundleId } from "../src/desktop/stage.ts";
+import { checkListing, entitlements, isMachO, stageApp, SYSTEM_TOOLS, testBundleId } from "../src/desktop/stage.ts";
 import { ACTIONS_PER_LOOK } from "../src/desktop/desktop-service.ts";
 
 type Args = Parameters<typeof fauxToolCall>[1];
@@ -31,22 +32,76 @@ function rootSpawnsQa(h: Harness, qa: (FauxResponseFactory | ReturnType<typeof c
 const desktop = async (h: Harness, cookie: string) => (await h.api("GET", "/api/desktop", undefined, cookie)).body as DesktopView;
 
 describe("the desktop (R9): staging an app", () => {
-  test("apps run as the project's test id, in the App Sandbox, with network only when allowed; no links out", () => {
+  const MACHO = Buffer.concat([Buffer.from([0xcf, 0xfa, 0xed, 0xfe]), Buffer.alloc(60)]);
+  const signed: string[][] = [];
+  const tools = {
+    ...SYSTEM_TOOLS,
+    codesign: async (args: string[]) => {
+      if (args[0] === "-d") return "com.apple.security.app-sandbox";
+      signed.push(args);
+      return "";
+    },
+  };
+  /** A tiny app, changed by `edit`, packed as a workstation would pack it. */
+  function packed(edit: (app: string) => void = () => {}): Buffer {
+    const dir = mkdtempSync(join(tmpdir(), "pack-"));
+    try {
+      const app = join(dir, "Demo.app");
+      mkdirSync(join(app, "Contents", "MacOS"), { recursive: true });
+      writeFileSync(join(app, "Contents", "Info.plist"), '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.apple.Terminal</string><key>CFBundleExecutable</key><string>Demo</string><key>LSEnvironment</key><dict><key>DYLD_INSERT_LIBRARIES</key><string>/tmp/x</string></dict></dict></plist>\n');
+      writeFileSync(join(app, "Contents", "MacOS", "Demo"), MACHO);
+      edit(app);
+      execFileSync("/usr/bin/tar", ["-czf", join(dir, "a.tgz"), "-C", dir, "Demo.app"]);
+      return readFileSync(join(dir, "a.tgz"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+  const stage = async (archive: Buffer, app = "Demo.app") => {
+    const dir = mkdtempSync(join(tmpdir(), "staged-"));
+    try {
+      const path = await stageApp({ archive, dir: join(dir, "run"), app, projectSlug: "notes", network: false, tools });
+      return { plist: execFileSync("/usr/bin/plutil", ["-convert", "xml1", "-o", "-", join(path, "Contents", "Info.plist")], { encoding: "utf8" }), exists: (p: string) => existsSync(join(path, p)) };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  test("apps run as the project's test id, in the App Sandbox, with network only when allowed", async () => {
     assert.equal(testBundleId("fridgy mac/app"), "dev.agentswarm.test.fridgy-mac-app");
     assert.match(entitlements(false), /app-sandbox<\/key><true\/>/);
     assert.doesNotMatch(entitlements(false), /network\.client/);
     assert.match(entitlements(true), /network\.client<\/key><true\/>/);
-    const dir = mkdtempSync(join(tmpdir(), "stage-"));
-    try {
-      const app = join(dir, "Demo.app");
+    const ok = await stage(packed((app) => {
       mkdirSync(join(app, "Contents", "Frameworks", "A.framework", "Versions", "A"), { recursive: true });
       symlinkSync("A", join(app, "Contents", "Frameworks", "A.framework", "Versions", "Current"));
-      assert.deepEqual(linksOutside(app), [], "links inside the bundle are fine");
-      symlinkSync("/Users", join(app, "Contents", "home"));
-      assert.deepEqual(linksOutside(app), ["Contents/home"]);
+      mkdirSync(join(app, "Contents", "Library", "LoginItems", "Helper.app"), { recursive: true });
+    }));
+    assert.match(ok.plist, /dev\.agentswarm\.test\.notes/, "renamed: never the id the agent chose");
+    assert.doesNotMatch(ok.plist, /LSEnvironment/, "keys that change how it starts are removed");
+    assert.ok(!ok.exists("Contents/Library"), "login items and the like are removed");
+    assert.ok(signed.at(-1)!.includes("--deep") && signed.at(-1)!.includes("--entitlements"));
+  });
+
+  test("refused: a script as the main program, other apps inside, links out, an app that is a link, paths with ..", async () => {
+    await assert.rejects(stage(packed((app) => writeFileSync(join(app, "Contents", "MacOS", "Demo"), "#!/bin/sh\ncat ~/.ssh/id_ed25519\n"))), /not a compiled program/);
+    await assert.rejects(stage(packed((app) => mkdirSync(join(app, "Contents", "Resources", "Other.app"), { recursive: true }))), /other apps or extensions/);
+    await assert.rejects(stage(packed((app) => symlinkSync("/Users", join(app, "Contents", "home")))), /links that point outside/);
+    await assert.rejects(stage(packed((app) => symlinkSync("../../..", join(app, "Contents", "up")))), /links that point outside/);
+    // The archive's own app is a link to somewhere else.
+    const dir = mkdtempSync(join(tmpdir(), "pack-"));
+    try {
+      symlinkSync(homedir(), join(dir, "Demo.app"));
+      execFileSync("/usr/bin/tar", ["-czf", join(dir, "a.tgz"), "-C", dir, "Demo.app"]);
+      await assert.rejects(stage(readFileSync(join(dir, "a.tgz"))), /not a folder inside the staging area/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+    assert.throws(() => checkListing("-rw-r--r--  0 a b 4 Oct 19 14:25 Demo.app/../../x", "Demo.app"), /\.\./);
+    assert.throws(() => checkListing("-rw-r--r--  0 a b 4 Oct 19 14:25 Other.app/x", "Demo.app"), /more than the app/);
+    assert.throws(() => checkListing("hrw-r--r--  0 a b 0 Oct 19 14:25 Demo.app/x link to Demo.app/y", "Demo.app"), /not a file, folder or link/);
+    assert.throws(() => checkListing(`-rw-r--r--  0 a b ${600 * 1024 * 1024} Oct 19 14:25 Demo.app/big`, "Demo.app"), /too large/);
+    assert.equal(isMachO(process.execPath), true);
   });
 });
 
