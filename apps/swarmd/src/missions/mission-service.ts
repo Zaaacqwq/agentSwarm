@@ -357,7 +357,9 @@ export class MissionService implements RunHooks {
         this.deliver(m, ctx.comment ? changesBrief(brief, ctx.comment) : stageBrief("planning", brief));
         break;
       case "awaiting_merge":
-        this.post(m.id, "system", "text", `The pull request is ready: ${root.prUrl}\nMerge it on GitHub when you are happy with it (or close it to drop the mission). agentSwarm checks every few minutes.`, "agentswarm");
+        this.post(m.id, "system", "text", m.kind === "change"
+          ? `The pull request is ready: ${root.prUrl}\nLook at the change on its ticket: merge it there, send it back with comments, or retry. (Merging on GitHub works too.)`
+          : `The pull request is ready: ${root.prUrl}\nMerge it on GitHub when you are happy with it (or close it to drop the mission). agentSwarm checks every few minutes.`, "agentswarm");
         break;
       case "retro":
         this.deliver(m, stageBrief("retro", brief, `The person merged the pull request ${ctx.prUrl ?? root.prUrl ?? ""}.\n\n${this.retroFacts(m)}\n`));
