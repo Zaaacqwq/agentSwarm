@@ -27,6 +27,7 @@ import { lessonLines, type LessonService } from "../memory/lessons.ts";
 import { roleOf, type HandbookService } from "../memory/handbooks.ts";
 import { recallTool } from "../memory/tools.ts";
 import { keepRecentImages } from "../eyes/images.ts";
+import { dropBrokenToolCalls } from "./transcript.ts";
 import { projectLines, reviewerPrompt, systemPrompt } from "./prompts.ts";
 import { TERMINAL, TREE_LIMITS, TreeError, type TreeService } from "./tree-service.ts";
 import { treeTools, verdictTool, type TreeToolOps } from "./tree-tools.ts";
@@ -563,7 +564,7 @@ export class RunService {
         messages: (session?.messages ?? []) as AgentMessage[],
       },
       // Only the newest screenshots go to the model (R6).
-      transformContext: async (messages) => keepRecentImages(messages),
+      transformContext: async (messages) => dropBrokenToolCalls(keepRecentImages(messages)),
       streamFn,
       sessionId: runId,
     });
@@ -832,7 +833,7 @@ export class RunService {
 
   private saveSession(runId: string, messages: AgentMessage[], now = Date.now()): void {
     // Screenshots beyond the newest few are not kept: neither the model nor the database needs them.
-    const values = { messages: keepRecentImages(messages) as unknown[], updatedAt: now };
+    const values = { messages: dropBrokenToolCalls(keepRecentImages(messages)) as unknown[], updatedAt: now };
     this.deps.db.insert(schema.agentSessions).values({ runId, ...values }).onConflictDoUpdate({ target: schema.agentSessions.runId, set: values }).run();
   }
 
