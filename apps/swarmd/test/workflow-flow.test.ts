@@ -97,6 +97,9 @@ describe("R10: the three kinds of ticket", () => {
     const done = await ticket(h, t.key, (x) => x.status === "done", "done");
     assert.match(saw[3]!, /merged the pull request/);
     assert.equal(done.stage, "done");
+    // What its lead notices on the way is filed as a change too (the light flow), in the backlog.
+    const follow = h.services.tickets.fileFromAgent(done.missionId!, "Dev", { title: "Other tests fail", description: "Noticed two failing tests.", kind: "bug" });
+    assert.deepEqual([follow.kind, follow.status], ["change", "backlog"]);
   });
 
   test("a change with a plan first; QA's screenshots merge without a review, code does not; a smooth change ends at the merge", async () => {

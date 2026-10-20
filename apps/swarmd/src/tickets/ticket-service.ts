@@ -276,7 +276,8 @@ export class TicketService {
     const sameProject = from.space === "project" && from.projectId;
     return this.create(SYSTEM, {
       space: sameProject ? "project" : "ideas", ...(sameProject ? { projectId: from.projectId! } : {}),
-      title: input.title, description: input.description, kind: sameProject ? input.kind : "research", status: "backlog", priority: 0,
+      // R10: a follow-up of a change is a change (the light flow); older tickets keep the kind the lead chose.
+      title: input.title, description: input.description, kind: sameProject ? (from.kind === "change" ? "change" : input.kind) : "research", status: "backlog", priority: 0,
     }, now, { by: agentName, ticketId: from.id });
   }
 
